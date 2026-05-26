@@ -1,4 +1,4 @@
-# IL Swap
+# Inflexion
 
 > The first trustless market for Uniswap v3 LP impermanent-loss risk transfer.
 
@@ -13,7 +13,7 @@ Built for the **Arbitrum Open House London Buildathon** (25 May → 14 June 2026
 - **Architecture overview:** [`CLAUDE.md`](CLAUDE.md)
 - **Runbook:** [`RUNBOOK.md`](RUNBOOK.md)
 - **App:** _(coming — `apps/web/`)_
-- **Docs:** _(coming — `docs.ilswap.xyz`)_
+- **Docs:** _(coming — `docs.inflexion.xyz`)_
 - **Public API:** _(coming)_
 
 ## Status

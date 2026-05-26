@@ -1,4 +1,4 @@
-# IL Swap — Integration
+# Inflexion — Integration
 
 > _Populated alongside the SDK (Phase 7) and frontend (Phase 10). This file will contain:_
 >

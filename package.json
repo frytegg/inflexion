@@ -1,10 +1,10 @@
 {
-  "name": "il-swap",
+  "name": "inflexion",
   "version": "0.0.0",
   "private": true,
   "description": "Trustless market for Uniswap v3 LP impermanent-loss risk transfer.",
   "license": "MIT",
-  "repository": "https://github.com/frytegg/il-swap",
+  "repository": "https://github.com/frytegg/inflexion",
   "packageManager": "pnpm@10.33.2",
   "engines": {
     "node": ">=20"

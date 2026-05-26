@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Spins up a local Arbitrum Nitro dev node forking Arbitrum One.
-// Clones OffchainLabs/nitro-testnode into ~/.il-swap/nitro on first run.
+// Clones OffchainLabs/nitro-testnode into ~/.inflexion/nitro on first run.
 // Requires Docker running; on Windows requires bash (WSL or Git Bash).
 import { execSync } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-const BASE = join(homedir(), '.il-swap')
+const BASE = join(homedir(), '.inflexion')
 const DIR = join(BASE, 'nitro')
 const REPO = 'https://github.com/OffchainLabs/nitro-testnode.git'
 

@@ -1,4 +1,4 @@
-# IL Swap — Math
+# Inflexion — Math
 
 > _Populated in Phase 2.13. This file will contain:_
 >

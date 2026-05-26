@@ -1,4 +1,4 @@
-# IL Swap Protocol — Hackathon Build Spec v3.3
+# Inflexion Protocol — Hackathon Build Spec v3.3
 
 _The first trustless market for LP impermanent-loss risk transfer._
 
@@ -11,7 +11,7 @@ _Author: Alex. This document is the build spec: it is written to be read by Clau
 
 Uniswap v3 LPs carry a structural short-gamma exposure — **impermanent loss (IL)** — estimated at **>$1B/year** of realized losses across DeFi, with no trustless, non-inflationary way to hedge it.
 
-**IL Swap is a collateralized bilateral derivatives market for LP risk transfer.** An LP pays a fixed upfront **premium** to transfer the _in-range_ impermanent-loss risk of a specific Uniswap v3 position to a **market maker (MM)**, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL — **capped at MaxIL**, the worst case while price stays in the position's range — trustlessly, from the MM's collateral. Precisely: this is an **in-range convexity hedge**, not unbounded "IL insurance" (§3.2 explains why the cap is load-bearing and how we communicate it so it never surprises an LP).
+**Inflexion is a collateralized bilateral derivatives market for LP risk transfer.** An LP pays a fixed upfront **premium** to transfer the _in-range_ impermanent-loss risk of a specific Uniswap v3 position to a **market maker (MM)**, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL — **capped at MaxIL**, the worst case while price stays in the position's range — trustlessly, from the MM's collateral. Precisely: this is an **in-range convexity hedge**, not unbounded "IL insurance" (§3.2 explains why the cap is load-bearing and how we communicate it so it never surprises an LP).
 
 Two things make it novel:
 
@@ -22,7 +22,7 @@ Two things make it novel:
 
 **What this IS:** a **quote-driven dealer market** where MMs continuously price LP convexity and LPs buy certainty in one click.
 
-**Pitch sentence:** _"IL Swap is the first order book of LP convexity — where MaxIL is the capital unit, MMs compete to underwrite, and the resulting flow becomes a structural implied-volatility surface for Uniswap LPs."_
+**Pitch sentence:** _"Inflexion is the first order book of LP convexity — where MaxIL is the capital unit, MMs compete to underwrite, and the resulting flow becomes a structural implied-volatility surface for Uniswap LPs."_
 
 ---
 
@@ -56,12 +56,12 @@ Everything needed for an LP to cover a real Uniswap v3 position and settle trust
 - `OracleManager`: Chainlink + L2 sequencer + Uniswap TWAP deviation guard.
 - `UnderwriterVault`: MM capital pool (deposited / locked / available), yield-on-collateral hook.
 - `ILVault`: ERC-721 custody of LP NFTs, fee claim passthrough.
-- `ILSwapCore`: CREATED → ACTIVE → SETTLED state machine, signed-quote verification, CEI settlement.
+- `InflexionCore`: CREATED → ACTIVE → SETTLED state machine, signed-quote verification, CEI settlement.
 - **Quote relayer** (off-chain): MMs stream signed quotes; engine ranks; serves best quote + signed payload to the frontend.
-- `@ilswap/sdk` (TypeScript): LP methods, MM quoting client, data reads.
+- `@inflexion/sdk` (TypeScript): LP methods, MM quoting client, data reads.
 - The Graph subgraph + public REST API.
 - Frontend: `/protect`, `/dashboard`, `/markets`.
-- `docs.ilswap.xyz`: explainer + integration + API.
+- `docs.inflexion.xyz`: explainer + integration + API.
 - Demo on Arbitrum Sepolia with seeded MM bots.
 
 ### Phase 2 — PARTIAL + Insurance Fund (gated on the quant model)
@@ -195,7 +195,7 @@ MMs run sophisticated models and **stream/cancel quotes continuously** (many upd
 
 ### 4.2 The split
 
-| Off-chain — Matching Engine (relayer)                      | On-chain — Settlement (`ILSwapCore`)                                    |
+| Off-chain — Matching Engine (relayer)                      | On-chain — Settlement (`InflexionCore`)                                 |
 | ---------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Maintains the live quote book per market                   | Verifies the matched quote's **MM EIP-712 signature**                   |
 | MMs stream signed quotes, cancel freely (gasless)          | Checks MM **collateral** in `UnderwriterVault` ≥ MaxIL                  |
@@ -243,7 +243,7 @@ Window budget on Arbitrum: sequencer soft-confirmation is sub-second (~0.25s blo
 #### 4.3.2 Cancellation, replay, and capacity (on-chain authoritative)
 
 - **Selective cancel, never cancel-all (F-#7).** `nonce` is a **Permit2-style bitmap** (a 256-bit word index + bit). An MM cancels _one_ quote by flipping _one_ bit; a single incrementing nonce would invalidate every outstanding quote at once and empty the book during exactly the fast markets where the MM wants to pull only one. Cancels are batchable (flip many bits in one tx).
-- **Replay / double-spend protection (F-#6).** The off-chain engine is advisory; **on-chain is authoritative.** `ILSwapCore` tracks `consumedNotional[quoteId]`; `createSwap` requires `consumedNotional[quoteId] + V0 ≤ maxNotionalV0`, then increments it atomically (Phase 3, before any external call). A signed quote can fill repeatedly _only_ up to its capacity, and never after its bit is cancelled; concurrent submissions cannot over-consume because check-and-increment is one transaction.
+- **Replay / double-spend protection (F-#6).** The off-chain engine is advisory; **on-chain is authoritative.** `InflexionCore` tracks `consumedNotional[quoteId]`; `createSwap` requires `consumedNotional[quoteId] + V0 ≤ maxNotionalV0`, then increments it atomically (Phase 3, before any external call). A signed quote can fill repeatedly _only_ up to its capacity, and never after its bit is cancelled; concurrent submissions cannot over-consume because check-and-increment is one transaction.
 - **Capacity unit (F-#6).** `maxNotionalV0` is denominated in **V0 (position value)**, not collateral. An MM with $50k capital who sets `maxNotionalV0 = $500k` can be filled on up to $500k of _notional_ but only ~$6k of _collateral_ for typical ±10% ranges (collateral = MaxIL ≪ V0). The SDK surfaces both numbers so MMs size capacity knowing it bounds notional, not capital.
 
 #### 4.3.3 Oracle-anchored price band — Fork 2 resolution (Option B)
@@ -576,7 +576,7 @@ A standalone, parallelizable deliverable (`quant/` Python notebook) that **deriv
    - **MM first-loss** stake size;
    - target fund balance vs exposure for ruin probability < target (e.g. <0.1%).
 
-**Outputs feed the build:** a `params.json` consumed by deploy scripts and contract constructors, plus charts (fund P&L distribution, ruin probability vs `c`, drawdown under the 99.9th-percentile correlated crash) for the deck and `docs.ilswap.xyz`.
+**Outputs feed the build:** a `params.json` consumed by deploy scripts and contract constructors, plus charts (fund P&L distribution, ruin probability vs `c`, drawdown under the 99.9th-percentile correlated crash) for the deck and `docs.inflexion.xyz`.
 
 ---
 
@@ -596,13 +596,13 @@ This section exists so the spec is honest about the binding constraint and shows
 - **Yield on collateral** (§7.2) — the single biggest lever; idle collateral earns while locked → lower required premium → more demand. RWA-flavored.
 - **PARTIAL mode** — frees capital directly (at the cost of tail risk the fund reinsures).
 
-**Target the price-inelastic customer.** Yield-chasing retail is the worst customer (elastic). The best are **DAOs / protocol treasuries running protocol-owned liquidity**, who need predictable, reportable P&L and pay for certainty. This reframes IL Swap as **treasury risk management for on-chain institutions** — and is the organic bridge to the program's RWA/institutional theme without chasing hype.
+**Target the price-inelastic customer.** Yield-chasing retail is the worst customer (elastic). The best are **DAOs / protocol treasuries running protocol-owned liquidity**, who need predictable, reportable P&L and pay for certainty. This reframes Inflexion as **treasury risk management for on-chain institutions** — and is the organic bridge to the program's RWA/institutional theme without chasing hype.
 
 **Rebates — essential or dangerous? Both, about different markets.** In a spot/AMM market, rebates are benign. In an _underwriting_ market they subsidize **risk-taking**, not liquidity: a mercenary MM farming rebates sells underpriced insurance and the fund eats the tail. Reconciliation: **incentivize capital _uptime/solvency_, not _volume_** (reward keeping capital deposited and quotes live, not winning bids); if used, **FULL-only** (no tail to subsidize) and **vested**. For the hackathon: implement no rebates, but articulate exactly this — demonstrating we understand why audits disagree.
 
 ---
 
-## 11. MM Hedging & the SDK (`@ilswap/sdk`)
+## 11. MM Hedging & the SDK (`@inflexion/sdk`)
 
 The SDK is demand-side critical: it is how MMs price, stream, and **hedge**, and tighter MM books are what create LP liquidity (§10).
 
@@ -684,7 +684,7 @@ ILMath (Stylus/Rust)   computeMaxIL, computeIL — pure fixed-point math, ~10x c
 OracleManager.sol      Chainlink + sequencer + TWAP deviation; getPrice (entry) / getSettlementPrice
 UnderwriterVault.sol   MM pool (deposited/locked/available); lockCollateral/releaseAndDistribute; IYieldAdapter hook
 ILVault.sol            ERC-721 custody; reads NonfungiblePositionManager; claimFees passthrough
-ILSwapCore.sol         state machine; verifies SignedQuote (EIP-712); CEI settlement; enforces no-bad-debt invariant
+InflexionCore.sol         state machine; verifies SignedQuote (EIP-712); CEI settlement; enforces no-bad-debt invariant
 GreekDisplay.sol       read-only δ/θ/IV + 3 surfaces (zero funds, zero state)
 — Phase 2 —
 InsuranceVault.sol     ERC-4626; coverBadDebt; withdrawal delay; first-loss; healthRatio/circuitBreakerLevel
@@ -699,11 +699,11 @@ Key Arbitrum One addresses: NonfungiblePositionManager `0xC36442b4a4522E871399CD
 Repo (pnpm monorepo)
   packages/contracts   Foundry — Solidity + Stylus; test/ (unit, fork, Invariants.t.sol); script/Deploy.s.sol
   packages/engine      off-chain matching relayer (Node/TS): WS quote intake, ranking, signed-payload API
-  packages/sdk         @ilswap/sdk — LP / MM-quoter / data; examples/{lp-basic, mm-bot, data-consumer}.ts
+  packages/sdk         @inflexion/sdk — LP / MM-quoter / data; examples/{lp-basic, mm-bot, data-consumer}.ts
   packages/subgraph    schema + mappings (Swap, Order, Market, MMStats, ConvexityBand, VaultSnapshot)
   packages/api         public REST (Railway/Fly) over the subgraph
   apps/web             React+Vite, wagmi/viem, RainbowKit, Apollo, shadcn/ui, Recharts
-  apps/docs            docs.ilswap.xyz (see §14.3)
+  apps/docs            docs.inflexion.xyz (see §14.3)
   quant/               Python notebook (§9) → params.json
   docs/                README, INTEGRATION, API, SECURITY, MATH
 ```
@@ -734,7 +734,7 @@ if (vLp >= vHold) assertEq(payout, 0);        // I4 — LP cannot profit
 
 **Design law: progressive disclosure.** The LP sees **one number and one button**; the MM gets a cockpit; the curious get docs. Complexity is opt-in, never forced. This directly serves the program's "product clarity / user focus" judging.
 
-### 14.1 `app.ilswap.xyz` (the product)
+### 14.1 `app.inflexion.xyz` (the product)
 
 ```
 /                Landing. One-line value prop + 3 doors:
@@ -777,7 +777,7 @@ if (vLp >= vHold) assertEq(payout, 0);        // I4 — LP cannot profit
 - Live **MM bot quotes** updating in `/markets` and `/protect` as we move price/vol → proves the quote-driven engine.
 - A **settlement animation**: at expiry, "LP made whole · MM paid residual · NFT returned" with tx links.
 
-### 14.3 `docs.ilswap.xyz` (crucial — five audiences)
+### 14.3 `docs.inflexion.xyz` (crucial — five audiences)
 
 The protocol is sophisticated; docs are how non-finance people _get it_ and how pros automate. Built with a docs framework (Mintlify/Docusaurus), MDX, embedded diagrams.
 
@@ -881,17 +881,17 @@ Sequenced so something demoable exists at every checkpoint. **Gate: do not start
 ### Week 1 (25 May → 1 Jun) — FULL spine, on-chain
 
 - `UnderwriterVault` (pool + IYieldAdapter no-op); `ILVault` (custody + claimFees).
-- `ILSwapCore`: `createSwap` (EIP-712 verify, CEI) + `settle` (FULL/European, `min(IL,MaxIL)`).
+- `InflexionCore`: `createSwap` (EIP-712 verify, CEI) + `settle` (FULL/European, `min(IL,MaxIL)`).
 - `Invariants.t.sol`: payout ≤ collateral; fork test: real Sepolia NFT → create → settle.
 - Deploy Phase-1 to Arbitrum Sepolia.
 
 ### Week 2 (1 Jun → 8 Jun) — off-chain engine, SDK, indexing, first UI
 
 - `packages/engine`: signed-quote intake (WS), price-time/FIFO ranking, `/quote` API.
-- `@ilswap/sdk`: LP methods + MM quoter client + `examples/mm-bot.ts`.
+- `@inflexion/sdk`: LP methods + MM quoter client + `examples/mm-bot.ts`.
 - Subgraph (SwapCreated/Settled, quotes) + REST `/markets`,`/vault/health`,`/swap/:id`.
 - Frontend `/protect` + `/dashboard` working end-to-end via SDK; `GreekDisplay` δ/θ.
-- Begin `docs.ilswap.xyz` (audiences 1–2). **Checkpoint: full FULL/European demo works on Sepolia.**
+- Begin `docs.inflexion.xyz` (audiences 1–2). **Checkpoint: full FULL/European demo works on Sepolia.**
 
 ### Week 3 (8 Jun → 14 Jun) — moat, polish, demo, (stretch) PARTIAL
 

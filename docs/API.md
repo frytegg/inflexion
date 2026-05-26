@@ -1,4 +1,4 @@
-# IL Swap — API Reference
+# Inflexion — API Reference
 
 > _Populated alongside the public REST API (Phase 9). This file will contain:_
 >

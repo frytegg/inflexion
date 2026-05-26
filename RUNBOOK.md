@@ -1,4 +1,4 @@
-# IL Swap — Runbook
+# Inflexion — Runbook
 
 Day-to-day operational reference: environment, env vars, common commands, demo-day playbook.
 
