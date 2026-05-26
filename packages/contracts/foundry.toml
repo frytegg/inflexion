@@ -1,0 +1,37 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.24"
+optimizer = true
+optimizer_runs = 1_000_000
+via_ir = true
+fs_permissions = [{ access = "read", path = "../../deployments" }]
+remappings = [
+  "@openzeppelin/=lib/openzeppelin-contracts/",
+  "@uniswap/v3-core/=lib/v3-core/",
+  "@uniswap/v3-periphery/=lib/v3-periphery/",
+  "@chainlink/=lib/chainlink-brownie-contracts/contracts/src/v0.8/",
+  "forge-std/=lib/forge-std/src/",
+]
+
+[profile.local]
+eth_rpc_url = "${LOCAL_RPC}"
+
+[profile.sepolia]
+eth_rpc_url = "${SEPOLIA_RPC}"
+etherscan_api_key = "${ARBISCAN_API_KEY}"
+
+[etherscan]
+arbitrum_sepolia = { key = "${ARBISCAN_API_KEY}", url = "https://api-sepolia.arbiscan.io/api", chain = 421614 }
+arbitrum_one     = { key = "${ARBISCAN_API_KEY}", url = "https://api.arbiscan.io/api",        chain = 42161 }
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
+int_types = "long"
+multiline_func_header = "params_first"
+quote_style = "double"
+number_underscore = "thousands"
+wrap_comments = true
