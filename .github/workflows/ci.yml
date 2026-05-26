@@ -17,8 +17,7 @@ jobs:
         with:
           submodules: recursive
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+        # version intentionally omitted — read from `packageManager` field in package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 20
