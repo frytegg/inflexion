@@ -21,7 +21,7 @@ Built for the Arbitrum Open House London Buildathon (25 May → 14 June 2026).
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Attack vectors, mitigations, invariants.                                                                                                                 |
 | Memory: `inflexion-audit-findings`     | External audit summary (12 fixes + 2 forks resolved → spec v3.3). Lives in project memory; the original audit files have been cleared after integration. |
 
-Persistent memory lives at `~/.claude/projects/C--dev-il-swap/memory/` (path slug still reflects the original local-dir name; will follow when `C:\dev\il-swap` is renamed in a future session) (hackathon context, locked design decisions, audit findings). Indexed by its own `MEMORY.md`.
+Persistent memory lives at `~/.claude/projects/C--dev-inflexion/memory/` (hackathon context, locked design decisions, audit findings). Indexed by its own `MEMORY.md`.
 
 ## Repo layout
 
