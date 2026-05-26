@@ -1,0 +1,52 @@
+# --- Node / JS ---
+node_modules/
+.pnpm-store/
+dist/
+build/
+coverage/
+lcov.info
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# --- Foundry ---
+out/
+cache/
+broadcast/
+forge-cache/
+
+# --- Stylus / Rust ---
+target/
+**/target/
+Cargo.lock.bak
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.ipynb_checkpoints/
+.python-version
+
+# --- Env / secrets ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- IDE / OS ---
+.idea/
+.vscode/*
+!.vscode/settings.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Claude artifacts ---
+.claude/
+CLAUDE.local.md
+.claude-prompt
