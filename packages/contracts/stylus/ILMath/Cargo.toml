@@ -3,7 +3,7 @@ name = "il-math"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Pure-compute Stylus contract for Uniswap v3 IL / MaxIL math (IL Swap protocol)"
+description = "Pure-compute Stylus contract for Uniswap v3 IL / MaxIL math (Inflexion protocol)"
 
 [lib]
 crate-type = ["lib", "cdylib"]

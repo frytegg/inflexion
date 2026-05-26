@@ -1,4 +1,4 @@
-# IL Swap — Build Roadmap
+# Inflexion — Build Roadmap
 
 > **Living guide from empty repo to hackathon demo.** Update checkboxes as work completes; update the **▶ NEXT** pointer at the end of every session so the next one starts instantly.
 >
@@ -28,7 +28,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 | **▶ NEXT**       | Task **2.1** — `IILMath.sol` interface _(then install rustup + cargo-stylus before 2.2; see RUNBOOK.md)_                                                                     |
 | **Spec version** | v3.3 build-ready                                                                                                                                                             |
 | **Last commit**  | _(pending PR merge of `phase-1-monorepo-scaffold`)_                                                                                                                          |
-| **Repo**         | https://github.com/frytegg/il-swap (private)                                                                                                                                 |
+| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                               |
 | **Quant track**  | not started                                                                                                                                                                  |
 | **Last update**  | 2026-05-26 — Phase 1 complete (forge build + fmt:check green)                                                                                                                |
 | **Blockers**     | rustc / cargo / cargo-stylus required for tasks **2.2 onward** · docker still needed to actually run `pnpm dev:node` (the script is in place; install hints in `RUNBOOK.md`) |
@@ -50,11 +50,11 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 ## Phase 0 — Repo foundation _(Day 1)_
 
 - [x] (2026-05-26) **0.0 — Prerequisites check** — done when all installed and on PATH: `node ≥ 20`, `pnpm ≥ 9`, `rustc ≥ 1.75`, `cargo-stylus`, `foundryup` (latest `forge`/`cast`/`anvil`), `python ≥ 3.12`, `uv` (or poetry), `docker` (for Nitro), `gh` CLI. Record versions in `RUNBOOK.md`.
-- [x] (2026-05-26) **0.1 — `git init`** — `git init -b main` in `C:\dev\il-swap\`. Do not commit anything yet (we'll batch foundation files into the first commit).
+- [x] (2026-05-26) **0.1 — `git init`** — `git init -b main` in `C:\dev\inflexion\`. Do not commit anything yet (we'll batch foundation files into the first commit).
 - [x] (2026-05-26) **0.2 — `.gitignore`** — covers `node_modules/`, `target/`, `out/`, `cache/`, `broadcast/`, `.env*` (except `.env.example`), `coverage/`, `lcov.info`, `*.log`, `.DS_Store`, `.idea/`, `.vscode/` (whitelist `settings.json` if needed), Foundry artifacts, Stylus build artifacts (`stylus/**/target/`), Python `__pycache__/`, `.venv/`, `.ipynb_checkpoints/`, and Claude artifacts.
-- [x] (2026-05-26) **0.3 — `LICENSE`** — MIT, with year 2026 and author "Alex / IL Swap contributors".
+- [x] (2026-05-26) **0.3 — `LICENSE`** — MIT, with year 2026 and author "Alex / Inflexion contributors".
 - [x] (2026-05-26) **0.4 — `CLAUDE.md`** — project-wide guidance for Claude Code (and any teammate reading the repo). Must include:
-  - **What** IL Swap is (1 paragraph, pulling from spec §0).
+  - **What** Inflexion is (1 paragraph, pulling from spec §0).
   - **Authoritative docs**: `spec.md` (latest), `ROADMAP.md` (this file), `MEMORY.md` for project memory.
   - **Build / test / dev** commands per package (filled in as packages land).
   - **Conventions**: TS strict, Solidity 0.8.24 + via_ir, Rust 1.75 + edition 2021, `forge fmt`, `cargo fmt`, prettier.
@@ -68,11 +68,11 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
     7. **Locked collateral never routed to utilization-gated venues** (Aave/Compound), only liquid wrappers.
   - **Workflow**: branch per phase (`phase-N-short-name`); conventional commits, no co-author; never push to `main` directly; never `git push --force`; never bypass hooks.
   - **What NEVER to do**: don't edit `spec.md` to make a test pass (fix the code); don't add new mainnet addresses without a comment + source link; don't fabricate Chainlink heartbeat values (always verify against `data.chain.link`); don't claim "bad debt impossible" without the qualifying clause (capped payoff + solvent USDC + oracle liveness).
-- [x] (2026-05-26) **0.5 — `README.md`** — stub: one-paragraph value prop + pointers to `spec.md`, `ROADMAP.md`, `docs.ilswap.xyz` (once live), `apps/web` URL (once live), and the public API URL.
+- [x] (2026-05-26) **0.5 — `README.md`** — stub: one-paragraph value prop + pointers to `spec.md`, `ROADMAP.md`, `docs.inflexion.xyz` (once live), `apps/web` URL (once live), and the public API URL.
 - [x] (2026-05-26) **0.6 — `RUNBOOK.md`** — sibling to README: environment versions (from 0.0), required env vars, common dev commands, demo-day playbook (to be filled in Phase 12). Empty stub now.
 - [x] (2026-05-26) **0.7 — `.editorconfig`** — 2-space, LF, UTF-8, trim trailing whitespace, final newline.
 - [x] (2026-05-26) **0.8 — Initial commit** — `git add -A`; commit `chore: initial repo foundation (spec v3.3, roadmap, CLAUDE.md)`.
-- [x] (2026-05-26) **0.9 — GitHub remote** — `gh repo create il-swap --private --source . --remote origin --push`.
+- [x] (2026-05-26) **0.9 — GitHub remote** — `gh repo create inflexion --private --source . --remote origin --push`.
 
 ## Phase 1 — Monorepo scaffold _(Day 1–2)_
 
@@ -95,7 +95,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [x] (2026-05-26) **1.4 — Foundry init** — `forge init --no-commit --no-git packages/contracts`. Edit `foundry.toml`: `solc_version = "0.8.24"`, `optimizer = true`, `optimizer_runs = 1_000_000`, `via_ir = true`, `fs_permissions = [{ access = "read", path = "./deployments"}]`. Profiles: `[profile.default]`, `[profile.local]` (`fork_url = "http://localhost:8545"`), `[profile.sepolia]`.
 - [x] (2026-05-26) **1.5 — OZ + Uniswap libs** _(libs are root-level submodules at `--depth 1`; used `chainlink-brownie-contracts` instead of full `chainlink` repo for size)_ — `forge install OpenZeppelin/openzeppelin-contracts Uniswap/v3-core Uniswap/v3-periphery foundry-rs/forge-std smartcontractkit/chainlink`. Remappings in `remappings.txt`.
 - [x] (2026-05-26) **1.6 — Stylus toolchain** _(skeleton written: `Cargo.toml` + `src/lib.rs` + `src/main.rs` with `sol_storage!` + `#[public]`. `cargo install cargo-stylus` and `cargo stylus check` deferred until rust toolchain installed at Phase 2 entry.)_ — `cargo install --force cargo-stylus`. Scaffold `packages/contracts/stylus/ILMath/{Cargo.toml,src/lib.rs}` with the `sol_storage!` + `#[external]` skeleton (no logic yet — `cargo stylus check` must pass).
-- [x] (2026-05-26) **1.7 — Local Nitro dev node** _(`scripts/dev-node.mjs` wired to `pnpm dev:node`; not yet run end-to-end because Docker isn't installed locally — verify on first Docker install)_ — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.il-swap/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
+- [x] (2026-05-26) **1.7 — Local Nitro dev node** _(`scripts/dev-node.mjs` wired to `pnpm dev:node`; not yet run end-to-end because Docker isn't installed locally — verify on first Docker install)_ — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.inflexion/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
 - [x] (2026-05-26) **1.8 — Env management** — `.env.example` at root with placeholders: `ARBITRUM_RPC`, `SEPOLIA_RPC`, `LOCAL_RPC=http://localhost:8545`, `DEPLOYER_PRIVATE_KEY`, `OPERATOR_PRIVATE_KEY` (demo only), `ETHERSCAN_API_KEY`, `THEGRAPH_DEPLOY_KEY`. `dotenv-cli` for TS packages; `--env-file` for Foundry.
 - [x] (2026-05-26) **1.9 — Formatter + linter** _(prettier + ESLint flat-config + `forge fmt` + `cargo fmt` (soft-skips when cargo missing). `pnpm fmt` / `pnpm fmt:check` both green.)_ — Prettier (+`prettier-plugin-solidity`), ESLint (typescript-eslint), `forge fmt`, `cargo fmt`. Single root script `pnpm fmt` runs all three. Add a `lint-staged` config (or skip if time-pressed).
 - [x] (2026-05-26) **1.10 — CI scaffold** _(landed early — fmt-check + forge build/test jobs)_ — `.github/workflows/ci.yml`: `pnpm fmt --check`, `forge test`, `cargo stylus check`, `pnpm -r build`. _(Non-blocking — can land after Phase 5.)_
@@ -142,7 +142,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **4.6 — `ILVault` tests** — fee-claim passthrough; reject non-PositionManager NFTs; verify the contract never calls `decreaseLiquidity` on custodied NFTs; **F-#2 fuzz**: third-party `increaseLiquidity` between create and `returnNFT` does not break custody invariants.
 - [ ] **4.7 — Commit milestone** — `feat(contracts): UnderwriterVault + ILVault + IYieldAdapter (no-op)`.
 
-## Phase 5 — `ILSwapCore.sol` _(Day 6–7) — the heaviest contract phase_
+## Phase 5 — `InflexionCore.sol` _(Day 6–7) — the heaviest contract phase_
 
 - [ ] **5.1 — EIP-712 typed-data setup** — domain separator; `SignedQuote` type-hash; `_hashTypedDataV4`; verify via OZ `ECDSA.recover`.
 - [ ] **5.2 — Bitmap nonce (Permit2-style)** — `mapping(address mm => mapping(uint256 word => uint256 bits)) nonces`; `useNonce/isNonceUsed`. Documented in [`docs/SECURITY.md`](docs/SECURITY.md).
@@ -175,7 +175,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **5.12 — Gas pass** — `forge snapshot`; identify top 3 hotspots; one round of optimization (storage packing, custom errors, inline assembly only where measured).
 - [ ] **5.13 — Slither + manual review** — `slither packages/contracts`; triage; document accepted findings in `docs/SECURITY.md` checklist.
 - [ ] **5.14 — Deploy Phase-1 to Arbitrum Sepolia** — `forge script script/Deploy.s.sol --rpc-url sepolia --broadcast --verify`. Record all addresses in `deployments/sepolia.json`. Update `apps/web` and `packages/sdk` to read from this file.
-- [ ] **5.15 — Commit milestone** — `feat(core): ILSwapCore complete; FULL/European end-to-end on Sepolia; all 9 invariants green`.
+- [ ] **5.15 — Commit milestone** — `feat(core): InflexionCore complete; FULL/European end-to-end on Sepolia; all 9 invariants green`.
 
 ## Phase 6 — Off-chain matching engine _(Day 8–9)_
 
@@ -183,14 +183,14 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **6.2 — Shared EIP-712 helpers** — `signQuote`, `verifyQuote` exported from a shared package consumed by engine + SDK + tests.
 - [ ] **6.3 — WS quote intake (`/ws/quotes`)** — MMs connect; engine validates signature, validity, that signer has collateral in UnderwriterVault (RPC call); stores by `marketId`.
 - [ ] **6.4 — Best-per-band index** — for each `(market × ratio band)` track the live best (lowest `rate × candidate-MaxIL`) quote.
-- [ ] **6.5 — `/quote?tokenId&duration`** — read position params via RPC, compute MaxIL via `@ilswap/sdk` (which calls Stylus), filter live quotes by band + capacity + validity + price-band-feasibility, return best signed payload + computed premium.
+- [ ] **6.5 — `/quote?tokenId&duration`** — read position params via RPC, compute MaxIL via `@inflexion/sdk` (which calls Stylus), filter live quotes by band + capacity + validity + price-band-feasibility, return best signed payload + computed premium.
 - [ ] **6.6 — Quote drop policy** — drop quotes not refreshed within ~1.5s; emit `QuoteDropped` event over the public log.
 - [ ] **6.7 — Append-only quote log** — per spec §4.5 (F-#13): all received quotes + match decisions to a rotating file (or S3). Public read endpoint `/log/stream`.
 - [ ] **6.8 — Example MM bot** — `packages/engine/examples/mm-bot.ts`: configurable strategy that streams quotes (rate + band + priceBand + capacity), responds to mock-vol events, prints fills. Used for demo seeding.
 - [ ] **6.9 — Engine integration test** — spin up engine + 2 MM bots locally; fetch best quote; submit on-chain (against Nitro fork); verify fill. Then cancel one MM's bit; verify next-best is served. Then move mock oracle past band; verify createSwap reverts with `price out of band`.
 - [ ] **6.10 — Commit milestone** — `feat(engine): off-chain matching relayer + signed-quote API + example MM bot`.
 
-## Phase 7 — `@ilswap/sdk` _(Day 9–10)_
+## Phase 7 — `@inflexion/sdk` _(Day 9–10)_
 
 - [ ] **7.1 — Package skeleton** — viem-based; tree-shakable; ESM + CJS dual export.
 - [ ] **7.2 — Contract bindings** — auto-generated from ABIs (`forge build` → `abis/`); wagmi-generate or hand-rolled.
@@ -202,12 +202,12 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **7.8 — Data surface** — `getConvexityPremiumIndex(market, band)`, `getRiskAppetiteIndex(market)`, `getConvexityDepth(market)`.
 - [ ] **7.9 — Examples** — `examples/lp-basic.ts` (10-line LP flow), `examples/mm-bot.ts` (10-line MM streamer), `examples/data-consumer.ts` (5-line surface fetch).
 - [ ] **7.10 — Publish (or local pack)** — for the hack, `pnpm pack` an artifact + post on GitHub release; full npm publish optional.
-- [ ] **7.11 — Commit milestone** — `feat(sdk): @ilswap/sdk LP / MM / data surfaces + examples`.
+- [ ] **7.11 — Commit milestone** — `feat(sdk): @inflexion/sdk LP / MM / data surfaces + examples`.
 
 ## Phase 8 — Subgraph _(Day 10–11)_
 
 - [ ] **8.1 — `schema.graphql`** — entities per spec §11.5.
-- [ ] **8.2 — `subgraph.yaml`** — data sources for `ILSwapCore` + `UnderwriterVault` on Arbitrum Sepolia.
+- [ ] **8.2 — `subgraph.yaml`** — data sources for `InflexionCore` + `UnderwriterVault` on Arbitrum Sepolia.
 - [ ] **8.3 — Mapping handlers (AssemblyScript)** — `handleSwapCreated`, `handleSwapSettled`, `handleCapitalLow`, `handleNoncesCancelled`, etc.
 - [ ] **8.4 — Surface back-computations** — convexity-premium index per `(market × band)`; risk-appetite signals; convexity-supply depth.
 - [ ] **8.5 — Deploy to Graph Studio** — Sepolia subgraph; record endpoint URL in `deployments/sepolia.json` and `apps/web` env.
@@ -247,7 +247,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **10.10 — Mobile-acceptable layout** — judges sometimes review on phone.
 - [ ] **10.11 — Commit milestone** — `feat(web): /protect /dashboard /underwrite /markets live and end-to-end`.
 
-## Phase 11 — `docs.ilswap.xyz` _(Day 14–16, parallel with frontend)_
+## Phase 11 — `docs.inflexion.xyz` _(Day 14–16, parallel with frontend)_
 
 - [ ] **11.1 — Bootstrap** — Mintlify (preferred for the polish + interactive components) or Docusaurus in `apps/docs`.
 - [ ] **11.2 — Audience 1 — zero-knowledge LP** — "What is impermanent loss?" with an **interactive price slider** that draws hold-vs-LP curves and the IL gap; analogy ("like insurance for your LP"); glossary; FAQ. No math.
@@ -255,8 +255,8 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **11.4 — Audience 3 — MM guide** — running a quoting bot; the SDK quoter + hedging helpers; "uptime, not volume" principle; rate / ratio band / **priceBand** sizing.
 - [ ] **11.5 — Audience 4 — Data / API** — REST + GraphQL + SDK reference; the 3 surfaces; contamination caveats; curl + TS examples.
 - [ ] **11.6 — Audience 5 — Protocol / security** — math (from `docs/MATH.md`), no-bad-debt proof, cap reasoning, trust model (spec §4.5), Fork-1 + Fork-2 designs, quant model (Phase 14 outputs), all 9 invariants, attack vectors + mitigations.
-- [ ] **11.7 — Deploy** — Vercel / Cloudflare Pages; custom domain `docs.ilswap.xyz` if owned, else subdomain.
-- [ ] **11.8 — Commit milestone** — `docs: docs.ilswap.xyz live with 5-audience structure`.
+- [ ] **11.7 — Deploy** — Vercel / Cloudflare Pages; custom domain `docs.inflexion.xyz` if owned, else subdomain.
+- [ ] **11.8 — Commit milestone** — `docs: docs.inflexion.xyz live with 5-audience structure`.
 
 ## Phase 12 — Demo deployment + testnet setup _(Day 17–18)_
 
@@ -276,7 +276,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **13.3 — 3-minute demo script** — choreography per spec §15.2; rehearse twice end-to-end.
 - [ ] **13.4 — Tough Q&A prep** — spec §16.6 Q&A; index-card answer to each.
 - [ ] **13.5 — HackQuest submission** — project page, video link, repo link, deck, addresses, API URL, docs URL.
-- [ ] **13.6 — Commit milestone (final)** — `release: v0.1.0 — IL Swap hackathon submission`.
+- [ ] **13.6 — Commit milestone (final)** — `release: v0.1.0 — Inflexion hackathon submission`.
 
 ---
 
@@ -345,7 +345,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - ✅ Frontend `/protect → /dashboard → settle` runs in <2 min on stage
 - ✅ MM bots stream live quotes; LP gets best quote instantly
 - ✅ `/markets` shows 3 surfaces with real data
-- ✅ `docs.ilswap.xyz` audiences 1–5 deployed
+- ✅ `docs.inflexion.xyz` audiences 1–5 deployed
 - ✅ Recorded fallback video uploaded
 - ✅ Deck rehearsed twice
 - ✅ HackQuest submission complete

@@ -4,7 +4,7 @@ Project-wide guidance for Claude Code (and any teammate). Read this first.
 
 ## What this project is
 
-**IL Swap** is a collateralized bilateral derivatives market on Arbitrum One that lets Uniswap v3 LPs pay a fixed upfront premium to transfer the _in-range_ impermanent-loss risk of a specific position to a market maker, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL — **capped at MaxIL** — trustlessly, from the MM's collateral. In FULL mode the protocol cannot produce bad debt under its stated assumptions: capped payoff, solvent collateral asset, oracle liveness.
+**Inflexion** is a collateralized bilateral derivatives market on Arbitrum One that lets Uniswap v3 LPs pay a fixed upfront premium to transfer the _in-range_ impermanent-loss risk of a specific position to a market maker, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL — **capped at MaxIL** — trustlessly, from the MM's collateral. In FULL mode the protocol cannot produce bad debt under its stated assumptions: capped payoff, solvent collateral asset, oracle liveness.
 
 This is an **in-range convexity hedge**, not "IL insurance" — the cap is load-bearing for the no-bad-debt guarantee.
 
@@ -19,9 +19,9 @@ Built for the Arbitrum Open House London Buildathon (25 May → 14 June 2026).
 | [`RUNBOOK.md`](RUNBOOK.md)             | Environment versions, env vars, common commands, demo-day playbook.                                                                                      |
 | [`docs/MATH.md`](docs/MATH.md)         | IL formula derivation, convexity proof, reference magnitudes.                                                                                            |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Attack vectors, mitigations, invariants.                                                                                                                 |
-| Memory: `il-swap-audit-findings`       | External audit summary (12 fixes + 2 forks resolved → spec v3.3). Lives in project memory; the original audit files have been cleared after integration. |
+| Memory: `inflexion-audit-findings`     | External audit summary (12 fixes + 2 forks resolved → spec v3.3). Lives in project memory; the original audit files have been cleared after integration. |
 
-Persistent memory lives at `~/.claude/projects/C--dev-il-swap/memory/` (hackathon context, locked design decisions, audit findings). Indexed by its own `MEMORY.md`.
+Persistent memory lives at `~/.claude/projects/C--dev-inflexion/memory/` (hackathon context, locked design decisions, audit findings). Indexed by its own `MEMORY.md`.
 
 ## Repo layout
 
@@ -29,11 +29,11 @@ Persistent memory lives at `~/.claude/projects/C--dev-il-swap/memory/` (hackatho
 packages/contracts/         Foundry + Stylus — all on-chain code
   stylus/ILMath/            Rust Stylus contract (core IL math)
 packages/engine/            Off-chain matching relayer (Node/TS)
-packages/sdk/               @ilswap/sdk — LP / MM / data surfaces
+packages/sdk/               @inflexion/sdk — LP / MM / data surfaces
 packages/subgraph/          The Graph subgraph
 packages/api/               Public REST API (Railway/Fly)
 apps/web/                   React + Vite frontend
-apps/docs/                  docs.ilswap.xyz (Mintlify)
+apps/docs/                  docs.inflexion.xyz (Mintlify)
 quant/                      Python notebook → params.json (gates PARTIAL)
 docs/                       Root-level: MATH, SECURITY, INTEGRATION, API
 scripts/                    Cross-platform helpers (.sh + .ps1)
