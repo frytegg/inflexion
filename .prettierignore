@@ -1,0 +1,17 @@
+node_modules
+dist
+build
+coverage
+out
+cache
+broadcast
+target
+**/target
+.venv
+.ipynb_checkpoints
+pnpm-lock.yaml
+packages/contracts/lib
+packages/contracts/cache
+packages/contracts/out
+packages/contracts/broadcast
+**/*.sol

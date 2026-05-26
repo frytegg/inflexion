@@ -1,0 +1,35 @@
+{
+  "name": "il-swap",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Trustless market for Uniswap v3 LP impermanent-loss risk transfer.",
+  "license": "MIT",
+  "repository": "https://github.com/frytegg/il-swap",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r --parallel build && node scripts/forge-cmd.mjs build",
+    "test": "node scripts/forge-cmd.mjs test && pnpm -r --parallel test",
+    "lint": "eslint .",
+    "fmt": "pnpm fmt:ts && pnpm fmt:sol && pnpm fmt:rust",
+    "fmt:check": "pnpm fmt:ts:check && pnpm fmt:sol:check && pnpm fmt:rust:check",
+    "fmt:ts": "prettier --write .",
+    "fmt:ts:check": "prettier --check .",
+    "fmt:sol": "node scripts/forge-cmd.mjs fmt",
+    "fmt:sol:check": "node scripts/forge-cmd.mjs fmt --check",
+    "fmt:rust": "node scripts/fmt-rust.mjs",
+    "fmt:rust:check": "node scripts/fmt-rust.mjs --check",
+    "clean": "pnpm -r --parallel clean",
+    "dev:node": "node scripts/dev-node.mjs",
+    "demo:reseed": "echo demo:reseed not implemented yet (Phase 12)"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.14.0",
+    "eslint": "^9.14.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.13.0"
+  }
+}

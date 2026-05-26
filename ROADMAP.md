@@ -8,30 +8,30 @@
 
 ## Calendar
 
-| | |
-|---|---|
-| **Hackathon** | Arbitrum Open House London — Online Buildathon |
-| **Window** | 25 May 2026 → **14 June 2026** (submission deadline) |
-| **Today** | 26 May 2026 — Day 2 |
-| **Days left** | 19 |
-| **After** | In-person Founder House (separate scope) |
+|               |                                                      |
+| ------------- | ---------------------------------------------------- |
+| **Hackathon** | Arbitrum Open House London — Online Buildathon       |
+| **Window**    | 25 May 2026 → **14 June 2026** (submission deadline) |
+| **Today**     | 26 May 2026 — Day 2                                  |
+| **Days left** | 19                                                   |
+| **After**     | In-person Founder House (separate scope)             |
 
 The original spec §17 timeline assumed pre-buildathon prep was already done; it wasn't. So **Phase 0 + Phase 1 compress into Days 1–2** of the actual window, and every subsequent phase rolls forward by ~2 days. The roadmap below uses Day numbers; the calendar maps `Day N → 25 May + N − 1`.
 
 ---
 
-## Current state  *(update every session — this is the resume point)*
+## Current state _(update every session — this is the resume point)_
 
-| | |
-|---|---|
-| **Phase** | 1 — Monorepo scaffold |
-| **▶ NEXT** | Task **1.1** — pnpm workspace |
-| **Spec version** | v3.3 build-ready |
-| **Last commit** | `26d1ea2` chore: initial repo foundation |
-| **Repo** | https://github.com/frytegg/il-swap (private) |
-| **Quant track** | not started |
-| **Last update** | 2026-05-26 — Phase 0 complete |
-| **Blockers** | rustc / cargo / cargo-stylus needed by **Phase 2** · docker needed by **1.7** (install hints in `RUNBOOK.md`) |
+|                  |                                                                                                               |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Phase**        | 2 — ILMath (Stylus / Rust)                                                                                                                                                  |
+| **▶ NEXT**       | Task **2.1** — `IILMath.sol` interface *(then install rustup + cargo-stylus before 2.2; see RUNBOOK.md)*                                                                     |
+| **Spec version** | v3.3 build-ready                                                                                                                                                            |
+| **Last commit**  | *(pending PR merge of `phase-1-monorepo-scaffold`)*                                                                                                                          |
+| **Repo**         | https://github.com/frytegg/il-swap (private)                                                                                                                                |
+| **Quant track**  | not started                                                                                                                                                                 |
+| **Last update**  | 2026-05-26 — Phase 1 complete (forge build + fmt:check green)                                                                                                               |
+| **Blockers**     | rustc / cargo / cargo-stylus required for tasks **2.2 onward** · docker still needed to actually run `pnpm dev:node` (the script is in place; install hints in `RUNBOOK.md`) |
 
 ---
 
@@ -47,61 +47,61 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ---
 
-## Phase 0 — Repo foundation  *(Day 1)*
+## Phase 0 — Repo foundation _(Day 1)_
 
 - [x] (2026-05-26) **0.0 — Prerequisites check** — done when all installed and on PATH: `node ≥ 20`, `pnpm ≥ 9`, `rustc ≥ 1.75`, `cargo-stylus`, `foundryup` (latest `forge`/`cast`/`anvil`), `python ≥ 3.12`, `uv` (or poetry), `docker` (for Nitro), `gh` CLI. Record versions in `RUNBOOK.md`.
 - [x] (2026-05-26) **0.1 — `git init`** — `git init -b main` in `C:\dev\il-swap\`. Do not commit anything yet (we'll batch foundation files into the first commit).
 - [x] (2026-05-26) **0.2 — `.gitignore`** — covers `node_modules/`, `target/`, `out/`, `cache/`, `broadcast/`, `.env*` (except `.env.example`), `coverage/`, `lcov.info`, `*.log`, `.DS_Store`, `.idea/`, `.vscode/` (whitelist `settings.json` if needed), Foundry artifacts, Stylus build artifacts (`stylus/**/target/`), Python `__pycache__/`, `.venv/`, `.ipynb_checkpoints/`, and Claude artifacts.
 - [x] (2026-05-26) **0.3 — `LICENSE`** — MIT, with year 2026 and author "Alex / IL Swap contributors".
 - [x] (2026-05-26) **0.4 — `CLAUDE.md`** — project-wide guidance for Claude Code (and any teammate reading the repo). Must include:
-    - **What** IL Swap is (1 paragraph, pulling from spec §0).
-    - **Authoritative docs**: `spec.md` (latest), `ROADMAP.md` (this file), `MEMORY.md` for project memory.
-    - **Build / test / dev** commands per package (filled in as packages land).
-    - **Conventions**: TS strict, Solidity 0.8.24 + via_ir, Rust 1.75 + edition 2021, `forge fmt`, `cargo fmt`, prettier.
-    - **Critical invariants — never break** (paraphrased from spec §13):
-        1. `payout ≤ collateral` (FULL no-bad-debt).
-        2. `payout = min(realized_IL, MaxIL)`.
-        3. Settlement uses the `L` **stored at creation**, never re-read.
-        4. `Pa ≤ P0 ≤ Pb` enforced at creation.
-        5. Quote auto-voids if `|P_live − quotePrice| > priceBandBps`.
-        6. **No PARTIAL constant is hardcoded** — all read from `quant/params.json`.
-        7. **Locked collateral never routed to utilization-gated venues** (Aave/Compound), only liquid wrappers.
-    - **Workflow**: branch per phase (`phase-N-short-name`); conventional commits, no co-author; never push to `main` directly; never `git push --force`; never bypass hooks.
-    - **What NEVER to do**: don't edit `spec.md` to make a test pass (fix the code); don't add new mainnet addresses without a comment + source link; don't fabricate Chainlink heartbeat values (always verify against `data.chain.link`); don't claim "bad debt impossible" without the qualifying clause (capped payoff + solvent USDC + oracle liveness).
+  - **What** IL Swap is (1 paragraph, pulling from spec §0).
+  - **Authoritative docs**: `spec.md` (latest), `ROADMAP.md` (this file), `MEMORY.md` for project memory.
+  - **Build / test / dev** commands per package (filled in as packages land).
+  - **Conventions**: TS strict, Solidity 0.8.24 + via_ir, Rust 1.75 + edition 2021, `forge fmt`, `cargo fmt`, prettier.
+  - **Critical invariants — never break** (paraphrased from spec §13):
+    1. `payout ≤ collateral` (FULL no-bad-debt).
+    2. `payout = min(realized_IL, MaxIL)`.
+    3. Settlement uses the `L` **stored at creation**, never re-read.
+    4. `Pa ≤ P0 ≤ Pb` enforced at creation.
+    5. Quote auto-voids if `|P_live − quotePrice| > priceBandBps`.
+    6. **No PARTIAL constant is hardcoded** — all read from `quant/params.json`.
+    7. **Locked collateral never routed to utilization-gated venues** (Aave/Compound), only liquid wrappers.
+  - **Workflow**: branch per phase (`phase-N-short-name`); conventional commits, no co-author; never push to `main` directly; never `git push --force`; never bypass hooks.
+  - **What NEVER to do**: don't edit `spec.md` to make a test pass (fix the code); don't add new mainnet addresses without a comment + source link; don't fabricate Chainlink heartbeat values (always verify against `data.chain.link`); don't claim "bad debt impossible" without the qualifying clause (capped payoff + solvent USDC + oracle liveness).
 - [x] (2026-05-26) **0.5 — `README.md`** — stub: one-paragraph value prop + pointers to `spec.md`, `ROADMAP.md`, `docs.ilswap.xyz` (once live), `apps/web` URL (once live), and the public API URL.
 - [x] (2026-05-26) **0.6 — `RUNBOOK.md`** — sibling to README: environment versions (from 0.0), required env vars, common dev commands, demo-day playbook (to be filled in Phase 12). Empty stub now.
 - [x] (2026-05-26) **0.7 — `.editorconfig`** — 2-space, LF, UTF-8, trim trailing whitespace, final newline.
 - [x] (2026-05-26) **0.8 — Initial commit** — `git add -A`; commit `chore: initial repo foundation (spec v3.3, roadmap, CLAUDE.md)`.
 - [x] (2026-05-26) **0.9 — GitHub remote** — `gh repo create il-swap --private --source . --remote origin --push`.
 
-## Phase 1 — Monorepo scaffold  *(Day 1–2)*
+## Phase 1 — Monorepo scaffold _(Day 1–2)_
 
-- [ ] **1.1 — pnpm workspace** — `pnpm-workspace.yaml` listing `packages/*`, `apps/*`. Root `package.json` with scripts: `build`, `test`, `lint`, `fmt`, `clean`, `dev:node`, `demo:reseed`.
-- [ ] **1.2 — Root TS config** — `tsconfig.base.json` (strict, ES2022, NodeNext, no implicit any, no unchecked indexed access). Per-package `tsconfig.json` extends base.
-- [ ] **1.3 — Repo layout** — create directories (empty `.gitkeep` where needed):
-    ```
-    packages/contracts/{src,test,script,lib,stylus/ILMath/src}
-    packages/engine/src
-    packages/sdk/{src,examples}
-    packages/subgraph/{src,abis}
-    packages/api/src
-    apps/web/src
-    apps/docs
-    quant/notebooks
-    docs/                           (root-level: MATH, SECURITY, INTEGRATION, API stubs)
-    scripts/                        (cross-platform: .ps1 + .sh)
-    deployments/                    (sepolia.json etc.)
-    ```
-- [ ] **1.4 — Foundry init** — `forge init --no-commit --no-git packages/contracts`. Edit `foundry.toml`: `solc_version = "0.8.24"`, `optimizer = true`, `optimizer_runs = 1_000_000`, `via_ir = true`, `fs_permissions = [{ access = "read", path = "./deployments"}]`. Profiles: `[profile.default]`, `[profile.local]` (`fork_url = "http://localhost:8545"`), `[profile.sepolia]`.
-- [ ] **1.5 — OZ + Uniswap libs** — `forge install OpenZeppelin/openzeppelin-contracts Uniswap/v3-core Uniswap/v3-periphery foundry-rs/forge-std smartcontractkit/chainlink`. Remappings in `remappings.txt`.
-- [ ] **1.6 — Stylus toolchain** — `cargo install --force cargo-stylus`. Scaffold `packages/contracts/stylus/ILMath/{Cargo.toml,src/lib.rs}` with the `sol_storage!` + `#[external]` skeleton (no logic yet — `cargo stylus check` must pass).
-- [ ] **1.7 — Local Nitro dev node** — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.il-swap/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
-- [ ] **1.8 — Env management** — `.env.example` at root with placeholders: `ARBITRUM_RPC`, `SEPOLIA_RPC`, `LOCAL_RPC=http://localhost:8545`, `DEPLOYER_PRIVATE_KEY`, `OPERATOR_PRIVATE_KEY` (demo only), `ETHERSCAN_API_KEY`, `THEGRAPH_DEPLOY_KEY`. `dotenv-cli` for TS packages; `--env-file` for Foundry.
-- [ ] **1.9 — Formatter + linter** — Prettier (+`prettier-plugin-solidity`), ESLint (typescript-eslint), `forge fmt`, `cargo fmt`. Single root script `pnpm fmt` runs all three. Add a `lint-staged` config (or skip if time-pressed).
-- [ ] **1.10 — CI scaffold** — `.github/workflows/ci.yml`: `pnpm fmt --check`, `forge test`, `cargo stylus check`, `pnpm -r build`. *(Non-blocking — can land after Phase 5.)*
-- [ ] **1.11 — Commit milestone** — `chore(scaffold): pnpm monorepo + foundry + stylus + nitro dev-node green`.
+- [x] (2026-05-26) **1.1 — pnpm workspace** — `pnpm-workspace.yaml` listing `packages/*`, `apps/*`. Root `package.json` with scripts: `build`, `test`, `lint`, `fmt`, `clean`, `dev:node`, `demo:reseed`.
+- [x] (2026-05-26) **1.2 — Root TS config** — `tsconfig.base.json` (strict, ES2022, NodeNext, no implicit any, no unchecked indexed access). Per-package `tsconfig.json` extends base.
+- [x] (2026-05-26) **1.3 — Repo layout** — create directories (empty `.gitkeep` where needed):
+  ```
+  packages/contracts/{src,test,script,lib,stylus/ILMath/src}
+  packages/engine/src
+  packages/sdk/{src,examples}
+  packages/subgraph/{src,abis}
+  packages/api/src
+  apps/web/src
+  apps/docs
+  quant/notebooks
+  docs/                           (root-level: MATH, SECURITY, INTEGRATION, API stubs)
+  scripts/                        (cross-platform: .ps1 + .sh)
+  deployments/                    (sepolia.json etc.)
+  ```
+- [x] (2026-05-26) **1.4 — Foundry init** — `forge init --no-commit --no-git packages/contracts`. Edit `foundry.toml`: `solc_version = "0.8.24"`, `optimizer = true`, `optimizer_runs = 1_000_000`, `via_ir = true`, `fs_permissions = [{ access = "read", path = "./deployments"}]`. Profiles: `[profile.default]`, `[profile.local]` (`fork_url = "http://localhost:8545"`), `[profile.sepolia]`.
+- [x] (2026-05-26) **1.5 — OZ + Uniswap libs** *(libs are root-level submodules at `--depth 1`; used `chainlink-brownie-contracts` instead of full `chainlink` repo for size)* — `forge install OpenZeppelin/openzeppelin-contracts Uniswap/v3-core Uniswap/v3-periphery foundry-rs/forge-std smartcontractkit/chainlink`. Remappings in `remappings.txt`.
+- [x] (2026-05-26) **1.6 — Stylus toolchain** *(skeleton written: `Cargo.toml` + `src/lib.rs` + `src/main.rs` with `sol_storage!` + `#[public]`. `cargo install cargo-stylus` and `cargo stylus check` deferred until rust toolchain installed at Phase 2 entry.)* — `cargo install --force cargo-stylus`. Scaffold `packages/contracts/stylus/ILMath/{Cargo.toml,src/lib.rs}` with the `sol_storage!` + `#[external]` skeleton (no logic yet — `cargo stylus check` must pass).
+- [x] (2026-05-26) **1.7 — Local Nitro dev node** *(`scripts/dev-node.mjs` wired to `pnpm dev:node`; not yet run end-to-end because Docker isn't installed locally — verify on first Docker install)* — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.il-swap/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
+- [x] (2026-05-26) **1.8 — Env management** — `.env.example` at root with placeholders: `ARBITRUM_RPC`, `SEPOLIA_RPC`, `LOCAL_RPC=http://localhost:8545`, `DEPLOYER_PRIVATE_KEY`, `OPERATOR_PRIVATE_KEY` (demo only), `ETHERSCAN_API_KEY`, `THEGRAPH_DEPLOY_KEY`. `dotenv-cli` for TS packages; `--env-file` for Foundry.
+- [x] (2026-05-26) **1.9 — Formatter + linter** *(prettier + ESLint flat-config + `forge fmt` + `cargo fmt` (soft-skips when cargo missing). `pnpm fmt` / `pnpm fmt:check` both green.)* — Prettier (+`prettier-plugin-solidity`), ESLint (typescript-eslint), `forge fmt`, `cargo fmt`. Single root script `pnpm fmt` runs all three. Add a `lint-staged` config (or skip if time-pressed).
+- [x] (2026-05-26) **1.10 — CI scaffold** *(landed early — fmt-check + forge build/test jobs)* — `.github/workflows/ci.yml`: `pnpm fmt --check`, `forge test`, `cargo stylus check`, `pnpm -r build`. _(Non-blocking — can land after Phase 5.)_
+- [x] (2026-05-26) **1.11 — Commit milestone** — `chore(scaffold): pnpm monorepo + foundry + stylus + nitro dev-node green`.
 
-## Phase 2 — `ILMath` (Stylus / Rust)  *(Day 2–3)*
+## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_
 
 - [ ] **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
 - [ ] **2.2 — Fixed-point primitives in Rust** — `sqrt_x96` (Babylonian / Uniswap-style), `mul_div`, `abs_diff`. Property-test each (10k iterations) vs a `num-bigint` reference.
@@ -118,7 +118,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **2.13 — `docs/MATH.md`** — full derivation (spec §3.1), the convexity proof (spec §3.2), reference-magnitudes table regenerated from tests (replacing the spec's "to be regenerated" placeholders).
 - [ ] **2.14 — Commit milestone** — `feat(stylus): ILMath with computeMaxIL + computeIL + full test suite + MATH.md`.
 
-## Phase 3 — `OracleManager.sol`  *(Day 3–4)*
+## Phase 3 — `OracleManager.sol` _(Day 3–4)_
 
 - [ ] **3.1 — Sequencer feed + grace check** — internal helper; reverts on `sequencer down` and during grace.
 - [ ] **3.2 — `getPrice(token0, token1)`** — entry price; `latestRoundData` with staleness check; returns canonical price.
@@ -132,7 +132,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **3.10 — Invariant I8 fuzz** — arbitrary price paths through `T`; assert `settle()` eventually succeeds within `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`.
 - [ ] **3.11 — Commit milestone** — `feat(contracts): OracleManager with round-at-T + lone-spike + liveness backstop (Fork 1)`.
 
-## Phase 4 — Vaults  *(Day 5)*
+## Phase 4 — Vaults _(Day 5)_
 
 - [ ] **4.1 — `IYieldAdapter` interface** — `deposit/withdraw/balance(mm)`. Documented constraint: instantly redeemable, not utilization-gated (Fork F-#3).
 - [ ] **4.2 — `NoOpYieldAdapter`** — holds USDC, returns it on withdraw, zero yield. Default for Phase 1.
@@ -142,7 +142,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **4.6 — `ILVault` tests** — fee-claim passthrough; reject non-PositionManager NFTs; verify the contract never calls `decreaseLiquidity` on custodied NFTs; **F-#2 fuzz**: third-party `increaseLiquidity` between create and `returnNFT` does not break custody invariants.
 - [ ] **4.7 — Commit milestone** — `feat(contracts): UnderwriterVault + ILVault + IYieldAdapter (no-op)`.
 
-## Phase 5 — `ILSwapCore.sol`  *(Day 6–7) — the heaviest contract phase*
+## Phase 5 — `ILSwapCore.sol` _(Day 6–7) — the heaviest contract phase_
 
 - [ ] **5.1 — EIP-712 typed-data setup** — domain separator; `SignedQuote` type-hash; `_hashTypedDataV4`; verify via OZ `ECDSA.recover`.
 - [ ] **5.2 — Bitmap nonce (Permit2-style)** — `mapping(address mm => mapping(uint256 word => uint256 bits)) nonces`; `useNonce/isNonceUsed`. Documented in [`docs/SECURITY.md`](docs/SECURITY.md).
@@ -151,33 +151,33 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **5.5 — `SwapRecord` storage** — per spec §5.1, including the `liquidity` field (F-#2).
 - [ ] **5.6 — Constants** — `MIN_POSITION_V0` ($100 USDC = 100e6), `MIN_PREMIUM` ($1 USDC = 1e6), `PRICE_BAND_MIN_BPS=25`, `PRICE_BAND_MAX_BPS=500`, validity band `[5,15]`.
 - [ ] **5.7 — `createSwap(quote, tokenId, maxPremium, hintRoundId_unused)`** — strict CEI per spec §5.2 PHASE 1–4. Must include:
-    - `ownerOf(tokenId) == msg.sender`
-    - `Pa ≤ P0_tick ≤ Pb` enforce (F-#2 / Gemini #3)
-    - `L = position.liquidity` snapshot → write into `SwapRecord` (F-#2)
-    - `premium = ceilDiv(rate · MaxIL, 10_000)` (F-#8)
-    - `V0 ≥ MIN_POSITION_V0 && premium ≥ MIN_PREMIUM`
-    - validity, nonce-bit live, `consumedNotional + V0 ≤ maxNotionalV0`
-    - **band check** `absBps(P_live, quote.quotePrice) ≤ quote.priceBandBps` (Fork 2)
-    - vault lock; USDC pull; NFT custody last; premium split 99/1 to MM/treasury.
+  - `ownerOf(tokenId) == msg.sender`
+  - `Pa ≤ P0_tick ≤ Pb` enforce (F-#2 / Gemini #3)
+  - `L = position.liquidity` snapshot → write into `SwapRecord` (F-#2)
+  - `premium = ceilDiv(rate · MaxIL, 10_000)` (F-#8)
+  - `V0 ≥ MIN_POSITION_V0 && premium ≥ MIN_PREMIUM`
+  - validity, nonce-bit live, `consumedNotional + V0 ≤ maxNotionalV0`
+  - **band check** `absBps(P_live, quote.quotePrice) ≤ quote.priceBandBps` (Fork 2)
+  - vault lock; USDC pull; NFT custody last; premium split 99/1 to MM/treasury.
 - [ ] **5.8 — `settle(swapId, hintRoundId)`** — per spec §5.4: oracle gate, `computeIL` with **stored** `swap.liquidity`, `payout = min(IL, MaxIL)`, transfer, NFT return, event.
 - [ ] **5.9 — `settlePreview(swapId, sqrtP_T)` view** — used by invariant tests (I3/I4/I8) without touching state.
 - [ ] **5.10 — Invariant test suite (`Invariants.t.sol`)** — fuzz handlers for createSwap / settle / cancel / mutate-L:
-    - **I1** no bad debt: `payout ≤ collateral == MaxIL`
-    - **I2** cap: `payout == min(IL, MaxIL)`
-    - **I3** non-neg / no underflow (fuzz `V_lp > V_hold` ⇒ no revert, `payout == 0`)
-    - **I4** LP never profits from swap: `V_lp ≥ V_hold ⇒ payout == 0`
-    - **I5** vault solvency: `locked ≤ deposited`
-    - **I6** liquidity immutability: external `increaseLiquidity` between create/settle ⇒ `payout` unchanged
-    - **I7** capacity authority: `Σ V0 ≤ maxNotionalV0`; cancelled bit ⇒ revert; concurrent fills cannot over-consume
-    - **I8** settlement liveness: `settle()` always succeeds within bound (Fork 1)
-    - **I9** band enforcement: stale quote + oracle gap > band ⇒ revert; within band ⇒ accept (Fork 2)
+  - **I1** no bad debt: `payout ≤ collateral == MaxIL`
+  - **I2** cap: `payout == min(IL, MaxIL)`
+  - **I3** non-neg / no underflow (fuzz `V_lp > V_hold` ⇒ no revert, `payout == 0`)
+  - **I4** LP never profits from swap: `V_lp ≥ V_hold ⇒ payout == 0`
+  - **I5** vault solvency: `locked ≤ deposited`
+  - **I6** liquidity immutability: external `increaseLiquidity` between create/settle ⇒ `payout` unchanged
+  - **I7** capacity authority: `Σ V0 ≤ maxNotionalV0`; cancelled bit ⇒ revert; concurrent fills cannot over-consume
+  - **I8** settlement liveness: `settle()` always succeeds within bound (Fork 1)
+  - **I9** band enforcement: stale quote + oracle gap > band ⇒ revert; within band ⇒ accept (Fork 2)
 - [ ] **5.11 — Mainnet-fork integration test** — on local Nitro forking Arbitrum One: mint a real ETH/USDC v3 NFT, run full `createSwap → settle` cycle with real Chainlink + real Uniswap pool. Two paths: terminal in-range (small IL); terminal out-of-range (capped at MaxIL).
 - [ ] **5.12 — Gas pass** — `forge snapshot`; identify top 3 hotspots; one round of optimization (storage packing, custom errors, inline assembly only where measured).
 - [ ] **5.13 — Slither + manual review** — `slither packages/contracts`; triage; document accepted findings in `docs/SECURITY.md` checklist.
 - [ ] **5.14 — Deploy Phase-1 to Arbitrum Sepolia** — `forge script script/Deploy.s.sol --rpc-url sepolia --broadcast --verify`. Record all addresses in `deployments/sepolia.json`. Update `apps/web` and `packages/sdk` to read from this file.
 - [ ] **5.15 — Commit milestone** — `feat(core): ILSwapCore complete; FULL/European end-to-end on Sepolia; all 9 invariants green`.
 
-## Phase 6 — Off-chain matching engine  *(Day 8–9)*
+## Phase 6 — Off-chain matching engine _(Day 8–9)_
 
 - [ ] **6.1 — Skeleton** — Node 20 + TS + Fastify (or Hono) + Redis (or in-memory fallback for the hack) + Zod schemas.
 - [ ] **6.2 — Shared EIP-712 helpers** — `signQuote`, `verifyQuote` exported from a shared package consumed by engine + SDK + tests.
@@ -190,7 +190,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **6.9 — Engine integration test** — spin up engine + 2 MM bots locally; fetch best quote; submit on-chain (against Nitro fork); verify fill. Then cancel one MM's bit; verify next-best is served. Then move mock oracle past band; verify createSwap reverts with `price out of band`.
 - [ ] **6.10 — Commit milestone** — `feat(engine): off-chain matching relayer + signed-quote API + example MM bot`.
 
-## Phase 7 — `@ilswap/sdk`  *(Day 9–10)*
+## Phase 7 — `@ilswap/sdk` _(Day 9–10)_
 
 - [ ] **7.1 — Package skeleton** — viem-based; tree-shakable; ESM + CJS dual export.
 - [ ] **7.2 — Contract bindings** — auto-generated from ABIs (`forge build` → `abis/`); wagmi-generate or hand-rolled.
@@ -204,7 +204,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **7.10 — Publish (or local pack)** — for the hack, `pnpm pack` an artifact + post on GitHub release; full npm publish optional.
 - [ ] **7.11 — Commit milestone** — `feat(sdk): @ilswap/sdk LP / MM / data surfaces + examples`.
 
-## Phase 8 — Subgraph  *(Day 10–11)*
+## Phase 8 — Subgraph _(Day 10–11)_
 
 - [ ] **8.1 — `schema.graphql`** — entities per spec §11.5.
 - [ ] **8.2 — `subgraph.yaml`** — data sources for `ILSwapCore` + `UnderwriterVault` on Arbitrum Sepolia.
@@ -213,7 +213,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **8.5 — Deploy to Graph Studio** — Sepolia subgraph; record endpoint URL in `deployments/sepolia.json` and `apps/web` env.
 - [ ] **8.6 — Commit milestone** — `feat(subgraph): live indexer for swaps + quotes + vault`.
 
-## Phase 9 — REST API  *(Day 11)*
+## Phase 9 — REST API _(Day 11)_
 
 - [ ] **9.1 — `packages/api` skeleton** — Fastify + Apollo client to subgraph + Zod schemas.
 - [ ] **9.2 — Endpoints (spec §11.7)** — `/markets`, `/markets/:pair/:fee/:dur/{iv|risk-appetite|depth}` (rename `iv` → `cpi` for convexity-premium-index per Fork F-#12; keep `iv` as alias for back-compat), `/swap/:id`, `/mm/:address/stats`, `/vault/health`.
@@ -221,33 +221,33 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **9.4 — OpenAPI / Swagger spec** — auto-generated from Zod; served at `/docs`.
 - [ ] **9.5 — Commit milestone** — `feat(api): public REST API live + OpenAPI`.
 
-## Phase 10 — Frontend (`apps/web`)  *(Day 12–15)*
+## Phase 10 — Frontend (`apps/web`) _(Day 12–15)_
 
 - [ ] **10.1 — Bootstrap** — React 19 + Vite + TS + wagmi v2 + viem + RainbowKit + Apollo + shadcn/ui + Recharts + Tailwind.
 - [ ] **10.2 — Theme + layout** — header w/ wallet + nav; footer w/ Docs / API / GitHub; live stats strip at the bottom.
 - [ ] **10.3 — `/` landing** — value prop, 3 CTAs ("Protect my LP" / "Underwrite & earn" / "Vault" (Phase 2)), live stats, trust band ("FULL: bad debt is mathematically impossible — see proof →").
 - [ ] **10.4 — `/protect` LP flow** —
-    - auto-detect v3 NFTs (read PositionManager)
-    - position cards (pair, range, V0, in/out of range badge)
-    - duration picker (7/30/90d; demo: seconds)
-    - **ONE quote view**: "Pay $X to cover up to $Y of impermanent loss for 30 days" + plain English MM + settlement = European
-    - `[Advanced ▸]` reveals rate (% MaxIL), MM, ratio band, raw MaxIL, oracle source, **priceBand**
-    - **Payoff diagram** (F-#5 user-facing rule): covered region up to MaxIL, uncovered beyond range, with the in-range-convexity-hedge label
-    - Confirm → approve NFT + USDC → on-chain
-    - **Auto-refetch on band revert** (Fork 2 UX): show "Refreshing quote — market moved" toast; retry once
+  - auto-detect v3 NFTs (read PositionManager)
+  - position cards (pair, range, V0, in/out of range badge)
+  - duration picker (7/30/90d; demo: seconds)
+  - **ONE quote view**: "Pay $X to cover up to $Y of impermanent loss for 30 days" + plain English MM + settlement = European
+  - `[Advanced ▸]` reveals rate (% MaxIL), MM, ratio band, raw MaxIL, oracle source, **priceBand**
+  - **Payoff diagram** (F-#5 user-facing rule): covered region up to MaxIL, uncovered beyond range, with the in-range-convexity-hedge label
+  - Confirm → approve NFT + USDC → on-chain
+  - **Auto-refetch on band revert** (Fork 2 UX): show "Refreshing quote — market moved" toast; retry once
 - [ ] **10.5 — `/dashboard` LP** — active-swap cards: δ, IL-to-date, fees-vs-premium, expiry countdown, Claim Fees button. Settled history.
 - [ ] **10.6 — `/underwrite` MM cockpit** — deposit/withdraw; quoting panel (rate, ratio band, capacity, validity, **priceBand**); live book preview; portfolio Greeks; ROC/P&L; CapitalLow alerts.
 - [ ] **10.7 — `/markets` — three data surfaces** —
-    - Convexity-Premium Index heatmap (pair × duration × band) — **NOT labeled "IV"**, with the caveat tooltip
-    - Risk-appetite gauge + time series
-    - Convexity-supply depth per market
-    - "Free public data — API →"
-- [ ] **10.8 — Demo-mode price ticker** *(consumed by Phase 12)* — shows live oracle so the audience watches IL accrue.
+  - Convexity-Premium Index heatmap (pair × duration × band) — **NOT labeled "IV"**, with the caveat tooltip
+  - Risk-appetite gauge + time series
+  - Convexity-supply depth per market
+  - "Free public data — API →"
+- [ ] **10.8 — Demo-mode price ticker** _(consumed by Phase 12)_ — shows live oracle so the audience watches IL accrue.
 - [ ] **10.9 — Settlement animation** — at settle, "LP made whole · MM paid residual · NFT returned" with tx links.
 - [ ] **10.10 — Mobile-acceptable layout** — judges sometimes review on phone.
 - [ ] **10.11 — Commit milestone** — `feat(web): /protect /dashboard /underwrite /markets live and end-to-end`.
 
-## Phase 11 — `docs.ilswap.xyz`  *(Day 14–16, parallel with frontend)*
+## Phase 11 — `docs.ilswap.xyz` _(Day 14–16, parallel with frontend)_
 
 - [ ] **11.1 — Bootstrap** — Mintlify (preferred for the polish + interactive components) or Docusaurus in `apps/docs`.
 - [ ] **11.2 — Audience 1 — zero-knowledge LP** — "What is impermanent loss?" with an **interactive price slider** that draws hold-vs-LP curves and the IL gap; analogy ("like insurance for your LP"); glossary; FAQ. No math.
@@ -258,7 +258,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **11.7 — Deploy** — Vercel / Cloudflare Pages; custom domain `docs.ilswap.xyz` if owned, else subdomain.
 - [ ] **11.8 — Commit milestone** — `docs: docs.ilswap.xyz live with 5-audience structure`.
 
-## Phase 12 — Demo deployment + testnet setup  *(Day 17–18)*
+## Phase 12 — Demo deployment + testnet setup _(Day 17–18)_
 
 - [ ] **12.1 — `OracleManager` demo mode** — `setDemoPrice(token, price)` gated to `OPERATOR_KEY` and a `DEMO_MODE` immutable; only deployed in the demo deployment (never mainnet). Still routed through the lone-spike + health gates.
 - [ ] **12.2 — Configurable seconds-scale durations** — demo deployment accepts `duration` in seconds (e.g. 120s).
@@ -269,7 +269,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **12.7 — Pin RPC URLs + pre-fund all gas** — Sepolia ETH + Circle USDC; document the playbook in `RUNBOOK.md` (demo-day section).
 - [ ] **12.8 — Commit milestone** — `feat(demo): Sepolia demo deployment + seed scripts + fallback video`.
 
-## Phase 13 — Pitch + submission  *(Day 18–19)*
+## Phase 13 — Pitch + submission _(Day 18–19)_
 
 - [ ] **13.1 — 30-second hook rehearsal** — spec §16.1 wording; time it (must be ≤ 30s).
 - [ ] **13.2 — Slide deck (~10 slides)** — Problem · Primitive · MaxIL + invariant · Quote-driven dealer market · Quant model · Data moat · Honesty slide · Roadmap · Team · Demo CTA.
@@ -280,7 +280,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ---
 
-## Parallel track ⊕ Phase 14 — Quant model (`quant/`)  *(start Day 3, runs through Day 18)*
+## Parallel track ⊕ Phase 14 — Quant model (`quant/`) _(start Day 3, runs through Day 18)_
 
 **Gates PARTIAL** and is a flagship pitch artifact ("we did not guess our risk parameters — we derived them from Monte Carlo stress under fat-tailed, correlated crashes").
 
@@ -295,7 +295,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [ ] **14.9 — Charts for the deck** — fund P&L distribution, ruin prob vs `c`, drawdown under 99.9th-pct correlated crash. Export to `apps/docs/static/quant/`.
 - [ ] **14.10 — Commit milestone** — `feat(quant): Monte Carlo solvency model + params.json + charts`.
 
-## Stretch ⭐ Phase 15 — PARTIAL mode  *(only if Phases 1–13 green AND Phase 14 done)*
+## Stretch ⭐ Phase 15 — PARTIAL mode _(only if Phases 1–13 green AND Phase 14 done)_
 
 - [ ] **15.1 — `InsuranceVault.sol`** — ERC-4626 with locked-vs-free tracking, withdrawal delay + redemption queue, `coverBadDebt/healthRatio/circuitBreakerLevel`.
 - [ ] **15.2 — Convex floor + leverage tax** — read `params.json`; smooth curves; evaluate `minPartialBps` dynamically on every fill.
@@ -310,31 +310,36 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ---
 
-## Operational checklists  *(use these throughout)*
+## Operational checklists _(use these throughout)_
 
 ### Per-session — start
+
 - [ ] `git pull --rebase`
 - [ ] Read this file's **Current state** block — pick up at **▶ NEXT**
 - [ ] Glance at any open issues / blockers
 
 ### Per-session — end
+
 - [ ] Mark completed tasks `- [x] (YYYY-MM-DD)`
 - [ ] Update **▶ NEXT** pointer
 - [ ] Update `Last update` and `Last commit`
 - [ ] Commit roadmap update alongside the day's code: `chore(roadmap): progress YYYY-MM-DD`
 
 ### Before any spec change
+
 - [ ] Re-read the relevant `spec.md` section (don't trust memory)
 - [ ] Note which spec version is touched
 - [ ] Bump version footer if the change is substantive (semantic, not typo)
 
 ### Before any contract change
+
 - [ ] All existing invariant tests pass
 - [ ] If touching FULL settlement math → re-verify **I1–I9**
 - [ ] `forge fmt && forge test`
 - [ ] `slither packages/contracts` clean (or triaged)
 
 ### Definition of "done" — submission-ready
+
 - ✅ FULL/European end-to-end on Sepolia (real NFT, real Chainlink, settle works)
 - ✅ All 9 invariants pass under fuzz
 - ✅ Frontend `/protect → /dashboard → settle` runs in <2 min on stage
@@ -347,14 +352,14 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ---
 
-## Risk register  *(update if a risk materialises)*
+## Risk register _(update if a risk materialises)_
 
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Stylus `ILMath` doesn't hit 10× gas claim | Medium | Low | Adjust pitch claim; still ship; Stylus is Arbitrum-native regardless |
-| Sepolia Chainlink missing a feed | Low | Medium | Use mock oracle in tests; for the demo use a controlled OracleManager mode (§12.1) |
-| Quant model not done in time | Medium | Medium | PARTIAL is stretch; FULL ships either way; quant is also a deck artifact even partial |
-| Frontend bugs at demo | Medium | High | Recorded fallback video; dry-run twice (§12.5) |
-| Sepolia RPC flakes on stage | Low | High | Pinned RPC, fallback video, local Nitro as backup |
-| `priceBandBps` defaults cause too many band-reverts on Sepolia | Medium | Low | Default 100bps is tunable; loosen to 200bps if measured revert rate >5% |
-| LP demand thin in the live demo | High | Low | We seed both sides; the *pitch* covers viability (§10) — this is correctly framed as a market-formation question for mentors |
+| Risk                                                           | Likelihood | Impact | Mitigation                                                                                                                   |
+| -------------------------------------------------------------- | ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Stylus `ILMath` doesn't hit 10× gas claim                      | Medium     | Low    | Adjust pitch claim; still ship; Stylus is Arbitrum-native regardless                                                         |
+| Sepolia Chainlink missing a feed                               | Low        | Medium | Use mock oracle in tests; for the demo use a controlled OracleManager mode (§12.1)                                           |
+| Quant model not done in time                                   | Medium     | Medium | PARTIAL is stretch; FULL ships either way; quant is also a deck artifact even partial                                        |
+| Frontend bugs at demo                                          | Medium     | High   | Recorded fallback video; dry-run twice (§12.5)                                                                               |
+| Sepolia RPC flakes on stage                                    | Low        | High   | Pinned RPC, fallback video, local Nitro as backup                                                                            |
+| `priceBandBps` defaults cause too many band-reverts on Sepolia | Medium     | Low    | Default 100bps is tunable; loosen to 200bps if measured revert rate >5%                                                      |
+| LP demand thin in the live demo                                | High       | Low    | We seed both sides; the _pitch_ covers viability (§10) — this is correctly framed as a market-formation question for mentors |

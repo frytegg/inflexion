@@ -4,7 +4,7 @@ Project-wide guidance for Claude Code (and any teammate). Read this first.
 
 ## What this project is
 
-**IL Swap** is a collateralized bilateral derivatives market on Arbitrum One that lets Uniswap v3 LPs pay a fixed upfront premium to transfer the *in-range* impermanent-loss risk of a specific position to a market maker, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL — **capped at MaxIL** — trustlessly, from the MM's collateral. In FULL mode the protocol cannot produce bad debt under its stated assumptions: capped payoff, solvent collateral asset, oracle liveness.
+**IL Swap** is a collateralized bilateral derivatives market on Arbitrum One that lets Uniswap v3 LPs pay a fixed upfront premium to transfer the _in-range_ impermanent-loss risk of a specific position to a market maker, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL — **capped at MaxIL** — trustlessly, from the MM's collateral. In FULL mode the protocol cannot produce bad debt under its stated assumptions: capped payoff, solvent collateral asset, oracle liveness.
 
 This is an **in-range convexity hedge**, not "IL insurance" — the cap is load-bearing for the no-bad-debt guarantee.
 
@@ -12,14 +12,14 @@ Built for the Arbitrum Open House London Buildathon (25 May → 14 June 2026).
 
 ## Authoritative documents — read these before changing anything
 
-| Doc | What it is |
-|---|---|
-| [`spec.md`](spec.md) | The protocol specification. **v3.3 build-ready.** Single source of truth for design. |
-| [`ROADMAP.md`](ROADMAP.md) | Living task tracker. Start each session at the **▶ NEXT** pointer; mark `[x] (date)` and bump the pointer at session end. |
-| [`RUNBOOK.md`](RUNBOOK.md) | Environment versions, env vars, common commands, demo-day playbook. |
-| [`docs/MATH.md`](docs/MATH.md) | IL formula derivation, convexity proof, reference magnitudes. |
-| [`docs/SECURITY.md`](docs/SECURITY.md) | Attack vectors, mitigations, invariants. |
-| Memory: `il-swap-audit-findings` | External audit summary (12 fixes + 2 forks resolved → spec v3.3). Lives in project memory; the original audit files have been cleared after integration. |
+| Doc                                    | What it is                                                                                                                                               |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`spec.md`](spec.md)                   | The protocol specification. **v3.3 build-ready.** Single source of truth for design.                                                                     |
+| [`ROADMAP.md`](ROADMAP.md)             | Living task tracker. Start each session at the **▶ NEXT** pointer; mark `[x] (date)` and bump the pointer at session end.                                |
+| [`RUNBOOK.md`](RUNBOOK.md)             | Environment versions, env vars, common commands, demo-day playbook.                                                                                      |
+| [`docs/MATH.md`](docs/MATH.md)         | IL formula derivation, convexity proof, reference magnitudes.                                                                                            |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Attack vectors, mitigations, invariants.                                                                                                                 |
+| Memory: `il-swap-audit-findings`       | External audit summary (12 fixes + 2 forks resolved → spec v3.3). Lives in project memory; the original audit files have been cleared after integration. |
 
 Persistent memory lives at `~/.claude/projects/C--dev-il-swap/memory/` (hackathon context, locked design decisions, audit findings). Indexed by its own `MEMORY.md`.
 
@@ -42,7 +42,7 @@ deployments/                Per-network address registries (sepolia.json, etc.)
 
 ## Build / test / dev commands
 
-*(Filled in as packages land. Current state: Phase 0 — only the foundation exists.)*
+_(Filled in as packages land. Current state: Phase 0 — only the foundation exists.)_
 
 ```bash
 pnpm install                 # install all workspace deps
@@ -80,6 +80,7 @@ From `spec.md` §13:
 9. **I9 — Band enforcement (Fork 2):** `createSwap` reverts iff `absBps(P_live, quote.quotePrice) > quote.priceBandBps`.
 
 Same-weight design rules:
+
 - **`Pa ≤ P0 ≤ Pb` enforced at creation** — reject out-of-range entries.
 - **No PARTIAL constant is hardcoded.** Every PARTIAL parameter (floor curve, fee curve, liquidation buffer, circuit-breaker thresholds, withdrawal delay, exposure caps, first-loss size) is read from `quant/params.json` produced by the Monte Carlo. Hardcoding any of these is the exact failure the audit flagged.
 - **Locked collateral must stay instantly liquid.** Never route locked collateral to utilization-gated venues (Aave / Compound). Idle capital only, and only to instantly-redeemable wrappers (sDAI / tokenized T-bills).
