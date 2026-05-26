@@ -24,13 +24,14 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 | | |
 |---|---|
-| **Phase** | 0 — Repo foundation |
-| **▶ NEXT** | Task **0.0** — Prerequisites check |
+| **Phase** | 1 — Monorepo scaffold |
+| **▶ NEXT** | Task **1.1** — pnpm workspace |
 | **Spec version** | v3.3 build-ready |
-| **Last commit** | — (no repo yet) |
+| **Last commit** | `26d1ea2` chore: initial repo foundation |
+| **Repo** | https://github.com/frytegg/il-swap (private) |
 | **Quant track** | not started |
-| **Last update** | 2026-05-26 by Alex |
-| **Blockers** | — |
+| **Last update** | 2026-05-26 — Phase 0 complete |
+| **Blockers** | rustc / cargo / cargo-stylus needed by **Phase 2** · docker needed by **1.7** (install hints in `RUNBOOK.md`) |
 
 ---
 
@@ -48,11 +49,11 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Phase 0 — Repo foundation  *(Day 1)*
 
-- [ ] **0.0 — Prerequisites check** — done when all installed and on PATH: `node ≥ 20`, `pnpm ≥ 9`, `rustc ≥ 1.75`, `cargo-stylus`, `foundryup` (latest `forge`/`cast`/`anvil`), `python ≥ 3.12`, `uv` (or poetry), `docker` (for Nitro), `gh` CLI. Record versions in `RUNBOOK.md`.
-- [ ] **0.1 — `git init`** — `git init -b main` in `C:\dev\il-swap\`. Do not commit anything yet (we'll batch foundation files into the first commit).
-- [ ] **0.2 — `.gitignore`** — covers `node_modules/`, `target/`, `out/`, `cache/`, `broadcast/`, `.env*` (except `.env.example`), `coverage/`, `lcov.info`, `*.log`, `.DS_Store`, `.idea/`, `.vscode/` (whitelist `settings.json` if needed), Foundry artifacts, Stylus build artifacts (`stylus/**/target/`), Python `__pycache__/`, `.venv/`, `.ipynb_checkpoints/`, and Claude artifacts.
-- [ ] **0.3 — `LICENSE`** — MIT, with year 2026 and author "Alex / IL Swap contributors".
-- [ ] **0.4 — `CLAUDE.md`** — project-wide guidance for Claude Code (and any teammate reading the repo). Must include:
+- [x] (2026-05-26) **0.0 — Prerequisites check** — done when all installed and on PATH: `node ≥ 20`, `pnpm ≥ 9`, `rustc ≥ 1.75`, `cargo-stylus`, `foundryup` (latest `forge`/`cast`/`anvil`), `python ≥ 3.12`, `uv` (or poetry), `docker` (for Nitro), `gh` CLI. Record versions in `RUNBOOK.md`.
+- [x] (2026-05-26) **0.1 — `git init`** — `git init -b main` in `C:\dev\il-swap\`. Do not commit anything yet (we'll batch foundation files into the first commit).
+- [x] (2026-05-26) **0.2 — `.gitignore`** — covers `node_modules/`, `target/`, `out/`, `cache/`, `broadcast/`, `.env*` (except `.env.example`), `coverage/`, `lcov.info`, `*.log`, `.DS_Store`, `.idea/`, `.vscode/` (whitelist `settings.json` if needed), Foundry artifacts, Stylus build artifacts (`stylus/**/target/`), Python `__pycache__/`, `.venv/`, `.ipynb_checkpoints/`, and Claude artifacts.
+- [x] (2026-05-26) **0.3 — `LICENSE`** — MIT, with year 2026 and author "Alex / IL Swap contributors".
+- [x] (2026-05-26) **0.4 — `CLAUDE.md`** — project-wide guidance for Claude Code (and any teammate reading the repo). Must include:
     - **What** IL Swap is (1 paragraph, pulling from spec §0).
     - **Authoritative docs**: `spec.md` (latest), `ROADMAP.md` (this file), `MEMORY.md` for project memory.
     - **Build / test / dev** commands per package (filled in as packages land).
@@ -67,11 +68,11 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
         7. **Locked collateral never routed to utilization-gated venues** (Aave/Compound), only liquid wrappers.
     - **Workflow**: branch per phase (`phase-N-short-name`); conventional commits, no co-author; never push to `main` directly; never `git push --force`; never bypass hooks.
     - **What NEVER to do**: don't edit `spec.md` to make a test pass (fix the code); don't add new mainnet addresses without a comment + source link; don't fabricate Chainlink heartbeat values (always verify against `data.chain.link`); don't claim "bad debt impossible" without the qualifying clause (capped payoff + solvent USDC + oracle liveness).
-- [ ] **0.5 — `README.md`** — stub: one-paragraph value prop + pointers to `spec.md`, `ROADMAP.md`, `docs.ilswap.xyz` (once live), `apps/web` URL (once live), and the public API URL.
-- [ ] **0.6 — `RUNBOOK.md`** — sibling to README: environment versions (from 0.0), required env vars, common dev commands, demo-day playbook (to be filled in Phase 12). Empty stub now.
-- [ ] **0.7 — `.editorconfig`** — 2-space, LF, UTF-8, trim trailing whitespace, final newline.
-- [ ] **0.8 — Initial commit** — `git add -A`; commit `chore: initial repo foundation (spec v3.3, roadmap, CLAUDE.md)`.
-- [ ] **0.9 — GitHub remote** — `gh repo create il-swap --private --source . --remote origin --push`.
+- [x] (2026-05-26) **0.5 — `README.md`** — stub: one-paragraph value prop + pointers to `spec.md`, `ROADMAP.md`, `docs.ilswap.xyz` (once live), `apps/web` URL (once live), and the public API URL.
+- [x] (2026-05-26) **0.6 — `RUNBOOK.md`** — sibling to README: environment versions (from 0.0), required env vars, common dev commands, demo-day playbook (to be filled in Phase 12). Empty stub now.
+- [x] (2026-05-26) **0.7 — `.editorconfig`** — 2-space, LF, UTF-8, trim trailing whitespace, final newline.
+- [x] (2026-05-26) **0.8 — Initial commit** — `git add -A`; commit `chore: initial repo foundation (spec v3.3, roadmap, CLAUDE.md)`.
+- [x] (2026-05-26) **0.9 — GitHub remote** — `gh repo create il-swap --private --source . --remote origin --push`.
 
 ## Phase 1 — Monorepo scaffold  *(Day 1–2)*
 
