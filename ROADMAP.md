@@ -22,15 +22,15 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Current state _(update every session — this is the resume point)_
 
-|                  |                                                                                                               |
-| ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 2 — ILMath (Stylus / Rust)                                                                                                                                                  |
-| **▶ NEXT**       | Task **2.1** — `IILMath.sol` interface *(then install rustup + cargo-stylus before 2.2; see RUNBOOK.md)*                                                                     |
-| **Spec version** | v3.3 build-ready                                                                                                                                                            |
-| **Last commit**  | *(pending PR merge of `phase-1-monorepo-scaffold`)*                                                                                                                          |
-| **Repo**         | https://github.com/frytegg/il-swap (private)                                                                                                                                |
-| **Quant track**  | not started                                                                                                                                                                 |
-| **Last update**  | 2026-05-26 — Phase 1 complete (forge build + fmt:check green)                                                                                                               |
+|                  |                                                                                                                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase**        | 2 — ILMath (Stylus / Rust)                                                                                                                                                   |
+| **▶ NEXT**       | Task **2.1** — `IILMath.sol` interface _(then install rustup + cargo-stylus before 2.2; see RUNBOOK.md)_                                                                     |
+| **Spec version** | v3.3 build-ready                                                                                                                                                             |
+| **Last commit**  | _(pending PR merge of `phase-1-monorepo-scaffold`)_                                                                                                                          |
+| **Repo**         | https://github.com/frytegg/il-swap (private)                                                                                                                                 |
+| **Quant track**  | not started                                                                                                                                                                  |
+| **Last update**  | 2026-05-26 — Phase 1 complete (forge build + fmt:check green)                                                                                                                |
 | **Blockers**     | rustc / cargo / cargo-stylus required for tasks **2.2 onward** · docker still needed to actually run `pnpm dev:node` (the script is in place; install hints in `RUNBOOK.md`) |
 
 ---
@@ -93,12 +93,12 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
   deployments/                    (sepolia.json etc.)
   ```
 - [x] (2026-05-26) **1.4 — Foundry init** — `forge init --no-commit --no-git packages/contracts`. Edit `foundry.toml`: `solc_version = "0.8.24"`, `optimizer = true`, `optimizer_runs = 1_000_000`, `via_ir = true`, `fs_permissions = [{ access = "read", path = "./deployments"}]`. Profiles: `[profile.default]`, `[profile.local]` (`fork_url = "http://localhost:8545"`), `[profile.sepolia]`.
-- [x] (2026-05-26) **1.5 — OZ + Uniswap libs** *(libs are root-level submodules at `--depth 1`; used `chainlink-brownie-contracts` instead of full `chainlink` repo for size)* — `forge install OpenZeppelin/openzeppelin-contracts Uniswap/v3-core Uniswap/v3-periphery foundry-rs/forge-std smartcontractkit/chainlink`. Remappings in `remappings.txt`.
-- [x] (2026-05-26) **1.6 — Stylus toolchain** *(skeleton written: `Cargo.toml` + `src/lib.rs` + `src/main.rs` with `sol_storage!` + `#[public]`. `cargo install cargo-stylus` and `cargo stylus check` deferred until rust toolchain installed at Phase 2 entry.)* — `cargo install --force cargo-stylus`. Scaffold `packages/contracts/stylus/ILMath/{Cargo.toml,src/lib.rs}` with the `sol_storage!` + `#[external]` skeleton (no logic yet — `cargo stylus check` must pass).
-- [x] (2026-05-26) **1.7 — Local Nitro dev node** *(`scripts/dev-node.mjs` wired to `pnpm dev:node`; not yet run end-to-end because Docker isn't installed locally — verify on first Docker install)* — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.il-swap/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
+- [x] (2026-05-26) **1.5 — OZ + Uniswap libs** _(libs are root-level submodules at `--depth 1`; used `chainlink-brownie-contracts` instead of full `chainlink` repo for size)_ — `forge install OpenZeppelin/openzeppelin-contracts Uniswap/v3-core Uniswap/v3-periphery foundry-rs/forge-std smartcontractkit/chainlink`. Remappings in `remappings.txt`.
+- [x] (2026-05-26) **1.6 — Stylus toolchain** _(skeleton written: `Cargo.toml` + `src/lib.rs` + `src/main.rs` with `sol_storage!` + `#[public]`. `cargo install cargo-stylus` and `cargo stylus check` deferred until rust toolchain installed at Phase 2 entry.)_ — `cargo install --force cargo-stylus`. Scaffold `packages/contracts/stylus/ILMath/{Cargo.toml,src/lib.rs}` with the `sol_storage!` + `#[external]` skeleton (no logic yet — `cargo stylus check` must pass).
+- [x] (2026-05-26) **1.7 — Local Nitro dev node** _(`scripts/dev-node.mjs` wired to `pnpm dev:node`; not yet run end-to-end because Docker isn't installed locally — verify on first Docker install)_ — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.il-swap/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
 - [x] (2026-05-26) **1.8 — Env management** — `.env.example` at root with placeholders: `ARBITRUM_RPC`, `SEPOLIA_RPC`, `LOCAL_RPC=http://localhost:8545`, `DEPLOYER_PRIVATE_KEY`, `OPERATOR_PRIVATE_KEY` (demo only), `ETHERSCAN_API_KEY`, `THEGRAPH_DEPLOY_KEY`. `dotenv-cli` for TS packages; `--env-file` for Foundry.
-- [x] (2026-05-26) **1.9 — Formatter + linter** *(prettier + ESLint flat-config + `forge fmt` + `cargo fmt` (soft-skips when cargo missing). `pnpm fmt` / `pnpm fmt:check` both green.)* — Prettier (+`prettier-plugin-solidity`), ESLint (typescript-eslint), `forge fmt`, `cargo fmt`. Single root script `pnpm fmt` runs all three. Add a `lint-staged` config (or skip if time-pressed).
-- [x] (2026-05-26) **1.10 — CI scaffold** *(landed early — fmt-check + forge build/test jobs)* — `.github/workflows/ci.yml`: `pnpm fmt --check`, `forge test`, `cargo stylus check`, `pnpm -r build`. _(Non-blocking — can land after Phase 5.)_
+- [x] (2026-05-26) **1.9 — Formatter + linter** _(prettier + ESLint flat-config + `forge fmt` + `cargo fmt` (soft-skips when cargo missing). `pnpm fmt` / `pnpm fmt:check` both green.)_ — Prettier (+`prettier-plugin-solidity`), ESLint (typescript-eslint), `forge fmt`, `cargo fmt`. Single root script `pnpm fmt` runs all three. Add a `lint-staged` config (or skip if time-pressed).
+- [x] (2026-05-26) **1.10 — CI scaffold** _(landed early — fmt-check + forge build/test jobs)_ — `.github/workflows/ci.yml`: `pnpm fmt --check`, `forge test`, `cargo stylus check`, `pnpm -r build`. _(Non-blocking — can land after Phase 5.)_
 - [x] (2026-05-26) **1.11 — Commit milestone** — `chore(scaffold): pnpm monorepo + foundry + stylus + nitro dev-node green`.
 
 ## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_
