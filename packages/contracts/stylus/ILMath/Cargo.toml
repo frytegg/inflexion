@@ -1,0 +1,26 @@
+[package]
+name = "il-math"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-compute Stylus contract for Uniswap v3 IL / MaxIL math (IL Swap protocol)"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "il-math"
+path = "src/main.rs"
+
+[dependencies]
+stylus-sdk = "0.7"
+
+[features]
+export-abi = ["stylus-sdk/export-abi"]
+
+[profile.release]
+codegen-units = 1
+strip = true
+lto = true
+panic = "abort"
+opt-level = "z"

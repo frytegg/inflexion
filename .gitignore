@@ -16,6 +16,8 @@ out/
 cache/
 broadcast/
 forge-cache/
+foundry.lock                     # stale-SHA churn vs shallow submodules; not pinning libs by tag yet
+**/Cargo.lock                    # Stylus crates: lock not committed pre-Phase-2
 
 # --- Stylus / Rust ---
 target/
