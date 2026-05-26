@@ -285,7 +285,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 **Gates PARTIAL** and is a flagship pitch artifact ("we did not guess our risk parameters — we derived them from Monte Carlo stress under fat-tailed, correlated crashes").
 
 - [x] (2026-05-26) **14.1 — Notebook scaffold** — Python 3.12 + `uv`, jupyter, numpy/scipy/pandas/matplotlib, `arch` (vol models). `quant/notebooks/01_underlying.ipynb` etc. _(landed with `inflexion_quant` package + `01_underlying.ipynb` smoke test; `arch` deferred to Task 14.2 when GARCH actually gets used.)_
-- [ ] **14.2 — Underlying model** — jump-diffusion (Kou or Merton) + historical bootstrap from 3y ETH/BTC/ARB data; common crash factor.
+- [x] (2026-05-26) **14.2 — Underlying model** — jump-diffusion (Kou or Merton) + historical bootstrap from 3y ETH/BTC/ARB data; common crash factor. _(All 4 simulators landed in `prices.py` with 13 property tests passing. Historical bootstrap uses synthetic Student-t(4) returns by default; `inflexion_quant.data.cached_fetch('ETH', days=1095)` swaps in real CoinGecko data offline. Notebook 01 drives all 4 with sample plots.)_
 - [ ] **14.3 — Position-structure distribution** — realistic LP range widths × moneyness mix.
 - [ ] **14.4 — Path → IL** — Python reimplementation of spec §3.1; sanity-check vs Stylus on a sample.
 - [ ] **14.5 — Portfolio waterfall** — spec §9 step 3.
