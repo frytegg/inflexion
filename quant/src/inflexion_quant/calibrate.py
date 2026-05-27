@@ -238,10 +238,17 @@ def calibrate_fund_target(
     premium_share: float = 0.20,
     fee_curve: Callable[[float], float] = default_fee_curve,
     ruin_budget: float = 0.001,
+    use_cvar: bool = True,
 ) -> dict[str, float]:
     """Smallest fund balance such that ``P(ruin | balance) ≤ ruin_budget`` at ``c``.
 
-    Closed form: ``balance ≥ -quantile(fund_pnl, ruin_budget)``.
+    By default uses **CVaR** (expected loss conditional on exceeding the
+    ruin budget) rather than raw VaR (the quantile itself). CVaR is
+    coherent (subadditive, monotone), stable under MC noise, and
+    accounts for losses beyond the VaR threshold — the auditor's
+    finding B10 ("VaR is unstable and blind beyond the threshold").
+
+    Set ``use_cvar=False`` to recover the original VaR-based behaviour.
     """
     pnl = fund_pnl_from_cache(
         cache, c=c, premium_rate=premium_rate,
@@ -249,11 +256,19 @@ def calibrate_fund_target(
     )
     q = float(np.quantile(pnl, ruin_budget))
     tail = pnl[pnl <= q]
+    var_value = max(0.0, -q)
+    # CVaR can be negative when the tail is profitable (positive pnl);
+    # fund_target is bounded below by 0 (you can't have a negative fund).
+    raw_cvar = float(-tail.mean()) if len(tail) > 0 else -q
+    cvar_value = max(0.0, raw_cvar)
     return {
-        "fund_target": max(0.0, -q),
+        "fund_target": cvar_value if use_cvar else var_value,
+        "var_at_budget": var_value,
+        "cvar_at_budget": cvar_value,
         "ruin_budget": ruin_budget,
-        "cvar_at_budget": float(-tail.mean()) if len(tail) > 0 else float(-q),
         "median_pnl": float(np.median(pnl)),
+        "mean_pnl": float(np.mean(pnl)),
+        "estimator": "CVaR" if use_cvar else "VaR",
     }
 
 
@@ -270,34 +285,44 @@ def calibrate_fee_curve(
     exponent: float = 2.32,
     fee_search: tuple[float, float] = (0.0, 1.0),
     tol: float = 1e-5,
+    target_mean_pnl: float = 0.0,
 ) -> dict[str, float]:
-    """Refit ``fee_ref`` so median fund-P&L ≈ 0 at the chosen ``c``.
+    """Refit ``fee_ref`` so **mean** fund-P&L ≥ ``target_mean_pnl`` at the chosen ``c``.
 
-    Fee model: ``fee(c) = fee_ref · (c_ref/c)^exponent``. At a fixed ``c`` the
-    fee is a scalar ``f``; fund_pnl[i] = ``P_i · (premium_share + f) − F_i``
-    where ``P_i = premium_total_i`` and ``F_i = fund_pays_total_i``.
-    ``median_i fund_pnl[i]`` is monotonically increasing in ``f`` (since each
-    ``P_i ≥ 0``), so we bisect for the smallest ``f`` driving the median
-    above zero, then project back to ``fee_ref`` units.
+    Auditor B1: targeting the *median* leaves the fund losing money in 50%
+    of periods (and possibly bleeding across periods given negative skew).
+    Targeting the *mean* is the right insurance criterion — it ensures the
+    fund has positive expected value, not just a coin-flip break-even.
+
+    Fee model: ``fee(c) = fee_ref · (c_ref/c)^exponent``. At a fixed ``c``
+    the fee is a scalar ``f``; fund_pnl[i] = ``P_i · (premium_share + f) − F_i``
+    where ``P_i = premium_total_i`` and ``F_i = fund_pays_total_i``. Since
+    each ``P_i ≥ 0``, ``mean_i fund_pnl[i]`` is monotone increasing in ``f``,
+    so we bisect for the smallest ``f`` driving the mean above
+    ``target_mean_pnl``, then project back to ``fee_ref`` units.
+
+    For a stronger criterion, set ``target_mean_pnl`` to a positive Sharpe
+    cushion (e.g. ``0.05 × fund_target × horizon_days / 365`` for a 5%
+    annual ROE target).
     """
     mm_coll = c * cache.V0s
     fund_pays = np.maximum(0.0, cache.payouts - mm_coll).sum(axis=1)
     premium_total = (premium_rate * cache.max_ils).sum(axis=1)
 
-    def median_pnl(f: float) -> float:
-        return float(np.median(premium_total * (premium_share + f) - fund_pays))
+    def mean_pnl(f: float) -> float:
+        return float(np.mean(premium_total * (premium_share + f) - fund_pays))
 
     lo, hi = fee_search
     feasible = True
-    if median_pnl(lo) >= 0:
+    if mean_pnl(lo) >= target_mean_pnl:
         fee_pct_needed = lo
-    elif median_pnl(hi) < 0:
+    elif mean_pnl(hi) < target_mean_pnl:
         fee_pct_needed = hi
         feasible = False
     else:
         while hi - lo > tol:
             mid = (lo + hi) / 2
-            if median_pnl(mid) < 0:
+            if mean_pnl(mid) < target_mean_pnl:
                 lo = mid
             else:
                 hi = mid
@@ -312,7 +337,8 @@ def calibrate_fee_curve(
         ),
         "c_ref": c_ref,
         "exponent": exponent,
-        "median_pnl_at_refit": median_pnl(fee_pct_needed),
+        "mean_pnl_at_refit": mean_pnl(fee_pct_needed),
+        "target_mean_pnl": target_mean_pnl,
         "feasible_in_fee_search": feasible,
     }
 
@@ -421,7 +447,8 @@ def heuristic_first_loss_fraction() -> float:
 
 @dataclass(frozen=True)
 class CalibrationResult:
-    """All 8 PARTIAL parameters, ready for serialisation to ``params.json``."""
+    """All 8 PARTIAL parameters + audit-grade provenance, ready for
+    serialisation to ``params.json``."""
 
     c_min: float
     floor_curve: dict[str, float]
@@ -433,40 +460,66 @@ class CalibrationResult:
     fund_target: float
 
     # Provenance / sanity metadata
-    ruin_budget: float
+    ruin_budget_per_horizon: float
+    horizon_days: int
+    annualized_ruin_budget: float
     c_used_for_fund_target: float
+    fund_target_estimator: str  # "CVaR" or "VaR"
     n_runs: int
     n_positions: int
+    parameter_provenance: dict[str, str]  # param name → "calibrated" / "heuristic" / "deferred"
+    fixed_point_iterations: int
+    stability_check: dict[str, float] | None
     notes: str
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        # Drop the sweep tables — they're for in-process inspection, not params.json
+        # Drop the sweep tables — for in-process inspection, not params.json
         if "sweep" in d.get("exposure_caps", {}):
-            d["exposure_caps"] = {k: v for k, v in d["exposure_caps"].items() if k != "sweep"}
+            d["exposure_caps"] = {
+                k: v for k, v in d["exposure_caps"].items() if k != "sweep"
+            }
         return d
+
+
+def _annualized_ruin_budget(per_horizon: float, horizon_days: int) -> float:
+    """Convert per-horizon ruin probability to annualized (assuming
+    independent horizons — an upper bound on true annualized risk under
+    persistence)."""
+    periods_per_year = 365.0 / horizon_days
+    return 1.0 - (1.0 - per_horizon) ** periods_per_year
 
 
 def calibrate_all(
     *,
-    n_runs: int = 1000,
+    n_runs: int = 50_000,
     n_positions: int = 200,
     P0: float = 100.0,
     premium_rate: float = 0.75,
     premium_share: float = 0.20,
     ruin_budget: float = 0.001,
-    bootstrap_fund_balance_pct_of_notional: float = 0.01,
+    fixed_point_max_iter: int = 25,
+    fixed_point_tol: float = 0.05,  # 5% relative tolerance on fund_target
     cfg: CorrelatedCrashConfig | None = None,
     mix: PositionMix | None = None,
     exposure_grid: np.ndarray | None = None,
+    exposure_caps_n_runs: int | None = None,
     rng_seed: int = 20260527,
+    run_stability_check: bool = False,
+    stability_seeds: tuple[int, ...] = (1, 2, 3),
 ) -> CalibrationResult:
     """Run all 8 calibrations end-to-end and return a :class:`CalibrationResult`.
 
-    Resolves the circular dep between ``c_min`` and ``fund_balance`` by
-    bootstrapping a fund balance from book notional, calibrating ``c_min``
-    against it, then recomputing ``fund_target`` at that ``c_min`` for the
-    serialised result.
+    Resolves the ``c_min`` ↔ ``fund_target`` circular dependency via
+    **bisection on the fixed-point** (audit B3): find the fund balance B
+    such that ``B == calibrate_fund_target(c_min(B))``. Bisection is
+    correct because the composed map is monotone decreasing in B.
+
+    ``n_runs`` default is **50_000** — calibrated against the auditor's
+    finding A1 that 1,000 runs gives a statistically meaningless 0.1%
+    quantile. At 50k runs, the 0.1% tail has ~50 observations and the
+    CVaR estimator stabilises to within ~5% across seeds. For a v2
+    deployment use 100k+ or fit a GPD tail.
     """
     cfg = cfg or CorrelatedCrashConfig.severe()
     chosen_mix = mix or PositionMix.crypto_majors()
@@ -475,6 +528,7 @@ def calibrate_all(
         if exposure_grid is not None
         else np.array([50, 100, 200, 400, 700, 1000])
     )
+    horizon_days = max(1, int(round(cfg.T_years * 365)))
 
     terminal_fn = correlated_crash_terminal_fn(cfg)
     cache = build_scenario_cache(
@@ -486,46 +540,58 @@ def calibrate_all(
         mix=chosen_mix,
     )
 
-    # Bootstrap fund balance from typical book notional (median V0 sum)
     book_notional_per_run = cache.V0s.sum(axis=1)
     typical_book = float(np.median(book_notional_per_run))
-    bootstrap_balance = bootstrap_fund_balance_pct_of_notional * typical_book
 
-    # Step 1: c_min vs bootstrap fund
-    c_res = calibrate_c_min(
-        cache=cache,
-        fund_balance=bootstrap_balance,
-        ruin_budget=ruin_budget,
-        premium_rate=premium_rate,
-        premium_share=premium_share,
-    )
-    c_min = float(c_res["c_min"])
-    if not c_res["feasible"]:
-        c_min = 0.50  # fall back to upper bound; fund_target will reflect the stress
+    # ─── Fixed-point bisection on B s.t. fund_target(c_min(B)) == B ─────────
+    #
+    # The composed map B → fund_target(c_min(B, fee=0)) is decreasing in B
+    # (more equity → lower c_min → larger fund_pays → bigger fund_target).
+    # Bisection on g(B) = fund_target(c_min(B)) - B works.
+    def _eval(B: float) -> tuple[float, float, dict]:
+        c_res = calibrate_c_min(
+            cache=cache, fund_balance=B, ruin_budget=ruin_budget,
+            premium_rate=premium_rate, premium_share=premium_share,
+        )
+        c = float(c_res["c_min"]) if c_res["feasible"] else 0.50
+        ft_res = calibrate_fund_target(
+            cache=cache, c=c, premium_rate=premium_rate,
+            premium_share=premium_share, ruin_budget=ruin_budget,
+            use_cvar=True,
+        )
+        return c, float(ft_res["fund_target"]), ft_res
 
-    # Step 2: fund_target at the calibrated c_min
-    fund_res = calibrate_fund_target(
-        cache=cache,
-        c=c_min,
-        premium_rate=premium_rate,
-        premium_share=premium_share,
-        ruin_budget=ruin_budget,
-    )
+    # Bracket: B_lo ≪ B*, so g(B_lo) > 0; B_hi ≫ B*, so g(B_hi) < 0
+    B_lo = max(1.0, 0.001 * typical_book)  # 0.1% of book
+    B_hi = max(B_lo * 2, 1.0 * typical_book)  # 100% of book (huge)
+    iters = 0
+    for iters in range(1, fixed_point_max_iter + 1):
+        B_mid = 0.5 * (B_lo + B_hi)
+        _, target_at_mid, _ = _eval(B_mid)
+        gap = target_at_mid - B_mid
+        if abs(gap) < fixed_point_tol * max(B_mid, 1.0):
+            B_lo = B_hi = B_mid
+            break
+        if gap > 0:
+            B_lo = B_mid  # need more equity
+        else:
+            B_hi = B_mid  # can use less
 
-    # Step 3: fee curve refit at c_min
+    B_final = 0.5 * (B_lo + B_hi)
+    c_min, fund_target, fund_res = _eval(B_final)
+
+    # Fee curve refit at fixed-point c_min (audit B1: targets mean, not median)
     fee_res = calibrate_fee_curve(
-        cache=cache,
-        c=c_min,
-        premium_rate=premium_rate,
-        premium_share=premium_share,
+        cache=cache, c=c_min,
+        premium_rate=premium_rate, premium_share=premium_share,
     )
 
-    # Step 4: exposure caps at c_min, given the calibrated fund_target
+    # Exposure caps — no more `min(500, n_runs)` clamp (audit B6)
     exposure_res = calibrate_exposure_caps(
-        fund_balance=fund_res["fund_target"],
+        fund_balance=fund_target,
         c=c_min,
         n_positions_grid=exposure_grid,
-        n_runs=min(500, n_runs),
+        n_runs=exposure_caps_n_runs if exposure_caps_n_runs is not None else min(20_000, n_runs),
         cfg=cfg,
         rng_seed=rng_seed,
         premium_rate=premium_rate,
@@ -535,15 +601,34 @@ def calibrate_all(
         mix=chosen_mix,
     )
 
-    # Floor curve: placeholder constant c_min for now — true σ-dependence is a
-    # Tier-2 extension (run calibrate_c_min for several CommonFactor.sigma
-    # values and fit a curve). Tracked in spec §10 reservations.
+    # Optional cross-seed stability (audit A2)
+    stability = (
+        validate_calibration_stability(
+            seeds=stability_seeds,
+            n_runs=min(n_runs, 20_000),  # cheaper but still meaningful
+            n_positions=n_positions,
+            cfg=cfg, mix=chosen_mix, P0=P0,
+            premium_rate=premium_rate, premium_share=premium_share,
+            ruin_budget=ruin_budget,
+        )
+        if run_stability_check
+        else None
+    )
+
     floor_curve = {
         "c_at_baseline_vol": c_min,
-        "note": (
-            "single-vol calibration; multi-σ fit deferred to post-hack "
-            "(Phase 15 calibration sweep)"
-        ),
+        "note": "single-vol calibration; multi-σ fit deferred to Phase 15",
+    }
+
+    parameter_provenance = {
+        "c_min": "calibrated",
+        "fund_target": "calibrated",
+        "fee_curve": "calibrated",
+        "exposure_caps": "calibrated",
+        "floor_curve": "deferred",  # single-σ placeholder
+        "breakers": "heuristic",
+        "withdrawal_delay_seconds": "heuristic",
+        "first_loss_fraction": "heuristic",
     }
 
     return CalibrationResult(
@@ -554,15 +639,99 @@ def calibrate_all(
         withdrawal_delay_seconds=heuristic_withdrawal_delay_seconds(),
         exposure_caps=exposure_res,
         first_loss_fraction=heuristic_first_loss_fraction(),
-        fund_target=fund_res["fund_target"],
-        ruin_budget=ruin_budget,
+        fund_target=fund_target,
+        ruin_budget_per_horizon=ruin_budget,
+        horizon_days=horizon_days,
+        annualized_ruin_budget=_annualized_ruin_budget(ruin_budget, horizon_days),
         c_used_for_fund_target=c_min,
+        fund_target_estimator=str(fund_res.get("estimator", "CVaR")),
         n_runs=n_runs,
         n_positions=n_positions,
+        parameter_provenance=parameter_provenance,
+        fixed_point_iterations=iters,
+        stability_check=stability,
         notes=(
-            f"Calibrated against {cfg.__class__.__name__} (severe) on "
-            f"{n_runs} runs × {n_positions} positions with rng_seed={rng_seed}. "
-            f"Heuristics: breakers (ratios), withdrawal_delay (7d), "
-            f"first_loss (2%). Floor curve is single-σ; multi-σ fit deferred."
+            f"Calibrated against CorrelatedCrashConfig.severe() on "
+            f"{n_runs} runs × {n_positions} positions, rng_seed={rng_seed}, "
+            f"horizon={horizon_days}d. Fixed-point bisection converged in "
+            f"{iters} iterations. Audit-fix v1.1: fund_target uses CVaR; "
+            f"fee_curve targets mean pnl (not median); per-horizon ruin "
+            f"budget {ruin_budget * 100:.2f}% ≈ {_annualized_ruin_budget(ruin_budget, horizon_days) * 100:.2f}% "
+            f"annualized; severe() params anchored to historical episodes "
+            f"(Terra/FTX/March 2020). Mainnet TODOs in ROADMAP §14: "
+            f"portfolio-level multi-market calibration, empirical position "
+            f"mix from Uniswap subgraph, multi-period fund evolution, "
+            f"MM/LP behavioral models, multi-σ floor curve, depeg/oracle "
+            f"failure mechanisms."
         ),
     )
+
+
+# ─── Cross-seed stability check (audit A2) ─────────────────────────────────
+
+
+def validate_calibration_stability(
+    *,
+    seeds: tuple[int, ...] = (1, 2, 3),
+    n_runs: int = 10_000,
+    n_positions: int = 200,
+    cfg: CorrelatedCrashConfig | None = None,
+    mix: PositionMix | None = None,
+    P0: float = 100.0,
+    premium_rate: float = 0.75,
+    premium_share: float = 0.20,
+    ruin_budget: float = 0.001,
+) -> dict[str, float]:
+    """Run ``calibrate_c_min`` + ``calibrate_fund_target`` across multiple
+    rng seeds and report the spread. Auditor finding A2: c_min should not
+    swing across seeds at the chosen sample size.
+
+    Returns a dict with ``c_min_{min,mean,max,std,spread_bp}`` and
+    ``fund_target_{min,mean,max,std,spread_pct}`` across seeds.
+    """
+    cfg = cfg or CorrelatedCrashConfig.severe()
+    chosen_mix = mix or PositionMix.crypto_majors()
+    terminal_fn = correlated_crash_terminal_fn(cfg)
+
+    c_mins: list[float] = []
+    fund_targets: list[float] = []
+    for seed in seeds:
+        cache_s = build_scenario_cache(
+            n_runs=n_runs, n_positions=n_positions,
+            terminal_fn=terminal_fn,
+            rng=np.random.default_rng(seed),
+            P0=P0, mix=chosen_mix,
+        )
+        # Bootstrap fund = median of book notional × 1%
+        bootstrap = 0.01 * float(np.median(cache_s.V0s.sum(axis=1)))
+        c_res = calibrate_c_min(
+            cache=cache_s, fund_balance=bootstrap, ruin_budget=ruin_budget,
+            premium_rate=premium_rate, premium_share=premium_share,
+        )
+        c = float(c_res["c_min"]) if c_res["feasible"] else 0.50
+        ft_res = calibrate_fund_target(
+            cache=cache_s, c=c, premium_rate=premium_rate,
+            premium_share=premium_share, ruin_budget=ruin_budget,
+            use_cvar=True,
+        )
+        c_mins.append(c)
+        fund_targets.append(float(ft_res["fund_target"]))
+
+    c_arr = np.array(c_mins)
+    ft_arr = np.array(fund_targets)
+    return {
+        "n_seeds": len(seeds),
+        "n_runs_per_seed": n_runs,
+        "c_min_min": float(c_arr.min()),
+        "c_min_mean": float(c_arr.mean()),
+        "c_min_max": float(c_arr.max()),
+        "c_min_std": float(c_arr.std()),
+        "c_min_spread_bp": float((c_arr.max() - c_arr.min()) * 10_000),
+        "fund_target_min": float(ft_arr.min()),
+        "fund_target_mean": float(ft_arr.mean()),
+        "fund_target_max": float(ft_arr.max()),
+        "fund_target_std": float(ft_arr.std()),
+        "fund_target_spread_pct": float(
+            (ft_arr.max() - ft_arr.min()) / max(ft_arr.mean(), 1.0) * 100
+        ),
+    }

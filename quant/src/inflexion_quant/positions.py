@@ -1,15 +1,23 @@
-"""Realistic Uniswap v3 LP position structures (Task 14.3).
+"""Heuristic Uniswap v3 LP position structures (Task 14.3).
 
-Samples positions ``(Pa, Pb, P0, L, V0)`` from a mixture-of-buckets distribution
-calibrated to observed crypto-major LP behaviour:
+Samples positions ``(Pa, Pb, P0, L, V0)`` from a hand-picked mixture of
+range widths intended to **bracket** observed crypto-major LP behaviour:
 
 - ~30% tight   (±5%)  — high-fee active LPs, frequent re-ranging
 - ~40% moderate (±15%) — "passive concentrated", re-range monthly
 - ~25% wide    (±30%) — low-maintenance
 - ~5%  v2-like (±80%) — set-and-forget
 
-Weights/half-widths are *placeholders*. Phase 14.7 calibration tunes them
-against on-chain Uniswap v3 position data (or institutional LP feedback).
+**These weights and half-widths are placeholders, not calibrations.** They
+are not fit to on-chain data; they are an informed guess at "what a realistic
+mix might look like" pending empirical replacement.
+
+Mainnet replacement (audit B4): ingest live Uniswap v3 NFT distribution
+via the subgraph, computing tick-width quantiles per market. JIT (Just-In-
+Time) liquidity bots provide single-tick positions that dominate by count;
+the current mixture underweights them and over-represents wide ranges.
+Tight-range LPs hit MaxIL on smaller moves, so the current mixture likely
+**under-estimates** the fund's tail exposure.
 """
 
 from __future__ import annotations
