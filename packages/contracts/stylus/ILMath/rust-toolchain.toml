@@ -1,0 +1,16 @@
+# Pinned Rust toolchain for reproducible Stylus WASM builds.
+# `cargo stylus check / deploy / verify` reads this file and refuses generic
+# channels like "stable" — the channel must be a specific version.
+#
+# Channel must match what cargo-stylus expects. As of 2026-05, the Arbitrum
+# Stylus quickstart pins 1.88 for cargo-stylus 0.10.x. Bump alongside the
+# cargo-stylus version, not independently.
+#
+# Build environment: WSL2 / Linux only. Windows MSVC cannot link stylus-proc
+# (alloy-primitives references the VM hostio `native_keccak256`; ld accepts
+# the unresolved symbol, link.exe rejects it). See RUNBOOK.md → Stylus.
+
+[toolchain]
+channel = "1.88.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rust-src"]
