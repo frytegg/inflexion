@@ -24,13 +24,13 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 |                  |                                                                                                                                                                                                                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 14 — Quant (parallel) · Phase 2 deferred to home PC                                                                                                                                                                                                                             |
-| **▶ NEXT**       | Task **14.10** — commit milestone PR for the quant track (`phase-14-quant-scaffold` → main)                                                                                                                                                                                     |
+| **Phase**        | 14 — Quant (complete) · Phase 2 deferred to home PC                                                                                                                                                                                                                             |
+| **▶ NEXT**       | Task **2.2** (home PC, WSL2) — Rust fixed-point primitives for ILMath Stylus contract                                                                                                                                                                                           |
 | **Spec version** | v3.3 build-ready                                                                                                                                                                                                                                                                |
-| **Last commit**  | `feat(quant): Task 14.9 - pitch-deck charts (6 tests, 115 total) → apps/docs/static/quant/`                                                                                                                                                                                     |
+| **Last commit**  | `feat(quant): Task 14.9 - pitch-deck charts (6 tests, 115 total) → apps/docs/static/quant/` · PR #3 merged (`IILMath.sol` interface + Stylus toolchain pin)                                                                                                                     |
 | **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                                                                                                  |
-| **Quant track**  | 14.1–14.9 done (115 tests green). Three slide-ready PNGs in `apps/docs/static/quant/`; sourced from the same calibration that emits `params.json` so deck + on-chain stay in sync. **Phase 14 effectively complete** — 14.10 is just the milestone commit                       |
-| **Last update**  | 2026-05-27 — Task 14.9 deck charts landed                                                                                                                                                                                                                                       |
+| **Quant track**  | 14.1–14.9 done (115 tests green); `quant/params.json` v1.0.0 emitted (c_min=13.6%, fund_target=$24k, per_market_cap=100, per_mm_cap=20); three deck-ready PNGs in `apps/docs/static/quant/`. Phase 14 effectively complete                                                      |
+| **Last update**  | 2026-05-27 — Task 14.9 deck charts landed; PR #3 merged                                                                                                                                                                                                                         |
 | **Blockers**     | Phase 2 tasks 2.2+ blocked on home PC (Stylus dev requires WSL2; Windows MSVC native is broken — `native_keccak256` link error in `stylus-proc`, no upstream fix). Setup steps in `RUNBOOK.md` → "Stylus development". Solidity + TS + Python all unblocked on the work laptop. |
 
 ---
@@ -103,7 +103,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_
 
-- [ ] **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
+- [x] (2026-05-26) **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
 - [ ] **2.2 — Fixed-point primitives in Rust** — `sqrt_x96` (Babylonian / Uniswap-style), `mul_div`, `abs_diff`. Property-test each (10k iterations) vs a `num-bigint` reference.
 - [ ] **2.3 — `compute_max_il`** — signature per spec §11.2. Implement `MaxIL = max(IL(Pa), IL(Pb))` per spec §3.2.
 - [ ] **2.4 — Hand-calc unit tests for `compute_max_il`** — 8 cases: centered ±5/±10/±20/±50% ranges; entry near Pa; entry near Pb; v2-like (very wide). Each vs Python spreadsheet reference; tolerance ≤ 1 wei after normalization.
