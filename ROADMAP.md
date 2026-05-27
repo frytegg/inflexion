@@ -12,8 +12,8 @@
 | ------------- | ---------------------------------------------------- |
 | **Hackathon** | Arbitrum Open House London — Online Buildathon       |
 | **Window**    | 25 May 2026 → **14 June 2026** (submission deadline) |
-| **Today**     | 26 May 2026 — Day 2                                  |
-| **Days left** | 19                                                   |
+| **Today**     | 27 May 2026 — Day 3                                  |
+| **Days left** | 18                                                   |
 | **After**     | In-person Founder House (separate scope)             |
 
 The original spec §17 timeline assumed pre-buildathon prep was already done; it wasn't. So **Phase 0 + Phase 1 compress into Days 1–2** of the actual window, and every subsequent phase rolls forward by ~2 days. The roadmap below uses Day numbers; the calendar maps `Day N → 25 May + N − 1`.
@@ -22,16 +22,16 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Current state _(update every session — this is the resume point)_
 
-|                  |                                                                                                                                                                              |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 2 — ILMath (Stylus / Rust)                                                                                                                                                   |
-| **▶ NEXT**       | Task **2.1** — `IILMath.sol` interface _(then install rustup + cargo-stylus before 2.2; see RUNBOOK.md)_                                                                     |
-| **Spec version** | v3.3 build-ready                                                                                                                                                             |
-| **Last commit**  | _(pending PR merge of `phase-1-monorepo-scaffold`)_                                                                                                                          |
-| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                               |
-| **Quant track**  | not started                                                                                                                                                                  |
-| **Last update**  | 2026-05-26 — Phase 1 complete (forge build + fmt:check green)                                                                                                                |
-| **Blockers**     | rustc / cargo / cargo-stylus required for tasks **2.2 onward** · docker still needed to actually run `pnpm dev:node` (the script is in place; install hints in `RUNBOOK.md`) |
+|                  |                                                                                                                                                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase**        | 14 — Quant (parallel) · Phase 2 deferred to home PC                                                                                                                                                                                                                             |
+| **▶ NEXT**       | Task **14.6** — correlated common-factor stress scenarios (`quant/`)                                                                                                                                                                                                            |
+| **Spec version** | v3.3 build-ready                                                                                                                                                                                                                                                                |
+| **Last commit**  | `feat(quant): Task 14.5 - PARTIAL portfolio waterfall (23 tests, notebook 04)`                                                                                                                                                                                                  |
+| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                                                                                                  |
+| **Quant track**  | 14.1–14.5 done (57 tests green); next 14.6 (stress) → 14.7 (calibrate)                                                                                                                                                                                                          |
+| **Last update**  | 2026-05-27 — Task 14.5 portfolio waterfall landed                                                                                                                                                                                                                               |
+| **Blockers**     | Phase 2 tasks 2.2+ blocked on home PC (Stylus dev requires WSL2; Windows MSVC native is broken — `native_keccak256` link error in `stylus-proc`, no upstream fix). Setup steps in `RUNBOOK.md` → "Stylus development". Solidity + TS + Python all unblocked on the work laptop. |
 
 ---
 
@@ -288,7 +288,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 - [x] (2026-05-26) **14.2 — Underlying model** — jump-diffusion (Kou or Merton) + historical bootstrap from 3y ETH/BTC/ARB data; common crash factor. _(All 4 simulators landed in `prices.py` with 13 property tests passing. Historical bootstrap uses synthetic Student-t(4) returns by default; `inflexion_quant.data.cached_fetch('ETH', days=1095)` swaps in real CoinGecko data offline. Notebook 01 drives all 4 with sample plots.)_
 - [x] (2026-05-26) **14.3 — Position-structure distribution** — realistic LP range widths × moneyness mix. _(`positions.py` + `PositionMix.crypto_majors()` mixture (30% tight / 40% moderate / 25% wide / 5% v2-like) with log-normal V0 and Beta(2,2) offsets. 6 tests; notebook 02 shows distributions + 200-position range-bar viz.)_
 - [x] (2026-05-26) **14.4 — Path → IL** — Python reimplementation of spec §3.1; sanity-check vs Stylus on a sample. _(Full float-based `il.py`: entry_amounts, lp_value (3 regimes), compute_il (guarded, I3+I4), compute_max_il (boundary-max, I1), compute_payout (capped, I1+I2). 15 tests incl. convexity, continuity, monotonicity, reference-magnitude bands that regenerate the spec §3.2 placeholders. Notebook 03 drives single-position IL sweeps + MaxIL/V0 reference table + 2k-position × Kou-path mix. **Stylus cross-check stubbed** — wires up in Phase 2.11 once cargo-stylus is in.)_
-- [ ] **14.5 — Portfolio waterfall** — spec §9 step 3.
+- [x] (2026-05-27) **14.5 — Portfolio waterfall** — spec §9 step 3. _(`portfolio.py` with `WaterfallConfig`, `waterfall()`, `aggregate()`, and a convex `default_fee_curve` placeholder anchored at spec §8.3 (1% at c=20%, 5% at c=10%). 23 property tests: conservation `mm_pays+fund_pays==payout`, FULL recovery when `c·V0≥MaxIL`, calm-market positive carry, crash-regime negative P&L, fee-curve convexity. Notebook 04 drives a 500-position book through calm GBM and crash Kou scenarios, sweeps `c ∈ [5%, 50%]`, plots the inflow-vs-outflow crossover. Task 14.7 will calibrate the real `c_min` and fee curve from these.)_
 - [ ] **14.6 — Stress scenarios** — correlated crash (common factor +6σ), vol regime shift, utilization spike.
 - [ ] **14.7 — Parameter outputs** — `c_min`, convex `floor_curve(c)`, convex `fee(c)`, circuit-breaker thresholds, withdrawal-delay length, per-market/per-MM exposure caps, MM first-loss size, target fund balance for ruin < 0.1%.
 - [ ] **14.8 — `quant/params.json`** — versioned, schema-validated, consumed by Phase 15 deploy.
