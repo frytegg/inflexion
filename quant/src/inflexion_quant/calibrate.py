@@ -178,7 +178,7 @@ def calibrate_c_min(
     ruin_budget: float = 0.001,
     premium_rate: float = 0.75,
     premium_share: float = 0.20,
-    fee_curve: Callable[[float], float] = default_fee_curve,
+    fee_curve: Callable[[float], float] | None = None,
     c_search: tuple[float, float] = (0.02, 0.50),
     tol: float = 0.005,
 ) -> dict[str, float | bool]:
@@ -187,12 +187,26 @@ def calibrate_c_min(
     Bisection: P(ruin) is (weakly) decreasing in c — more MM collateral means
     less fund tail exposure. Tolerance ``tol`` is the c-resolution; default
     0.5%-point.
+
+    By default the fee curve is **excluded** from the inflow (``fee_pct=0``):
+    c_min reflects the floor needed by the protocol's *base* premium share
+    alone, leaving the fee curve as a separate top-up calibrated by
+    :func:`calibrate_fee_curve`. This decouples c_min from the placeholder
+    fee curve's runaway behaviour at low c. Pass an explicit ``fee_curve``
+    to fold the tax back into the c_min search.
     """
 
     def ruin_at(c: float) -> float:
-        pnl = fund_pnl_from_cache(
-            cache, c=c, premium_rate=premium_rate,
-            premium_share=premium_share, fee_curve=fee_curve,
+        pnl = (
+            fund_pnl_from_cache(
+                cache, c=c, premium_rate=premium_rate,
+                premium_share=premium_share, fee_pct=0.0,
+            )
+            if fee_curve is None
+            else fund_pnl_from_cache(
+                cache, c=c, premium_rate=premium_rate,
+                premium_share=premium_share, fee_curve=fee_curve,
+            )
         )
         return ruin_probability(pnl, initial_fund_balance=fund_balance)
 
@@ -441,7 +455,7 @@ def calibrate_all(
     premium_rate: float = 0.75,
     premium_share: float = 0.20,
     ruin_budget: float = 0.001,
-    bootstrap_fund_balance_pct_of_notional: float = 0.05,
+    bootstrap_fund_balance_pct_of_notional: float = 0.01,
     cfg: CorrelatedCrashConfig | None = None,
     mix: PositionMix | None = None,
     exposure_grid: np.ndarray | None = None,

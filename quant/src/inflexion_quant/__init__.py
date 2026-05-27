@@ -3,7 +3,25 @@
 See ``../README.md`` and ``spec.md`` §9 for methodology.
 """
 
-from inflexion_quant import calibrate, data, il, portfolio, positions, prices, stress
+from inflexion_quant import (
+    calibrate,
+    data,
+    il,
+    params,
+    portfolio,
+    positions,
+    prices,
+    stress,
+)
 
 __version__ = "0.1.0"
-__all__ = ["calibrate", "data", "il", "portfolio", "positions", "prices", "stress"]
+__all__ = [
+    "calibrate",
+    "data",
+    "il",
+    "params",
+    "portfolio",
+    "positions",
+    "prices",
+    "stress",
+]

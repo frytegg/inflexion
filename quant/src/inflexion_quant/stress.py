@@ -119,10 +119,13 @@ class CorrelatedCrashConfig:
 
     @classmethod
     def severe(cls) -> "CorrelatedCrashConfig":
+        """99th-percentile correlated stress: ~2 crashes per 30d horizon,
+        mean −50% per crash, sigma 60%. Stretches the fund tail enough that
+        14.7's c_min calibration produces a non-trivial floor."""
         return cls(
-            sigma_idio=0.40,
+            sigma_idio=0.50,
             common=CommonFactor(
-                sigma=0.50, crash_lam=12.0, crash_mu=-0.35, crash_sigma=0.10
+                sigma=0.60, crash_lam=24.0, crash_mu=-0.50, crash_sigma=0.15
             ),
         )
 
