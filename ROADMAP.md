@@ -22,16 +22,17 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Current state _(update every session — this is the resume point)_
 
-|                  |                                                                                                                                                                              |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 2 — ILMath (Stylus / Rust)                                                                                                                                                   |
-| **▶ NEXT**       | Task **2.1** — `IILMath.sol` interface _(then install rustup + cargo-stylus before 2.2; see RUNBOOK.md)_                                                                     |
-| **Spec version** | v3.3 build-ready                                                                                                                                                             |
-| **Last commit**  | _(pending PR merge of `phase-1-monorepo-scaffold`)_                                                                                                                          |
-| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                               |
-| **Quant track**  | not started                                                                                                                                                                  |
-| **Last update**  | 2026-05-26 — Phase 1 complete (forge build + fmt:check green)                                                                                                                |
-| **Blockers**     | rustc / cargo / cargo-stylus required for tasks **2.2 onward** · docker still needed to actually run `pnpm dev:node` (the script is in place; install hints in `RUNBOOK.md`) |
+|                  |                                                                                                                                                                                                     |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase**        | 2 — ILMath (Stylus / Rust)                                                                                                                                                                          |
+| **▶ NEXT**       | Task **2.2** — Rust fixed-point primitives (`sqrt_x96`, `mul_div`, `abs_diff`) — **requires `rustup` + `cargo-stylus`** (see `RUNBOOK.md` install commands)                                         |
+| **Spec version** | v3.3 build-ready                                                                                                                                                                                    |
+| **Last commit**  | main: `ea9403c` (rename merged) · branch `phase-2-ilmath-stylus`: `f0f66e5` (Task 2.1)                                                                                                              |
+| **Open PR**      | https://github.com/frytegg/inflexion/pull/3 — Phase 2 / Task 2.1 (IILMath.sol interface)                                                                                                            |
+| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                      |
+| **Quant track**  | not started                                                                                                                                                                                         |
+| **Last update**  | 2026-05-26 — Task 2.1 committed (interface only); rename PR #2 merged; old memory dir cleaned up; local working dir is now `C:\dev\inflexion`                                                       |
+| **Blockers**     | **rustc / cargo / cargo-stylus** required to start Task 2.2 (everything after the interface needs Stylus). Docker still needed to actually run `pnpm dev:node`. Both install hints in `RUNBOOK.md`. |
 
 ---
 
@@ -103,7 +104,7 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_
 
-- [ ] **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
+- [x] (2026-05-26) **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
 - [ ] **2.2 — Fixed-point primitives in Rust** — `sqrt_x96` (Babylonian / Uniswap-style), `mul_div`, `abs_diff`. Property-test each (10k iterations) vs a `num-bigint` reference.
 - [ ] **2.3 — `compute_max_il`** — signature per spec §11.2. Implement `MaxIL = max(IL(Pa), IL(Pb))` per spec §3.2.
 - [ ] **2.4 — Hand-calc unit tests for `compute_max_il`** — 8 cases: centered ±5/±10/±20/±50% ranges; entry near Pa; entry near Pb; v2-like (very wide). Each vs Python spreadsheet reference; tolerance ≤ 1 wei after normalization.
