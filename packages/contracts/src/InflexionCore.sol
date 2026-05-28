@@ -13,6 +13,7 @@ import { IILMath } from "./interfaces/IILMath.sol";
 import { IOracleManager } from "./interfaces/IOracleManager.sol";
 import { UnderwriterVault } from "./UnderwriterVault.sol";
 import { ILVault } from "./ILVault.sol";
+import { TickMath } from "./libraries/TickMath.sol";
 
 /// @notice Slim local subset of Uniswap v3 NonfungiblePositionManager that
 ///         we read (`positions`) during `createSwap`. v3-periphery's full
@@ -392,18 +393,18 @@ contract InflexionCore is EIP712, Ownable {
     ///         a given sqrt price, without touching state. Used by the
     ///         invariant test suite (Task 5.10) and by frontends to preview
     ///         settle outcomes without burning gas.
-    /// @dev    `sqrtPaX96` and `sqrtPbX96` are not stored on the swap to
-    ///         keep the SwapRecord compact — pass them in (off-chain SDK
-    ///         reads ticks from the position NFT and converts).
+    /// @dev    `sqrtPaX96` / `sqrtPbX96` are re-derived from the position's
+    ///         (immutable) `tickLower` / `tickUpper` via TickMath. The
+    ///         caller only provides `sqrtPTX96` (the hypothetical
+    ///         settlement price they're previewing).
     function settlePreview(
         uint256 swapId,
-        uint160 sqrtPTX96,
-        uint160 sqrtPaX96,
-        uint160 sqrtPbX96
+        uint160 sqrtPTX96
     ) external returns (uint256 realisedIL, uint128 payout) {
         SwapRecord memory s = swaps[swapId];
         if (s.status != Status.ACTIVE) revert SwapNotActive(swapId, s.status);
 
+        (uint160 sqrtPaX96, uint160 sqrtPbX96) = _sqrtBoundsFor(s.tokenId);
         realisedIL = ilMath.computeIL(
             uint256(sqrtPTX96), uint256(sqrtPaX96), uint256(sqrtPbX96), s.liquidity, s.amount0Entry, s.amount1Entry
         );
@@ -418,17 +419,16 @@ contract InflexionCore is EIP712, Ownable {
     /// @param  signature    EIP-712 signature of `quote` by `quote.mm`.
     /// @param  tokenId      LP's Uniswap v3 position NFT.
     /// @param  maxPremium   LP slippage guard (in USDC).
-    /// @param  sqrtPaX96    Lower-tick sqrt price (off-chain SDK supplies).
-    /// @param  sqrtPbX96    Upper-tick sqrt price (off-chain SDK supplies).
     /// @param  sqrtP0X96    Entry sqrt price (off-chain SDK reads pool slot0).
     /// @return swapId       Newly-assigned swap identifier.
+    /// @dev    `sqrtPaX96` / `sqrtPbX96` are derived on-chain from the
+    ///         position's `tickLower` / `tickUpper` via TickMath — the LP
+    ///         cannot lie about the position's range geometry.
     function createSwap(
         SignedQuote calldata quote,
         bytes calldata signature,
         uint256 tokenId,
         uint256 maxPremium,
-        uint160 sqrtPaX96,
-        uint160 sqrtPbX96,
         uint160 sqrtP0X96
     ) external returns (uint256 swapId) {
         // ───── PHASE 1 — READ (no state change)
@@ -443,17 +443,22 @@ contract InflexionCore is EIP712, Ownable {
         }
 
         // Read the position and cross-check market metadata.
-        (,, address token0, address token1, uint24 fee,,, uint128 liquidity,,,,) =
+        (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity,,,,) =
             INonfungiblePositionManagerView(nonfungiblePositionManager).positions(tokenId);
         bytes32 derivedMarketId = keccak256(abi.encodePacked(token0, token1, fee, cfg.durationSeconds));
         if (derivedMarketId != quote.marketId) {
             revert MarketMismatch(quote.marketId, derivedMarketId);
         }
 
+        // Derive Pa / Pb on-chain from the position's immutable ticks
+        // (TickMath). Plugs the trust gap of an off-chain SDK lying about
+        // the position's geometry.
+        uint160 sqrtPaX96 = TickMath.getSqrtRatioAtTick(tickLower);
+        uint160 sqrtPbX96 = TickMath.getSqrtRatioAtTick(tickUpper);
+
         // In-range check: Pa ≤ P0 ≤ Pb (F-#2 / spec §5.2 PHASE 1)
         if (sqrtP0X96 < sqrtPaX96 || sqrtP0X96 > sqrtPbX96) {
-            // Tick comparison via sqrt price is monotonic, so this works.
-            revert PositionOutOfRange(0, 0, 0); // params populated in v2
+            revert PositionOutOfRange(tickLower, 0, tickUpper);
         }
 
         // IL math (delegated to IILMath — Stylus in production)
@@ -574,15 +579,13 @@ contract InflexionCore is EIP712, Ownable {
     /// @param  hintRoundId   Chainlink round id whose `updatedAt` brackets
     ///                       `swap.expiry` (off-chain keeper supplies this;
     ///                       OracleManager verifies — spec §6.1).
-    /// @param  sqrtPaX96     Lower-tick sqrt price (same as at creation).
-    /// @param  sqrtPbX96     Upper-tick sqrt price (same as at creation).
     /// @param  sqrtPTX96     Settlement sqrt price derived from Chainlink
     ///                       price by the caller (off-chain SDK).
+    /// @dev    `sqrtPaX96` / `sqrtPbX96` are re-derived on-chain from the
+    ///         position's immutable ticks (TickMath), same as createSwap.
     function settle(
         uint256 swapId,
         uint80 hintRoundId,
-        uint160 sqrtPaX96,
-        uint160 sqrtPbX96,
         uint160 sqrtPTX96
     ) external {
         SwapRecord storage s = swaps[swapId];
@@ -593,6 +596,8 @@ contract InflexionCore is EIP712, Ownable {
         //    staleness, lone-spike (unless backstop), wrong-round (spec §6.1).
         MarketConfig memory cfg = _marketForSwap(s);
         (uint256 settlementPrice,) = oracle.getSettlementPrice(cfg.oracleToken, s.expiry, hintRoundId);
+
+        (uint160 sqrtPaX96, uint160 sqrtPbX96) = _sqrtBoundsFor(s.tokenId);
 
         // 2. IL with STORED liquidity (invariant I6).
         uint256 realisedIL = ilMath.computeIL(
@@ -616,6 +621,20 @@ contract InflexionCore is EIP712, Ownable {
 
     // ─── Internal helpers
     // ────────────────────────────────────────────────
+
+    /// @dev Read the position's `tickLower` / `tickUpper` from the NPM and
+    ///      convert to Q64.96 sqrt prices via TickMath. Used by both
+    ///      `createSwap` (to gate in-range) and `settle` / `settlePreview`
+    ///      (to feed the IL math). The position's tick range is immutable
+    ///      for a given `tokenId`, so the two readings are guaranteed equal.
+    function _sqrtBoundsFor(
+        uint256 tokenId
+    ) internal view returns (uint160 sqrtPaX96, uint160 sqrtPbX96) {
+        (,,,,, int24 tickLower, int24 tickUpper,,,,,) =
+            INonfungiblePositionManagerView(nonfungiblePositionManager).positions(tokenId);
+        sqrtPaX96 = TickMath.getSqrtRatioAtTick(tickLower);
+        sqrtPbX96 = TickMath.getSqrtRatioAtTick(tickUpper);
+    }
 
     /// @dev Reconstruct the MarketConfig for a swap. The stored swap doesn't
     ///      carry the marketId directly; we re-derive it from the position

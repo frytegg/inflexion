@@ -237,7 +237,7 @@ contract InflexionCoreTest is Test {
         uint256 mmUsdcBefore = usdc.balanceOf(mmWallet.addr);
 
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
 
         // Premium = ceil(7500 * 100e6 / 10000) = 75e6 = $75
         uint128 expectedPremium = 75e6;
@@ -264,7 +264,7 @@ contract InflexionCoreTest is Test {
         bytes memory badSig = new bytes(65); // empty / zero sig
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, badSig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, badSig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     function test_createSwap_rejectsUsedNonce() public {
@@ -281,7 +281,7 @@ contract InflexionCoreTest is Test {
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
         vm.expectRevert(abi.encodeWithSelector(InflexionCore.NonceAlreadyUsed.selector, mmWallet.addr, q.nonce));
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     function test_createSwap_rejectsExpiredQuote() public {
@@ -292,7 +292,7 @@ contract InflexionCoreTest is Test {
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     function test_createSwap_rejectsBandViolation() public {
@@ -303,7 +303,7 @@ contract InflexionCoreTest is Test {
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     function test_createSwap_consumedNotional_tracked() public {
@@ -312,7 +312,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
         // consumedNotional[quoteId] should be > 0 after the swap
         assertGt(core.consumedNotional(q.quoteId), 0);
     }
@@ -329,7 +329,7 @@ contract InflexionCoreTest is Test {
                 InflexionCore.UnsupportedModel.selector, uint8(InflexionCore.CollateralModel.PARTIAL)
             )
         );
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     // ─── settle happy path (Task 5.8)
@@ -341,7 +341,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
 
         // Warp past expiry
         vm.warp(block.timestamp + DURATION + 1);
@@ -357,7 +357,7 @@ contract InflexionCoreTest is Test {
         ilMath.setIL(30e6);
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PA, SQRT_PB, SQRT_PT);
+        core.settle(swapId, 2, SQRT_PT);
 
         // LP got $30 payout
         assertEq(usdc.balanceOf(lp) - lpUsdcBefore, 30e6);
@@ -375,7 +375,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
 
         vm.warp(block.timestamp + DURATION + 1);
         uint64 expiry = uint64(block.timestamp - 1);
@@ -387,7 +387,7 @@ contract InflexionCoreTest is Test {
         ilMath.setIL(500e6);
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PA, SQRT_PB, SQRT_PT);
+        core.settle(swapId, 2, SQRT_PT);
         assertEq(usdc.balanceOf(lp) - lpUsdcBefore, 100e6, "I1/I2: payout MUST cap at MaxIL");
     }
 
@@ -397,11 +397,11 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
 
         // Don't warp past expiry — settle should revert
         vm.expectRevert();
-        core.settle(swapId, 2, SQRT_PA, SQRT_PB, SQRT_PT);
+        core.settle(swapId, 2, SQRT_PT);
     }
 
     // ─── settlePreview view (Task 5.9)
@@ -413,17 +413,17 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
 
         // Preview at IL=$30 → payout=$30
         ilMath.setIL(30e6);
-        (uint256 il, uint128 payout) = core.settlePreview(swapId, SQRT_PT, SQRT_PA, SQRT_PB);
+        (uint256 il, uint128 payout) = core.settlePreview(swapId, SQRT_PT);
         assertEq(il, 30e6);
         assertEq(payout, 30e6);
 
         // Preview at IL=$500 → payout=$100 (capped)
         ilMath.setIL(500e6);
-        (uint256 il2, uint128 payout2) = core.settlePreview(swapId, SQRT_PT, SQRT_PA, SQRT_PB);
+        (uint256 il2, uint128 payout2) = core.settlePreview(swapId, SQRT_PT);
         assertEq(il2, 500e6);
         assertEq(payout2, 100e6);
     }

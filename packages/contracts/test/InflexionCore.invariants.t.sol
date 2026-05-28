@@ -168,7 +168,7 @@ contract InflexionCoreInvariantsTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote(nonce);
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     function _warpAndSeedSettlementRound(
@@ -202,7 +202,7 @@ contract InflexionCoreInvariantsTest is Test {
         ilMath.setIL(rIL);
 
         uint256 lpBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PA, SQRT_PB, SQRT_PT);
+        core.settle(swapId, 2, SQRT_PT);
         uint256 paid = usdc.balanceOf(lp) - lpBefore;
 
         // I1: payout ≤ maxIL (== collateral)
@@ -238,7 +238,7 @@ contract InflexionCoreInvariantsTest is Test {
 
         _warpAndSeedSettlementRound(expiry);
         uint256 lpBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PA, SQRT_PB, SQRT_PT);
+        core.settle(swapId, 2, SQRT_PT);
         uint256 paid = usdc.balanceOf(lp) - lpBefore;
 
         // STORED-L branch: IL = POSITION_LIQUIDITY = 1e10. Cap at maxIL
@@ -269,7 +269,7 @@ contract InflexionCoreInvariantsTest is Test {
         assertEq(pm.liquidity(tokenId), uint128(POSITION_LIQUIDITY) + inflateBy);
 
         _warpAndSeedSettlementRound(expiry);
-        core.settle(swapId, 2, SQRT_PA, SQRT_PB, SQRT_PT);
+        core.settle(swapId, 2, SQRT_PT);
 
         // I6: the L the contract forwarded to computeIL == stored.
         assertTrue(ilMath.lastILCallSeen(), "settle never invoked computeIL");
@@ -298,7 +298,7 @@ contract InflexionCoreInvariantsTest is Test {
 
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 
     function testFuzz_I9_priceBandWithinBandAccepts(
@@ -315,7 +315,7 @@ contract InflexionCoreInvariantsTest is Test {
         bytes memory sig = _signQuote(q);
 
         vm.prank(lp);
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_PA, SQRT_PB, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
     }
 }
 
