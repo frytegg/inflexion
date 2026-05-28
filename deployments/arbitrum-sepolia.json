@@ -1,0 +1,29 @@
+{
+  "chainId": 421614,
+  "name": "Arbitrum Sepolia",
+  "purpose": "Hackathon demo deployment target.",
+  "chainlink": {
+    "_source": "https://reference-data-directory.vercel.app/feeds-ethereum-testnet-sepolia-arbitrum-1.json (verified 2026-05-28)",
+    "ethUsd": "0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165",
+    "btcUsd": "0x56a43EB56Da12C0dc1D972ACb089c06a5dEF8e69",
+    "arbUsd": "0xD1092a65338d049DB68D7Be6bD89d17a0929945e",
+    "usdcUsd": "0x0153002d20B96532C639313c2d54c3dA09109309",
+    "sequencerUptime": null,
+    "_sequencerNote": "Chainlink does NOT publish an L2 Sequencer Uptime Feed on Arbitrum Sepolia (testnet, no SLA). OracleManager treats sequencerFeed == address(0) as 'skip sequencer check' — safe on testnet; this must be set before any mainnet deploy.",
+    "_heartbeats_s": {
+      "ethUsd": 120,
+      "btcUsd": 120,
+      "arbUsd": 86400,
+      "usdcUsd": 86400,
+      "_note": "Testnet feeds tick faster (~120s) than mainnet (86400s). OracleManager.MAX_STALENESS is per-token configurable; for Sepolia we still set 90000s so the same value works on either chain."
+    },
+    "_decimals": 8
+  },
+  "uniswap": {
+    "_source": "https://developers.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments (verified 2026-05-28)",
+    "v3Factory": "0x248AB79Bbb9bC29bB72f7Cd42F17e054Fc40188e",
+    "nonfungiblePositionManager": "0x6b2937Bde17889EDCf8fbD8dE31C3C2a70Bc4d65",
+    "swapRouter02": "0x101F443B4d1b059569D643917553c771E1b9663E",
+    "quoterV2": "0x2779a0CC1c3e0E44D2542EC3e79e3864Ae93Ef0B"
+  }
+}
