@@ -1,0 +1,28 @@
+{
+  "chainId": 42161,
+  "name": "Arbitrum One",
+  "purpose": "Fork-test fixtures (foundry --fork-url). Inflexion is NOT deployed to Arbitrum One during the hackathon — Sepolia only.",
+  "chainlink": {
+    "_source": "https://reference-data-directory.vercel.app/feeds-ethereum-mainnet-arbitrum-1.json (verified 2026-05-28); cross-checked with spec.md §6.4",
+    "ethUsd": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",
+    "btcUsd": "0x6ce185860a4963106506C203335A2910413708e9",
+    "arbUsd": "0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6",
+    "usdcUsd": "0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3",
+    "sequencerUptime": "0xFdB631F5EE196F0ed6FAa767959853A9F217697D",
+    "_heartbeats_s": {
+      "ethUsd": 86400,
+      "btcUsd": 86400,
+      "arbUsd": 86400,
+      "usdcUsd": 86400,
+      "_note": "All majors on Arbitrum One use a 24h heartbeat with 0.05% deviation trigger (USDC: 0.1%). MAX_STALENESS in OracleManager is set to heartbeat + 3600s grace = 90000s (spec §6.2)."
+    },
+    "_decimals": 8
+  },
+  "uniswap": {
+    "_source": "https://developers.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments (verified 2026-05-28)",
+    "v3Factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+    "nonfungiblePositionManager": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+    "swapRouter02": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+    "quoterV2": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+  }
+}
