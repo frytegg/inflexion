@@ -400,7 +400,7 @@ contract InflexionCore is EIP712, Ownable {
         uint160 sqrtPTX96,
         uint160 sqrtPaX96,
         uint160 sqrtPbX96
-    ) external view returns (uint256 realisedIL, uint128 payout) {
+    ) external returns (uint256 realisedIL, uint128 payout) {
         SwapRecord memory s = swaps[swapId];
         if (s.status != Status.ACTIVE) revert SwapNotActive(swapId, s.status);
 
