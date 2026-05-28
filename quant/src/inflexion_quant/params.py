@@ -35,7 +35,7 @@ from pydantic import (
 from inflexion_quant.calibrate import CalibrationResult, calibrate_all
 
 
-PARAMS_SCHEMA_VERSION = "1.0.0"
+PARAMS_SCHEMA_VERSION = "2.0.0"
 
 
 # ─── Sub-models ──────────────────────────────────────────────────────────────
@@ -61,7 +61,8 @@ class FeeCurveParams(BaseModel):
     placeholder_fee_pct_at_c: NonNegativeFloat
     c_ref: float = Field(..., gt=0.0, le=1.0)
     exponent: float = Field(..., gt=0.0)
-    median_pnl_at_refit: float
+    mean_pnl_at_refit: float
+    target_mean_pnl: float
     feasible_in_fee_search: bool
 
 
@@ -131,12 +132,18 @@ class Params(BaseModel):
     fund_target: NonNegativeFloat
 
     # Provenance / sanity
-    ruin_budget: float = Field(..., gt=0.0, lt=1.0)
+    ruin_budget_per_horizon: float = Field(..., gt=0.0, lt=1.0)
+    horizon_days: PositiveInt
+    annualized_ruin_budget: float = Field(..., gt=0.0, lt=1.0)
     c_used_for_fund_target: float = Field(..., gt=0.0, le=1.0)
+    fund_target_estimator: str  # "CVaR" or "VaR"
     n_runs: PositiveInt
     n_positions: PositiveInt
     rng_seed: int
     stress_scenario: str
+    parameter_provenance: dict[str, str]  # per-field: calibrated / heuristic / deferred
+    fixed_point_iterations: PositiveInt
+    stability_check: dict[str, float] | None = None
     notes: str
 
     @field_validator("schema_version")
@@ -166,7 +173,6 @@ class Params(BaseModel):
         stress_scenario: str,
     ) -> "Params":
         """Build a Params from a 14.7 CalibrationResult plus provenance."""
-        # Drop sweep table — too verbose for params.json (lives in notebook 06)
         exposure_dict = {
             k: v for k, v in result.exposure_caps.items() if k != "sweep"
         }
@@ -182,12 +188,18 @@ class Params(BaseModel):
             exposure_caps=ExposureCaps(**exposure_dict),
             first_loss_fraction=result.first_loss_fraction,
             fund_target=result.fund_target,
-            ruin_budget=result.ruin_budget,
+            ruin_budget_per_horizon=result.ruin_budget_per_horizon,
+            horizon_days=result.horizon_days,
+            annualized_ruin_budget=result.annualized_ruin_budget,
             c_used_for_fund_target=result.c_used_for_fund_target,
+            fund_target_estimator=result.fund_target_estimator,
             n_runs=result.n_runs,
             n_positions=result.n_positions,
             rng_seed=rng_seed,
             stress_scenario=stress_scenario,
+            parameter_provenance=result.parameter_provenance,
+            fixed_point_iterations=result.fixed_point_iterations,
+            stability_check=result.stability_check,
             notes=result.notes,
         )
 
@@ -209,16 +221,18 @@ class Params(BaseModel):
 def emit_params(
     output_path: Path | str,
     *,
-    n_runs: int = 1000,
+    n_runs: int = 50_000,
     n_positions: int = 200,
     rng_seed: int = 20260527,
     stress_scenario: str = "CorrelatedCrashConfig.severe",
+    run_stability_check: bool = True,
 ) -> Params:
     """Run :func:`calibrate_all` → wrap → save → return the in-memory model."""
     result = calibrate_all(
         n_runs=n_runs,
         n_positions=n_positions,
         rng_seed=rng_seed,
+        run_stability_check=run_stability_check,
     )
     p = Params.from_calibration(
         result, rng_seed=rng_seed, stress_scenario=stress_scenario
@@ -238,9 +252,11 @@ def _main() -> None:
         "--output", type=Path, default=Path("params.json"),
         help="output path (default: ./params.json)",
     )
-    parser.add_argument("--n-runs", type=int, default=1000)
+    parser.add_argument("--n-runs", type=int, default=50_000)
     parser.add_argument("--n-positions", type=int, default=200)
     parser.add_argument("--rng-seed", type=int, default=20260527)
+    parser.add_argument("--no-stability-check", action="store_true",
+                        help="Skip the cross-seed stability check (faster).")
     args = parser.parse_args()
 
     p = emit_params(
@@ -248,12 +264,23 @@ def _main() -> None:
         n_runs=args.n_runs,
         n_positions=args.n_positions,
         rng_seed=args.rng_seed,
+        run_stability_check=not args.no_stability_check,
     )
     print(f"Wrote {args.output}")
-    print(f"  schema_version: {p.schema_version}")
-    print(f"  c_min:          {p.c_min * 100:.2f}%")
-    print(f"  fund_target:    ${p.fund_target:,.0f}")
-    print(f"  per_market_cap: {p.exposure_caps.per_market_cap} swaps")
+    print(f"  schema_version:   {p.schema_version}")
+    print(f"  c_min:            {p.c_min * 100:.2f}%")
+    print(f"  fund_target:      ${p.fund_target:,.0f}  ({p.fund_target_estimator})")
+    print(f"  per_market_cap:   {p.exposure_caps.per_market_cap} swaps")
+    print(f"  per_mm_cap:       {p.exposure_caps.per_mm_cap} swaps")
+    print(f"  ruin (per {p.horizon_days}d):   {p.ruin_budget_per_horizon * 100:.2f}%")
+    print(f"  ruin (annualized): {p.annualized_ruin_budget * 100:.2f}%")
+    print(f"  fixed-point iterations: {p.fixed_point_iterations}")
+    if p.stability_check:
+        sc = p.stability_check
+        print(f"  cross-seed c_min spread: {sc['c_min_spread_bp']:.0f} bp "
+              f"(min={sc['c_min_min'] * 100:.2f}%, max={sc['c_min_max'] * 100:.2f}%)")
+        print(f"  cross-seed fund_target spread: {sc['fund_target_spread_pct']:.1f}% "
+              f"(min=${sc['fund_target_min']:,.0f}, max=${sc['fund_target_max']:,.0f})")
 
 
 if __name__ == "__main__":

@@ -37,8 +37,7 @@ import pandas as pd  # noqa: E402
 
 from inflexion_quant.calibrate import (
     build_scenario_cache,
-    calibrate_c_min,
-    calibrate_fund_target,
+    calibrate_all,
     fund_pnl_from_cache,
 )
 from inflexion_quant.stress import (
@@ -98,10 +97,19 @@ def prepare_inputs(
     premium_rate: float = 0.75,
     premium_share: float = 0.20,
     ruin_budget: float = 0.001,
-    bootstrap_pct_of_notional: float = 0.01,
+    bootstrap_pct_of_notional: float = 0.01,  # used only for chart 2's secondary curve
 ) -> DeckInputs:
-    """Build the severe-stress cache and run c_min + fund_target calibration."""
+    """Run the same :func:`calibrate_all` that emits ``params.json`` so the
+    deck charts and the deployed parameters cannot drift apart.
+
+    The cache used for chart rendering is built with the same seed as the
+    calibration, so all annotations (medians, quantiles, percentile bars)
+    are drawn from the identical Monte Carlo sample that drove the
+    serialised ``c_min`` and ``fund_target``.
+    """
     cfg = CorrelatedCrashConfig.severe()
+
+    # Build cache once for chart rendering (same seed as calibrate_all uses)
     cache = build_scenario_cache(
         n_runs=n_runs,
         n_positions=n_positions,
@@ -112,27 +120,25 @@ def prepare_inputs(
     typical_book = float(np.median(cache.V0s.sum(axis=1)))
     bootstrap_balance = bootstrap_pct_of_notional * typical_book
 
-    c_res = calibrate_c_min(
-        cache=cache,
-        fund_balance=bootstrap_balance,
-        ruin_budget=ruin_budget,
-        premium_rate=premium_rate,
-        premium_share=premium_share,
-    )
-    c_min = float(c_res["c_min"]) if c_res["feasible"] else 0.50
-
-    fund_res = calibrate_fund_target(
-        cache=cache,
-        c=c_min,
+    # Use calibrate_all for the headline numbers — same code path as
+    # params.json. (calibrate_all builds its own cache internally; cheap
+    # at hackathon scale, ensures perfect consistency.)
+    result = calibrate_all(
+        n_runs=n_runs,
+        n_positions=n_positions,
+        P0=100.0,
         premium_rate=premium_rate,
         premium_share=premium_share,
         ruin_budget=ruin_budget,
+        cfg=cfg,
+        rng_seed=rng_seed,
+        run_stability_check=False,
     )
 
     return DeckInputs(
         cache_severe=cache,
-        c_min=c_min,
-        fund_target=float(fund_res["fund_target"]),
+        c_min=result.c_min,
+        fund_target=result.fund_target,
         premium_rate=premium_rate,
         premium_share=premium_share,
         ruin_budget=ruin_budget,
