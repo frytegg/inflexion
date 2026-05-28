@@ -65,5 +65,5 @@ interface IILMath {
         uint128 liquidity,
         uint256 amount0Entry,
         uint256 amount1Entry
-    ) external view returns (uint256 ilAmount);
+    ) external returns (uint256 ilAmount);
 }

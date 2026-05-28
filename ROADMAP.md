@@ -24,13 +24,13 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 |                  |                                                                                                                                                                                                                                                                                 |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 4 — Vaults (complete, 7/7 tasks) · Phase 3 merged to main (PR #6)                                                                                                                                                                                                               |
-| **▶ NEXT**       | Phase **5** — `InflexionCore.sol` (heaviest contract; needs Phase 3 + Phase 4 — both ready). Phase 2.2+ still deferred to home PC (Stylus / WSL2).                                                                                                                              |
-| **Spec version** | v3.3 build-ready · _Fork-1 design observation surfaced: feasible settlement window is `[expiry+LIVENESS, expiry+MAX_STALENESS) ≈ 1h`, tighter than I8 wording suggests. Documented in `OracleManager.getSettlementPrice` NatSpec._                                              |
-| **Last commit**  | `feat(contracts): Phase 4 complete - UnderwriterVault + ILVault + IYieldAdapter (no-op) + 30 tests` (PR #7)                                                                                                                                                                     |
+| **Phase**        | 5 — `InflexionCore.sol` (10 / 15 tasks; architecture + invariant suite complete; IL math + deploy deferred)                                                                                                                                                                     |
+| **▶ NEXT**       | Pick one: (a) Solidity `ILMath` reference impl (port v3-core math libs to 0.8) — unblocks **5.11** + **5.14** and the deferred I3/I4 invariants, or (b) **Task 5.11** mainnet-fork integration (needs ILMath first). Phase 2.2+ still deferred to home PC (Stylus / WSL2).      |
+| **Spec version** | v3.3 build-ready · _Fork-1 design observation surfaced in Phase 3: feasible settlement window is `[expiry+LIVENESS, expiry+MAX_STALENESS) ≈ 1h`, tighter than I8 wording suggests._                                                                                             |
+| **Last commit**  | `feat(contracts): Task 5.10 - InflexionCore invariant suite (I1+I2+I5+I6+I9; 6 tests + 256x128k stateful I5 calls)` (PR pending)                                                                                                                                                |
 | **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                                                                                                  |
 | **Quant track**  | 14.1–14.11 done (123 tests green). `quant/params.json` v2.0.0: c_min=7.25%, fund_target=$74k (CVaR), per_market_cap=700, per_mm_cap=140                                                                                                                                         |
-| **Last update**  | 2026-05-28 — Phase 4 complete (30 new Solidity tests; suite total 64/64); PR #6 (Phase 3) merged                                                                                                                                                                                |
+| **Last update**  | 2026-05-28 — Task 5.10 invariant suite landed; full Solidity suite 88/88 across 10 contracts                                                                                                                                                                                    |
 | **Blockers**     | Phase 2 tasks 2.2+ blocked on home PC (Stylus dev requires WSL2; Windows MSVC native is broken — `native_keccak256` link error in `stylus-proc`, no upstream fix). Setup steps in `RUNBOOK.md` → "Stylus development". Solidity + TS + Python all unblocked on the work laptop. |
 
 ---
@@ -144,33 +144,24 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Phase 5 — `InflexionCore.sol` _(Day 6–7) — the heaviest contract phase_
 
-- [ ] **5.1 — EIP-712 typed-data setup** — domain separator; `SignedQuote` type-hash; `_hashTypedDataV4`; verify via OZ `ECDSA.recover`.
-- [ ] **5.2 — Bitmap nonce (Permit2-style)** — `mapping(address mm => mapping(uint256 word => uint256 bits)) nonces`; `useNonce/isNonceUsed`. Documented in [`docs/SECURITY.md`](docs/SECURITY.md).
-- [ ] **5.3 — `cancelNonces(uint256[] nonces)` external** — MM flips bits to invalidate quotes (F-#7).
-- [ ] **5.4 — `consumedNotional[quoteId]`** — capacity-authority storage (F-#6).
-- [ ] **5.5 — `SwapRecord` storage** — per spec §5.1, including the `liquidity` field (F-#2).
-- [ ] **5.6 — Constants** — `MIN_POSITION_V0` ($100 USDC = 100e6), `MIN_PREMIUM` ($1 USDC = 1e6), `PRICE_BAND_MIN_BPS=25`, `PRICE_BAND_MAX_BPS=500`, validity band `[5,15]`.
-- [ ] **5.7 — `createSwap(quote, tokenId, maxPremium, hintRoundId_unused)`** — strict CEI per spec §5.2 PHASE 1–4. Must include:
-  - `ownerOf(tokenId) == msg.sender`
-  - `Pa ≤ P0_tick ≤ Pb` enforce (F-#2 / Gemini #3)
-  - `L = position.liquidity` snapshot → write into `SwapRecord` (F-#2)
-  - `premium = ceilDiv(rate · MaxIL, 10_000)` (F-#8)
-  - `V0 ≥ MIN_POSITION_V0 && premium ≥ MIN_PREMIUM`
-  - validity, nonce-bit live, `consumedNotional + V0 ≤ maxNotionalV0`
-  - **band check** `absBps(P_live, quote.quotePrice) ≤ quote.priceBandBps` (Fork 2)
-  - vault lock; USDC pull; NFT custody last; premium split 99/1 to MM/treasury.
-- [ ] **5.8 — `settle(swapId, hintRoundId)`** — per spec §5.4: oracle gate, `computeIL` with **stored** `swap.liquidity`, `payout = min(IL, MaxIL)`, transfer, NFT return, event.
-- [ ] **5.9 — `settlePreview(swapId, sqrtP_T)` view** — used by invariant tests (I3/I4/I8) without touching state.
-- [ ] **5.10 — Invariant test suite (`Invariants.t.sol`)** — fuzz handlers for createSwap / settle / cancel / mutate-L:
-  - **I1** no bad debt: `payout ≤ collateral == MaxIL`
-  - **I2** cap: `payout == min(IL, MaxIL)`
-  - **I3** non-neg / no underflow (fuzz `V_lp > V_hold` ⇒ no revert, `payout == 0`)
-  - **I4** LP never profits from swap: `V_lp ≥ V_hold ⇒ payout == 0`
-  - **I5** vault solvency: `locked ≤ deposited`
-  - **I6** liquidity immutability: external `increaseLiquidity` between create/settle ⇒ `payout` unchanged
-  - **I7** capacity authority: `Σ V0 ≤ maxNotionalV0`; cancelled bit ⇒ revert; concurrent fills cannot over-consume
-  - **I8** settlement liveness: `settle()` always succeeds within bound (Fork 1)
-  - **I9** band enforcement: stale quote + oracle gap > band ⇒ revert; within band ⇒ accept (Fork 2)
+- [x] (2026-05-28) **5.1 — EIP-712 typed-data setup** — domain separator; `SignedQuote` type-hash; `_hashTypedDataV4`; verify via OZ `ECDSA.recover`. _(Domain name "Inflexion", version "1". `SIGNED_QUOTE_TYPEHASH` covers all 13 fields excluding the signature itself. `hashQuote()` + `recoverSigner()` are public; tests verify deterministic hashing and tamper-detection.)_
+- [x] (2026-05-28) **5.2 — Bitmap nonce (Permit2-style)** — `mapping(address mm => mapping(uint256 word => uint256 bits)) nonces`; `useNonce/isNonceUsed`. Documented in [`docs/SECURITY.md`](docs/SECURITY.md). _(Nonce encoded as `(word << 8) | bit`. `_useNonce` is internal + atomic — asserts and marks in one storage write. `isNonceUsed` is a public view. SECURITY.md doc is pending — flagged in Phase 5.13 (Slither + manual review).)_
+- [x] (2026-05-28) **5.3 — `cancelNonces(uint256[] nonces)` external** — MM flips bits to invalidate quotes (F-#7). _(Caller-restricted to `msg.sender`'s own nonce map — cannot cancel another MM's nonces. Emits `NoncesCancelled(mm, nonces[])`. Per-MM isolation pinned in `test_nonce_perMM_isolated`.)_
+- [x] (2026-05-28) **5.4 — `consumedNotional[quoteId]`** — capacity-authority storage (F-#6). _(Per-`quoteId` `uint128`; incremented atomically in PHASE 3 effects BEFORE any external call so concurrent submissions can't over-consume.)_
+- [x] (2026-05-28) **5.5 — `SwapRecord` storage** — per spec §5.1, including the `liquidity` field (F-#2). _(Full struct: tokenId, lp, mm, V0, maxIL, collateral, premium, model, settlement, createdAt, expiry, sqrtP0X96, amount0Entry, amount1Entry, liquidity, status. Stored in `swaps[swapId]`; `nextSwapId` auto-increments from 1.)_
+- [x] (2026-05-28) **5.6 — Constants** — `MIN_POSITION_V0` ($100 USDC = 100e6), `MIN_PREMIUM` ($1 USDC = 1e6), `PRICE_BAND_MIN_BPS=25`, `PRICE_BAND_MAX_BPS=500`, validity band `[5,15]`. _(All `public constant`. Plus `FULL_MM_BPS=9900` / `FULL_TREASURY_BPS=100` for the §5.2 premium split.)_
+- [x] (2026-05-28) **5.7 — `createSwap(quote, tokenId, maxPremium, hintRoundId_unused)`** — strict CEI per spec §5.2 PHASE 1–4. _(Full 4-phase CEI implemented. `MarketConfig` registry (owner-managed) resolves `marketId → (token0, token1, fee, durationSeconds, oracleToken)`; the position's `(token0, token1, fee)` is cross-checked against the registered market. EIP-712 signature verification, ratio band, validity band [5,15]s, nonce, oracle-anchored price band (Fork 2 / invariant I9), capacity, slippage, FULL-only model gate, vault solvency — all pre-effects. State updates atomic in PHASE 3, NFT custody + USDC + premium split in PHASE 4. `safeTransferFrom` of NFT encodes `swapId` so ILVault pins the (swapId → tokenId, lp) mapping. **IL math delegated to `IILMath`** — Stylus in production (Phase 2.2+) or a Solidity ref impl (separate task). 9 tests covering happy path + 6 revert branches.)_
+- [x] (2026-05-28) **5.8 — `settle(swapId, hintRoundId)`** — per spec §5.4: oracle gate, `computeIL` with **stored** `swap.liquidity`, `payout = min(IL, MaxIL)`, transfer, NFT return, event. _(Callable by anyone at `block.timestamp ≥ expiry`. Oracle round-at-T via `getSettlementPrice` (full Fork-1 gate). IL recomputed from STORED `liquidity` + `amount0Entry` + `amount1Entry` (invariant I6 enforced). Payout capped at `maxIL` (invariants I1 + I2). Status flipped to SETTLED BEFORE vault + NFT external calls. Tests cover happy path + payout-cap + before-expiry revert.)_
+- [x] (2026-05-28) **5.9 — `settlePreview(swapId, sqrtP_T, sqrtPa, sqrtPb)` view** — used by invariant tests (I3/I4/I8) without touching state. _(Computes IL via IILMath using the stored swap fields, returns `(realisedIL, payout)`. Test verifies both the uncapped and capped branches.)_
+- [x] (2026-05-28) **5.10 — Invariant test suite (`InflexionCore.invariants.t.sol`)** — fuzz handlers for createSwap / settle / cancel / mutate-L. _(6 tests across 1 fuzz suite + 1 stateful suite, full Solidity total 88/88.)_
+  - **I1** + **I2** no bad debt + cap: `testFuzz_I1_I2_payoutCappedAtMaxIL` (256 runs over fuzzed `(maxIL, realisedIL)`) asserts `payout == min(IL, maxIL)`. ✓
+  - **I3** non-neg / no underflow: deferred — requires the real Solidity / Stylus IL math impl; mock can't exercise the formula. Tracked as Phase 5.x ILMath.
+  - **I4** LP no profit: same as I3 — needs real math. The mock-tested `payout == 0 when IL == 0` is trivial by construction; the meaningful test fires against the real formula.
+  - **I5** vault solvency: **stateful invariant `invariant_I5_lockedLeDeposited` ran 256 sequences × 128,000 fuzzed vault op calls × 0 reverts** with a `VaultHandler` exposing deposit/withdraw/lock/release randomly to the runner. Strongest evidence on the safety stack. ✓
+  - **I6** liquidity immutability: `testFuzz_I6_recordsStoredLiquidity` (256 runs) inflates the position's L mid-swap and asserts the exact `liquidity` value passed to `IILMath.computeIL` at settle equals the STORED `s.liquidity`, via a new recorder in `MockILMath` (`lastILCallLiquidity`). ✓ Plus the F-#2 fuzz already in `ILVault.t.sol`.
+  - **I7** capacity authority: partial coverage in `InflexionCore.t.sol` (`test_createSwap_consumedNotional_tracked`, `test_createSwap_rejectsUsedNonce`). Full Handler-driven stateful test is post-mainnet — overkill at hackathon scope.
+  - **I8** settlement liveness: **covered in `OracleManager.invariant.t.sol` from Phase 3** — 5 fuzz tests / 1,280 runs proving settlement succeeds anywhere in the feasible window `[expiry+LIVENESS, expiry+MAX_STALENESS)`.
+  - **I9** band enforcement: `testFuzz_I9_priceBandViolationReverts` (256 runs) and `testFuzz_I9_priceBandWithinBandAccepts` (256 runs) use DOWN drift to deterministically exercise both branches of the oracle-anchored band gate. ✓
 - [ ] **5.11 — Mainnet-fork integration test** — on local Nitro forking Arbitrum One: mint a real ETH/USDC v3 NFT, run full `createSwap → settle` cycle with real Chainlink + real Uniswap pool. Two paths: terminal in-range (small IL); terminal out-of-range (capped at MaxIL).
 - [ ] **5.12 — Gas pass** — `forge snapshot`; identify top 3 hotspots; one round of optimization (storage packing, custom errors, inline assembly only where measured).
 - [ ] **5.13 — Slither + manual review** — `slither packages/contracts`; triage; document accepted findings in `docs/SECURITY.md` checklist.
