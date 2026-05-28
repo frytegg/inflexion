@@ -205,6 +205,26 @@ contract OracleManager is IOracleManager, Ownable {
 
     // ─── getSettlementPrice — round-at-T + lone-spike + backstop (Task 3.4) ──
 
+    /// @notice Settlement price for `token` pinned to the Chainlink round
+    ///         active at `expiry`. See spec §6.1.
+    /// @dev    **Feasible settlement window observation (Task 3.10 / I8).**
+    ///         Spec invariant I8 promises liveness within
+    ///         `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`.
+    ///         The implementation's actual usable window is:
+    ///
+    ///             [ expiry + LIVENESS_WINDOW,   expiry + MAX_STALENESS )
+    ///
+    ///         which is `MAX_STALENESS - LIVENESS_WINDOW = 3,600s ≈ 1h`
+    ///         with current constants (90,000 vs 86,400). Beyond
+    ///         `expiry + MAX_STALENESS` the pinned round becomes
+    ///         spec-literal "stale" and the staleness check fires before the
+    ///         backstop has a chance — funds cannot settle on that round.
+    ///         This is the assignment from spec §6.1's literal `require`
+    ///         ordering; it surfaces a Fork-1 design observation worth
+    ///         flagging to spec authors (the 1h window is symmetric for both
+    ///         parties, so it preserves fairness, but it is tighter than the
+    ///         I8 wording suggests). Test:
+    ///         `OracleManagerInvariantTest.test_I8_revertsPastStaleness_boundary`.
     function getSettlementPrice(
         address token,
         uint64 expiry,
