@@ -175,3 +175,136 @@ def test_asymmetric_position_max_il_at_correct_boundary():
     il_pb = float(compute_il(np.array([Pb]), Pa, Pb, L, a0, a1)[0])
     # Down side is farther → IL(Pa) should dominate
     assert il_pa > il_pb
+
+
+# ─── Hand-calculated fixture (audit C1: external correctness vs Uniswap v3 §6.30) ────
+
+
+# Fixture position: P0=100, Pa=80, Pb=125, L=1000.
+#
+# All reference values below were computed by an INDEPENDENT script using
+# only Python's stdlib math (sqrt) — no inflexion_quant code — applying
+# Uniswap v3 whitepaper §6.30 formulas directly:
+#
+#   sqrt_Pa = math.sqrt(80)   = 8.944271909999159
+#   sqrt_Pb = math.sqrt(125)  = 11.180339887498949
+#   sqrt_P0 = math.sqrt(100)  = 10.0
+#   amount0 = L * (1/sqrt_P0 - 1/sqrt_Pb)
+#   amount1 = L * (sqrt_P0 - sqrt_Pa)
+#   V0      = amount0·P0 + amount1
+#   V_lp(P_T)   per regime (in-range / below Pa / above Pb)
+#   V_hold(P_T) = amount0·P_T + amount1
+#   IL(P_T)     = max(0, V_hold - V_lp)
+#
+# These tests catch sign errors, formula swaps, regime-boundary bugs, or
+# other domain bugs that the internal-consistency tests (vectorised matches
+# loop) would silently pass through. Audit findings C1 + C2.
+
+
+FIXTURE_P0 = 100.0
+FIXTURE_PA = 80.0
+FIXTURE_PB = 125.0
+FIXTURE_L = 1000.0
+FIXTURE_A0 = 10.557280900008417
+FIXTURE_A1 = 1055.728090000841
+FIXTURE_V0 = 2111.4561800016827
+
+
+def test_fixture_entry_amounts_match_whitepaper():
+    a0, a1 = entry_amounts(FIXTURE_P0, FIXTURE_PA, FIXTURE_PB, FIXTURE_L)
+    assert a0 == pytest.approx(FIXTURE_A0, abs=1e-9)
+    assert a1 == pytest.approx(FIXTURE_A1, abs=1e-9)
+
+
+def test_fixture_V0_matches_whitepaper():
+    v0 = position_V0(FIXTURE_P0, FIXTURE_PA, FIXTURE_PB, FIXTURE_L)
+    assert v0 == pytest.approx(FIXTURE_V0, abs=1e-9)
+
+
+def test_fixture_il_at_Pa():
+    # IL at lower boundary, in-range formula at P=Pa:
+    #   V_lp(Pa) = L * (2√Pa - Pa/√Pb - √Pa)
+    #   IL(Pa)   = 111.45618000168088
+    il_pa = float(
+        compute_il(np.array([FIXTURE_PA]), FIXTURE_PA, FIXTURE_PB, FIXTURE_L,
+                   FIXTURE_A0, FIXTURE_A1)[0]
+    )
+    assert il_pa == pytest.approx(111.45618000168088, abs=1e-9)
+
+
+def test_fixture_il_at_Pb_equals_max_il():
+    # IL at upper boundary — dominates here (P0 is asymmetric, Pb is 25% up
+    # vs Pa is 20% down; the wider half wins → MaxIL is at Pb):
+    #   IL(Pb) = 139.32022500210132
+    il_pb = float(
+        compute_il(np.array([FIXTURE_PB]), FIXTURE_PA, FIXTURE_PB, FIXTURE_L,
+                   FIXTURE_A0, FIXTURE_A1)[0]
+    )
+    assert il_pb == pytest.approx(139.32022500210132, abs=1e-9)
+    max_il = compute_max_il(FIXTURE_P0, FIXTURE_PA, FIXTURE_PB, FIXTURE_L)
+    assert max_il == pytest.approx(139.32022500210132, abs=1e-9)
+
+
+def test_fixture_il_interior_no_cap():
+    # P_T = 110 (10% up, still well inside the range); IL < MaxIL → no cap:
+    #   IL(110) = 23.823036596968905
+    payout = float(
+        compute_payout(np.array([110.0]), FIXTURE_P0, FIXTURE_PA, FIXTURE_PB,
+                       FIXTURE_L)[0]
+    )
+    assert payout == pytest.approx(23.823036596968905, abs=1e-9)
+
+
+def test_fixture_payout_capped_below_Pa():
+    # P_T = 60 < Pa = 80; BELOW-range formula → V_lp = L·(1/√Pa - 1/√Pb)·P_T:
+    #   raw IL(60) = 347.52415750147225  (uncapped)
+    #   MaxIL      = 139.32022500210132
+    # Payout MUST be capped at MaxIL. This exercises the cap AND the
+    # below-range regime branch in lp_value.
+    payout = float(
+        compute_payout(np.array([60.0]), FIXTURE_P0, FIXTURE_PA, FIXTURE_PB,
+                       FIXTURE_L)[0]
+    )
+    assert payout == pytest.approx(139.32022500210132, abs=1e-9)
+
+
+def test_fixture_payout_capped_above_Pb():
+    # P_T = 150 > Pb = 125; ABOVE-range → V_lp = L·(√Pb - √Pa) (constant):
+    #   raw IL(150) = 403.25224750231337  (uncapped)
+    #   MaxIL       = 139.32022500210132
+    # Exercises the cap AND the above-range regime branch.
+    payout = float(
+        compute_payout(np.array([150.0]), FIXTURE_P0, FIXTURE_PA, FIXTURE_PB,
+                       FIXTURE_L)[0]
+    )
+    assert payout == pytest.approx(139.32022500210132, abs=1e-9)
+
+
+# ─── Boundary-max proof (audit C2) ────────────────────────────────────────────
+
+
+def test_max_il_at_boundary_holds_across_finely_sampled_interior():
+    """Proof sketch: IL(P) = V_hold(P) - V_lp(P). V_hold is linear in P
+    (a0·P + a1); V_lp is concave in P on [Pa, Pb] (sum of √P terms). So
+    IL is convex on the interval, and a convex function on a closed
+    interval attains its max at a boundary.
+
+    This test discretises the interval and verifies the claim empirically
+    for several geometries. Combined with the convexity argument, it
+    rules out an interior maximum to numerical precision.
+    """
+    np.random.seed(20260527)
+    for _ in range(8):
+        P0 = float(np.random.uniform(50, 5000))
+        hw = float(np.random.uniform(0.05, 0.50))  # ±5% to ±50% half-width
+        Pa = P0 * (1 - hw)
+        Pb = P0 * (1 + hw)
+        L = 1000.0
+        a0, a1 = entry_amounts(P0, Pa, Pb, L)
+        max_il_boundary = compute_max_il(P0, Pa, Pb, L)
+        interior_grid = np.linspace(Pa, Pb, 500)
+        il_interior = compute_il(interior_grid, Pa, Pb, L, a0, a1)
+        # Allow 1e-9 absolute slack for floating-point at the boundary
+        assert il_interior.max() <= max_il_boundary + 1e-9, (
+            f"Interior IL exceeded boundary max for P0={P0}, hw={hw}"
+        )

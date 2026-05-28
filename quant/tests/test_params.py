@@ -26,7 +26,8 @@ from inflexion_quant.stress import CorrelatedCrashConfig
 
 
 def _minimal_valid_params_dict() -> dict:
-    """Hand-built dict that's the smallest valid Params (no calibration run)."""
+    """Hand-built dict that's the smallest valid Params (no calibration run).
+    Schema 2.0.0 — see params.py."""
     return {
         "schema_version": PARAMS_SCHEMA_VERSION,
         "quant_package_version": "0.1.0",
@@ -39,7 +40,8 @@ def _minimal_valid_params_dict() -> dict:
             "placeholder_fee_pct_at_c": 0.05,
             "c_ref": 0.20,
             "exponent": 2.32,
-            "median_pnl_at_refit": 0.1,
+            "mean_pnl_at_refit": 0.1,
+            "target_mean_pnl": 0.0,
             "feasible_in_fee_search": True,
         },
         "breakers": {"L0": 1.0, "L1": 0.7, "L2": 0.4, "L3": 0.0},
@@ -51,21 +53,37 @@ def _minimal_valid_params_dict() -> dict:
         },
         "first_loss_fraction": 0.02,
         "fund_target": 50_000.0,
-        "ruin_budget": 0.001,
+        "ruin_budget_per_horizon": 0.001,
+        "horizon_days": 30,
+        "annualized_ruin_budget": 0.012,
         "c_used_for_fund_target": 0.10,
+        "fund_target_estimator": "CVaR",
         "n_runs": 1000,
         "n_positions": 200,
         "rng_seed": 20260527,
         "stress_scenario": "CorrelatedCrashConfig.severe",
+        "parameter_provenance": {
+            "c_min": "calibrated",
+            "fund_target": "calibrated",
+            "fee_curve": "calibrated",
+            "exposure_caps": "calibrated",
+            "floor_curve": "deferred",
+            "breakers": "heuristic",
+            "withdrawal_delay_seconds": "heuristic",
+            "first_loss_fraction": "heuristic",
+        },
+        "fixed_point_iterations": 5,
+        "stability_check": None,
         "notes": "test fixture",
     }
 
 
 def _calibrated_params(rng_seed: int = 42) -> Params:
     result = calibrate_all(
-        n_runs=80, n_positions=40,
+        n_runs=300, n_positions=40,
         cfg=CorrelatedCrashConfig.moderate(),
         exposure_grid=np.array([20, 40, 80]),
+        exposure_caps_n_runs=200,
         rng_seed=rng_seed,
     )
     return Params.from_calibration(

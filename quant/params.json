@@ -1,19 +1,20 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "quant_package_version": "0.1.0",
-  "created_at": "2026-05-27T10:19:47+00:00",
-  "c_min": 0.13625,
+  "created_at": "2026-05-27T20:56:53+00:00",
+  "c_min": 0.07250000000000001,
   "floor_curve": {
-    "c_at_baseline_vol": 0.13625,
-    "note": "single-vol calibration; multi-σ fit deferred to post-hack (Phase 15 calibration sweep)"
+    "c_at_baseline_vol": 0.07250000000000001,
+    "note": "single-vol calibration; multi-σ fit deferred to Phase 15"
   },
   "fee_curve": {
     "fee_ref_recommended": 0.0,
     "fee_pct_at_c": 0.0,
-    "placeholder_fee_pct_at_c": 0.024362894498608626,
+    "placeholder_fee_pct_at_c": 0.10529443406586018,
     "c_ref": 0.2,
     "exponent": 2.32,
-    "median_pnl_at_refit": 19676.325411723665,
+    "mean_pnl_at_refit": 18991.024738640004,
+    "target_mean_pnl": 0.0,
     "feasible_in_fee_search": true
   },
   "breakers": {
@@ -24,17 +25,45 @@
   },
   "withdrawal_delay_seconds": 604800,
   "exposure_caps": {
-    "per_market_cap": 100,
-    "per_mm_cap": 20,
+    "per_market_cap": 700,
+    "per_mm_cap": 140,
     "n_mms_per_market": 5
   },
   "first_loss_fraction": 0.02,
-  "fund_target": 24255.99124740056,
-  "ruin_budget": 0.001,
-  "c_used_for_fund_target": 0.13625,
-  "n_runs": 1000,
+  "fund_target": 74038.9183284894,
+  "ruin_budget_per_horizon": 0.001,
+  "horizon_days": 30,
+  "annualized_ruin_budget": 0.012098965793514216,
+  "c_used_for_fund_target": 0.07250000000000001,
+  "fund_target_estimator": "CVaR",
+  "n_runs": 50000,
   "n_positions": 200,
   "rng_seed": 20260527,
   "stress_scenario": "CorrelatedCrashConfig.severe",
-  "notes": "Calibrated against CorrelatedCrashConfig (severe) on 1000 runs × 200 positions with rng_seed=20260527. Heuristics: breakers (ratios), withdrawal_delay (7d), first_loss (2%). Floor curve is single-σ; multi-σ fit deferred."
+  "parameter_provenance": {
+    "c_min": "calibrated",
+    "fund_target": "calibrated",
+    "fee_curve": "calibrated",
+    "exposure_caps": "calibrated",
+    "floor_curve": "deferred",
+    "breakers": "heuristic",
+    "withdrawal_delay_seconds": "heuristic",
+    "first_loss_fraction": "heuristic"
+  },
+  "fixed_point_iterations": 7,
+  "stability_check": {
+    "n_seeds": 3.0,
+    "n_runs_per_seed": 20000.0,
+    "c_min_min": 0.10625000000000001,
+    "c_min_mean": 0.10875000000000001,
+    "c_min_max": 0.11000000000000001,
+    "c_min_std": 0.0017677669529663706,
+    "c_min_spread_bp": 37.500000000000036,
+    "fund_target_min": 31530.24001706877,
+    "fund_target_mean": 42817.7424199568,
+    "fund_target_max": 50334.446568058476,
+    "fund_target_std": 8126.653087702461,
+    "fund_target_spread_pct": 43.916856630501165
+  },
+  "notes": "Calibrated against CorrelatedCrashConfig.severe() on 50000 runs × 200 positions, rng_seed=20260527, horizon=30d. Fixed-point bisection converged in 7 iterations. Audit-fix v1.1: fund_target uses CVaR; fee_curve targets mean pnl (not median); per-horizon ruin budget 0.10% ≈ 1.21% annualized; severe() params anchored to historical episodes (Terra/FTX/March 2020). Mainnet TODOs in ROADMAP §14: portfolio-level multi-market calibration, empirical position mix from Uniswap subgraph, multi-period fund evolution, MM/LP behavioral models, multi-σ floor curve, depeg/oracle failure mechanisms."
 }
