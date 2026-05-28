@@ -38,9 +38,39 @@ contract MockNonfungiblePositionManager is ERC721 {
 
     uint256 public nextTokenId = 1;
 
+    /// @notice Per-position metadata returned by `positions(tokenId)`.
+    struct PositionData {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+    }
+
+    mapping(uint256 => PositionData) public positionData;
+
+    /// @notice Default position metadata applied to NFTs minted via the
+    ///         minimal `mint(to, liquidity)` overload, so older tests that
+    ///         don't care about market wiring keep working.
+    PositionData public defaultPositionData;
+
     constructor() ERC721("Mock Uniswap V3 Positions NFT", "UNI-V3-POS-MOCK") { }
 
-    /// @notice Mint a new position NFT to `to` with initial `liquidity_`.
+    /// @notice Set the default position metadata used by the simple
+    ///         `mint(to, liquidity)` overload.
+    function setDefaultPositionData(
+        address token0,
+        address token1,
+        uint24 fee,
+        int24 tickLower,
+        int24 tickUpper
+    ) external {
+        defaultPositionData =
+            PositionData({ token0: token0, token1: token1, fee: fee, tickLower: tickLower, tickUpper: tickUpper });
+    }
+
+    /// @notice Mint a new position NFT to `to` with initial `liquidity_`,
+    ///         using `defaultPositionData` for the market metadata.
     function mint(
         address to,
         uint128 liquidity_
@@ -48,6 +78,50 @@ contract MockNonfungiblePositionManager is ERC721 {
         tokenId = nextTokenId++;
         _safeMint(to, tokenId);
         liquidity[tokenId] = liquidity_;
+        positionData[tokenId] = defaultPositionData;
+    }
+
+    /// @notice Mint a position with explicit market metadata.
+    function mintPosition(
+        address to,
+        address token0,
+        address token1,
+        uint24 fee,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 liquidity_
+    ) external returns (uint256 tokenId) {
+        tokenId = nextTokenId++;
+        _safeMint(to, tokenId);
+        liquidity[tokenId] = liquidity_;
+        positionData[tokenId] =
+            PositionData({ token0: token0, token1: token1, fee: fee, tickLower: tickLower, tickUpper: tickUpper });
+    }
+
+    /// @notice Subset of v3-periphery's `positions(tokenId)` return tuple
+    ///         that InflexionCore reads.
+    function positions(
+        uint256 tokenId
+    )
+        external
+        view
+        returns (
+            uint96 nonce,
+            address operator,
+            address token0,
+            address token1,
+            uint24 fee,
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity_,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        )
+    {
+        PositionData memory p = positionData[tokenId];
+        return (0, address(0), p.token0, p.token1, p.fee, p.tickLower, p.tickUpper, liquidity[tokenId], 0, 0, 0, 0);
     }
 
     /// @notice Set the scripted return values for the next collect() call.
