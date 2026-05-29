@@ -590,23 +590,27 @@ contract InflexionCore is EIP712, Ownable {
         if (s.status != Status.ACTIVE) revert SwapNotActive(swapId, s.status);
         if (block.timestamp < s.expiry) revert NotYetExpired(s.expiry, block.timestamp);
 
-        // 1. Oracle: pin price at expiry. Reverts on sequencer down, grace,
+        // 1. Status flips to SETTLED FIRST — strict CEI. A malicious
+        //    `oracle` / `ilMath` re-entering settle on the same swapId
+        //    would now hit the `Status.ACTIVE` check above and revert.
+        //    (Both are owner-deployed trusted contracts in practice; this
+        //    is defensive hardening + Slither reentrancy-no-eth fix.)
+        s.status = Status.SETTLED;
+
+        // 2. Oracle: pin price at expiry. Reverts on sequencer down, grace,
         //    staleness, lone-spike (unless backstop), wrong-round (spec §6.1).
         MarketConfig memory cfg = _marketForSwap(s);
         (uint256 settlementPrice,) = oracle.getSettlementPrice(cfg.oracleToken, s.expiry, hintRoundId);
 
         (uint160 sqrtPaX96, uint160 sqrtPbX96) = _sqrtBoundsFor(s.tokenId);
 
-        // 2. IL with STORED liquidity (invariant I6).
+        // 3. IL with STORED liquidity (invariant I6).
         uint256 realisedIL = ilMath.computeIL(
             uint256(sqrtPTX96), uint256(sqrtPaX96), uint256(sqrtPbX96), s.liquidity, s.amount0Entry, s.amount1Entry
         );
 
-        // 3. Cap (invariants I1 + I2): payout = min(IL, maxIL).
+        // 4. Cap (invariants I1 + I2): payout = min(IL, maxIL).
         uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
-
-        // 4. State transition BEFORE external calls.
-        s.status = Status.SETTLED;
 
         // 5. Vault settles: LP receives payout, MM keeps maxIL - payout.
         underwriterVault.releaseAndDistribute(s.mm, s.lp, payout, s.collateral);
