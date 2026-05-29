@@ -207,7 +207,7 @@ contract InflexionCoreForkTest is Test {
             uint128 maxIL,
             uint128 collateral,
             uint128 premium,,,,
-            uint64 expiry,,,,,
+            uint64 expiry,,,,
         ) = core.swaps(swapId);
 
         assertEq(tokenIdStored, tokenId, "tokenId stored mismatch");
@@ -265,7 +265,7 @@ contract InflexionCoreForkTest is Test {
         // ── 8. Asserts after settle.
         assertEq(IERC721(NPM).ownerOf(tokenId), lp, "NFT not returned to LP");
 
-        (,,,,,,,,,,,,,,, InflexionCore.Status statusAfter) = core.swaps(swapId);
+        (,,,,,,,,,,,,,, InflexionCore.Status statusAfter) = core.swaps(swapId);
         assertEq(uint8(statusAfter), uint8(InflexionCore.Status.SETTLED), "status not SETTLED");
 
         // LP's USDC balance reflects payout (could be 0 if price stayed in
