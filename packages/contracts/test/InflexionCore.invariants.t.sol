@@ -196,7 +196,7 @@ contract InflexionCoreInvariantsTest is Test {
         uint128 rIL = uint128(bound(uint256(realisedIL), 0, 50_000e6));
 
         (uint256 swapId,) = _createSwapWithMaxIL(mm, 1);
-        (,,,, uint128 storedMaxIL,,,,,, uint64 expiry,,,,,) = core.swaps(swapId);
+        (,,,, uint128 storedMaxIL,,,,,, uint64 expiry,,,,) = core.swaps(swapId);
 
         _warpAndSeedSettlementRound(expiry);
         ilMath.setIL(rIL);
@@ -224,7 +224,7 @@ contract InflexionCoreInvariantsTest is Test {
         // createSwap path: use a normal scripted maxIL so the ratio gate
         // is satisfied. echoLiquidityIL stays OFF here.
         (uint256 swapId, uint256 tokenId) = _createSwapWithMaxIL(uint128(2000e6), 1);
-        (,,,, uint128 storedMaxIL,,,,,, uint64 expiry,,,, uint128 storedL,) = core.swaps(swapId);
+        (,,,, uint128 storedMaxIL,,,,,, uint64 expiry,,, uint128 storedL,) = core.swaps(swapId);
         assertEq(storedL, POSITION_LIQUIDITY, "stored L mismatch (setUp sanity)");
 
         // Third-party / accident inflates the NFT's L between create and
@@ -262,7 +262,7 @@ contract InflexionCoreInvariantsTest is Test {
         uint64 inflateBy
     ) public {
         (uint256 swapId, uint256 tokenId) = _createSwapWithMaxIL(uint128(2000e6), 1);
-        (,,,,,,,,,, uint64 expiry,,,, uint128 storedL,) = core.swaps(swapId);
+        (,,,,,,,,,, uint64 expiry,,, uint128 storedL,) = core.swaps(swapId);
 
         // Mutate the NFT's L mid-swap (F-#2 scenario)
         pm.inflateLiquidity(tokenId, inflateBy);
