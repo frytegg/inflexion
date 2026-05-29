@@ -169,7 +169,6 @@ contract InflexionCore is EIP712, Ownable {
         uint8 settlement;
         uint64 createdAt;
         uint64 expiry;
-        uint160 sqrtP0X96;
         uint128 amount0Entry;
         uint128 amount1Entry;
         uint128 liquidity; // I6: stored once; never re-read at settle
@@ -543,7 +542,6 @@ contract InflexionCore is EIP712, Ownable {
             settlement: uint8(SettlementStyle.EUROPEAN),
             createdAt: uint64(block.timestamp),
             expiry: uint64(block.timestamp + cfg.durationSeconds),
-            sqrtP0X96: sqrtP0X96,
             amount0Entry: a0,
             amount1Entry: a1,
             liquidity: liquidity, // I6: stored once
