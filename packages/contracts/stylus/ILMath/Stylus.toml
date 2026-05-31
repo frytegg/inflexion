@@ -1,0 +1,9 @@
+# cargo-stylus workspace manifest (required by `cargo stylus check` /
+# `export-abi` from v0.10+). The contract key must match the Cargo package
+# name (`il-math`). `path = "."` points at this single-contract crate.
+# Networks are left empty — `check` is run with an explicit `--endpoint`.
+[workspace]
+networks = {}
+
+[workspace.contracts.il-math]
+path = "."
