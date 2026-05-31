@@ -31,7 +31,7 @@ amount1_entry = L · (√P0 − √Pa)
 V_hold(P_T) = amount0_entry · P_T + amount1_entry
 ```
 
-This is the value of simply *holding* the entry basket — it is **affine in
+This is the value of simply _holding_ the entry basket — it is **affine in
 `P_T`** (a straight line).
 
 **LP value** at `P_T` — three regimes:
@@ -61,7 +61,7 @@ drift ⇒ no loss).
 ## 2. MaxIL = max(IL(Pa), IL(Pb)) — convexity proof (spec §3.2)
 
 `IL(P) = V_hold(P) − V_lp(P)` is **convex on `[Pa, Pb]`**, so its maximum
-*while price stays in range* is attained at a boundary:
+_while price stays in range_ is attained at a boundary:
 
 > **Proof.** `V_hold(P) = amount0_entry · P + amount1_entry` is affine in `P`.
 > In range, `V_lp(P) = L(2√P − √Pa − P/√Pb)`, so
@@ -72,7 +72,7 @@ drift ⇒ no loss).
 > ```
 >
 > Therefore `V_lp` is **strictly concave**. `IL = V_hold − V_lp =
-> affine − concave` is **convex**, and `max(0, IL)` — a pointwise max of two
+affine − concave` is **convex**, and `max(0, IL)` — a pointwise max of two
 > convex functions — is convex as well. A convex function on a compact
 > interval `[Pa, Pb]` attains its maximum at an endpoint. ∎
 
@@ -95,8 +95,8 @@ MaxIL is **not** the global worst case. Above `Pb` the LP is fully in token1
 covered_payoff = min(realized_IL, MaxIL)
 ```
 
-Because `collateral_FULL = MaxIL` and `covered_payoff ≤ MaxIL` *by
-construction of the cap*, FULL mode cannot produce bad debt under any price
+Because `collateral_FULL = MaxIL` and `covered_payoff ≤ MaxIL` _by
+construction of the cap_, FULL mode cannot produce bad debt under any price
 path (invariants I1, I2). This is the in-range convexity hedge — not "IL
 insurance"; the cap is the no-bad-debt guarantee, not a defect.
 
@@ -107,11 +107,11 @@ insurance"; the cap is the no-bad-debt guarantee, not a defect.
 All sqrt prices are Uniswap **Q64.96**: `sqrtPriceX96 = floor(√P · 2^96)`,
 with `Q96 = 2^96`. The formulas above are evaluated entirely in integer math:
 
-| Primitive          | Definition                                       | Notes |
-| ------------------ | ------------------------------------------------ | ----- |
-| `mul_div(a,b,d)`   | `floor(a · b / d)` with a 512-bit intermediate   | OZ `Math.mulDiv` / Uniswap `FullMath` equivalent. `L · sqrtP` can reach 2^288, so the wide product is mandatory. |
-| `integer_sqrt(n)`  | `floor(√n)` via Newton's method                  | Exact for all `n`; matches OZ `Math.sqrt`. |
-| `sqrt_price_x96(P)`| `integer_sqrt(P << 192)`                          | `= floor(√P · 2^96)`. |
+| Primitive           | Definition                                     | Notes                                                                                                            |
+| ------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `mul_div(a,b,d)`    | `floor(a · b / d)` with a 512-bit intermediate | OZ `Math.mulDiv` / Uniswap `FullMath` equivalent. `L · sqrtP` can reach 2^288, so the wide product is mandatory. |
+| `integer_sqrt(n)`   | `floor(√n)` via Newton's method                | Exact for all `n`; matches OZ `Math.sqrt`.                                                                       |
+| `sqrt_price_x96(P)` | `integer_sqrt(P << 192)`                       | `= floor(√P · 2^96)`.                                                                                            |
 
 Position amounts (whitepaper §6.30), all via `mul_div`:
 
@@ -145,7 +145,7 @@ token0. These values are asserted by `amounts_fixture_matches_python` and
 | **MaxIL**       | `139_320_225_002_101_320`   | 0.13932023 |
 
 `MaxIL = IL(Pb) > IL(Pa)`: although the range `[80, 125]` is symmetric in
-*ratio* (−20% / +25% around 100), the convex IL curve is larger toward the
+_ratio_ (−20% / +25% around 100), the convex IL curve is larger toward the
 upper boundary — exactly the asymmetry the proof predicts. Here
 `MaxIL / V_hold(P0) ≈ 6.6%`.
 
