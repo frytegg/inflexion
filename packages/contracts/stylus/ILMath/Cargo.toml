@@ -2,6 +2,7 @@
 name = "il-math"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 license = "MIT"
 description = "Pure-compute Stylus contract for Uniswap v3 IL / MaxIL math (Inflexion protocol)"
 
@@ -11,9 +12,24 @@ crate-type = ["lib", "cdylib"]
 [[bin]]
 name = "il-math"
 path = "src/main.rs"
+# The bin is only the `export-abi` entrypoint (`#![no_main]` otherwise) — it has
+# no unit tests, so skip its harness under `cargo test` (else the missing `main`
+# fails to link).
+test = false
 
 [dependencies]
 stylus-sdk = "0.7"
+# Direct handle so the `sol!` macro's `::alloy_sol_types` extern-prelude paths
+# resolve. Pinned to stylus-sdk 0.7's exact alloy version — a different patch
+# would link a second alloy instance and break `#[derive(SolidityError)]`.
+alloy-sol-types = "=0.8.14"
+
+[dev-dependencies]
+# Host-only references for the test suite (never compiled into the WASM):
+#   num-bigint — arbitrary-precision oracle for the fixed-point primitives
+#   proptest   — property/fuzz harness (Tasks 2.2, 2.8, 2.9)
+num-bigint = "0.4"
+proptest = "1"
 
 [features]
 export-abi = ["stylus-sdk/export-abi"]

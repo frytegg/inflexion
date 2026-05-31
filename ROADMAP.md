@@ -12,8 +12,8 @@
 | ------------- | ---------------------------------------------------- |
 | **Hackathon** | Arbitrum Open House London — Online Buildathon       |
 | **Window**    | 25 May 2026 → **14 June 2026** (submission deadline) |
-| **Today**     | 27 May 2026 — Day 3                                  |
-| **Days left** | 18                                                   |
+| **Today**     | 31 May 2026 — Day 7                                  |
+| **Days left** | 14                                                   |
 | **After**     | In-person Founder House (separate scope)             |
 
 The original spec §17 timeline assumed pre-buildathon prep was already done; it wasn't. So **Phase 0 + Phase 1 compress into Days 1–2** of the actual window, and every subsequent phase rolls forward by ~2 days. The roadmap below uses Day numbers; the calendar maps `Day N → 25 May + N − 1`.
@@ -22,16 +22,16 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Current state _(update every session — this is the resume point)_
 
-|                  |                                                                                                                                                                                                                                                                                 |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 5 — `InflexionCore.sol` (architecture + invariant suite + Solidity `ILMath` complete; Sepolia deploy + Slither + gas pass deferred)                                                                                                                                             |
-| **▶ NEXT**       | Pick one: (a) **Task 5.11** mainnet-fork integration test (real Arbitrum WETH/USDC v3 NFT, full create→settle cycle), (b) **Task 5.12** gas pass + Slither (5.13), or (c) **Task 5.14** Sepolia deploy. Phase 2.2+ still deferred to home PC (Stylus / WSL2).                   |
-| **Spec version** | v3.3 build-ready · _Fork-1 design observation surfaced in Phase 3: feasible settlement window is `[expiry+LIVENESS, expiry+MAX_STALENESS) ≈ 1h`, tighter than I8 wording suggests._                                                                                             |
-| **Last commit**  | `feat(contracts): Solidity ILMath ref impl + TickMath port + InflexionCore tightened to derive sqrt prices from ticks (15 tests, 97/97 suite)` (PR pending)                                                                                                                     |
-| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                                                                                                  |
-| **Quant track**  | 14.1–14.11 done (123 tests green). `quant/params.json` v2.0.0: c_min=7.25%, fund_target=$74k (CVaR), per_market_cap=700, per_mm_cap=140                                                                                                                                         |
-| **Last update**  | 2026-05-28 — Solidity ILMath landed + InflexionCore signature tightened to derive sqrtPa/Pb from position ticks via TickMath (plugs lying-LP gap)                                                                                                                               |
-| **Blockers**     | Phase 2 tasks 2.2+ blocked on home PC (Stylus dev requires WSL2; Windows MSVC native is broken — `native_keccak256` link error in `stylus-proc`, no upstream fix). Setup steps in `RUNBOOK.md` → "Stylus development". Solidity + TS + Python all unblocked on the work laptop. |
+|                  |                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Phase**        | 5 — `InflexionCore.sol` (architecture + invariant suite + Solidity `ILMath` complete; Sepolia deploy + Slither + gas pass deferred). **Phase 2 Stylus `ILMath` COMPLETE** — incl. local-Nitro deploy + on-node equivalence + gas bench (2.10–2.12 ✓)                                                                                                   |
+| **▶ NEXT**       | Pick one: (a) **Task 5.11** mainnet-fork integration test (real Arbitrum WETH/USDC v3 NFT, full create→settle cycle), (b) **Task 5.12** gas pass + Slither (5.13), or (c) **Task 5.14** Sepolia deploy. _Phase 2 is fully closed — Stylus `ILMath` deployed to local Nitro, proven wei-exact vs Solidity, gas benchmarked (see §7 of `docs/MATH.md`)._ |
+| **Spec version** | v3.3 build-ready · _Fork-1 design observation surfaced in Phase 3: feasible settlement window is `[expiry+LIVENESS, expiry+MAX_STALENESS) ≈ 1h`, tighter than I8 wording suggests._                                                                                                                                                                    |
+| **Last commit**  | `test(contracts): Phase 2 Group C — on-node Stylus≡Solidity equivalence + gas bench (2.10–2.12)` on `phase-2-ilmath-stylus` → merged via PR #10. _Bundles `StylusProbe.sol` + `stylus-bench.mjs` + `docs/MATH.md` §7._                                                                                                                                 |
+| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                                                                                                                                                                         |
+| **Quant track**  | 14.1–14.11 done (123 tests green). `quant/params.json` v2.0.0: c_min=7.25%, fund_target=$74k (CVaR), per_market_cap=700, per_mm_cap=140                                                                                                                                                                                                                |
+| **Last update**  | 2026-06-01 — Phase 2 **Group C** closed on a local `nitro-testnode`: Stylus `ILMath` deployed + activated + cached at `0x1294…2574`, on-node `StylusProbe` proves Stylus ≡ Solidity `computeMaxIL` to the wei, gas measured (cached 25.5k = 5.33× Sol). ⚠️ spec's "~10× cheaper" flagged wrong — see `docs/MATH.md` §7                                 |
+| **Blockers**     | None for Phase 2 — fully landed (2.2–2.14 ✓). Windows MSVC native remains broken (`native_keccak256` link error in `stylus-proc`, no upstream fix), so Stylus dev/deploy stays on WSL2; `forge`/`cast` on Windows. Local Nitro (Docker) brought up via `scripts/dev-node.mjs` → `nitro-testnode` (L2 `8547`, chain-id `412346`).                       |
 
 ---
 
@@ -104,19 +104,19 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 ## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_
 
 - [x] (2026-05-26) **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
-- [ ] **2.2 — Fixed-point primitives in Rust** — `sqrt_x96` (Babylonian / Uniswap-style), `mul_div`, `abs_diff`. Property-test each (10k iterations) vs a `num-bigint` reference.
-- [ ] **2.3 — `compute_max_il`** — signature per spec §11.2. Implement `MaxIL = max(IL(Pa), IL(Pb))` per spec §3.2.
-- [ ] **2.4 — Hand-calc unit tests for `compute_max_il`** — 8 cases: centered ±5/±10/±20/±50% ranges; entry near Pa; entry near Pb; v2-like (very wide). Each vs Python spreadsheet reference; tolerance ≤ 1 wei after normalization.
-- [ ] **2.5 — `compute_il` (Case 1: in-range)** — 6 tests.
-- [ ] **2.6 — `compute_il` (Case 2: below Pa, full token0)** — 4 tests.
-- [ ] **2.7 — `compute_il` (Case 3: above Pb, full token1)** — 4 tests.
-- [ ] **2.8 — Cap-correctness fuzz** — fuzz `sqrt_p_t` across all three regimes; assert `min(IL, MaxIL) ≤ MaxIL` always (invariants I1/I2).
-- [ ] **2.9 — Asymmetric-entry fuzz** — P0 very near Pa or Pb (the auditor concern from §3.2 proof); assert MaxIL still bounds across full fuzz.
-- [ ] **2.10 — Deploy `ILMath` to local Nitro** — `cargo stylus deploy --endpoint http://localhost:8545 --private-key $DEPLOYER_PRIVATE_KEY`. Record address.
-- [ ] **2.11 — Solidity integration test** — Foundry test calling `IILMath(addr).computeMaxIL(...)` and comparing to a Solidity reference implementation within rounding tolerance.
-- [ ] **2.12 — Gas benchmark** — measure `computeMaxIL` Stylus vs Solidity reference; record ratio in `docs/MATH.md`. (Spec claims ~10×; verify or adjust the pitch claim.)
-- [ ] **2.13 — `docs/MATH.md`** — full derivation (spec §3.1), the convexity proof (spec §3.2), reference-magnitudes table regenerated from tests (replacing the spec's "to be regenerated" placeholders).
-- [ ] **2.14 — Commit milestone** — `feat(stylus): ILMath with computeMaxIL + computeIL + full test suite + MATH.md`.
+- [x] (2026-05-31) **2.2 — Fixed-point primitives in Rust** — `sqrt_x96` (Babylonian / Uniswap-style), `mul_div`, `abs_diff`. Property-test each (10k iterations) vs a `num-bigint` reference. _(`math.rs`: `mul_div` via 512-bit intermediate, `integer_sqrt` Newton, `sqrt_price_x96` + `abs_diff` host/test-only. 4 proptest properties @10k cases + 2 domain fuzzes @2k, all green.)_
+- [x] (2026-05-31) **2.3 — `compute_max_il`** — signature per spec §11.2. Implement `MaxIL = max(IL(Pa), IL(Pb))` per spec §3.2. _(Pure fn returns `Option` (None ⇒ out-of-range); the `#[public]` wrapper maps None → `PositionOutOfRange` revert, enforcing `Pa ≤ P0 ≤ Pb` at creation.)_
+- [x] (2026-05-31) **2.4 — Hand-calc unit tests for `compute_max_il`** — 8 cases: centered ±5/±10/±20/±50% ranges; entry near Pa; entry near Pb; v2-like (very wide). Each vs Python spreadsheet reference; tolerance ≤ 1 wei after normalization. _(8 MaxIL tests; captured fixture MaxIL = 139_320_225_002_101_320 at L = 1e18.)_
+- [x] (2026-05-31) **2.5 — `compute_il` (Case 1: in-range)** — 6 tests.
+- [x] (2026-05-31) **2.6 — `compute_il` (Case 2: below Pa, full token0)** — 4 tests.
+- [x] (2026-05-31) **2.7 — `compute_il` (Case 3: above Pb, full token1)** — 4 tests.
+- [x] (2026-05-31) **2.8 — Cap-correctness fuzz** — fuzz `sqrt_p_t` across all three regimes; assert `min(IL, MaxIL) ≤ MaxIL` always (invariants I1/I2). _(Guarded subtraction in `il_at` enforces I3 non-negativity — `V_hold > V_lp ? V_hold − V_lp : 0`.)_
+- [x] (2026-05-31) **2.9 — Asymmetric-entry fuzz** — P0 very near Pa or Pb (the auditor concern from §3.2 proof); assert MaxIL still bounds across full fuzz.
+- [x] (2026-06-01) **2.10 — Deploy `ILMath` to local Nitro** — deployed + activated on `nitro-testnode` (chain-id `412346`) at **`0x1294b86822ff4976bfe136cb06cf43ec7fcf2574`** (size 12.7 KB, data fee ≈ 0.000097 ETH), then cached via `cargo stylus cache bid` (bid 0). _Endpoint is the **L2 sequencer `http://localhost:8547`** — not `8545` (that's the L1 geth). `cargo stylus` runs in WSL2; `forge`/`cast` on Windows; both reach the Docker-forwarded L2._
+- [x] (2026-06-01) **2.11 — Solidity integration test** — on-node cross-check via `StylusProbe` (`script/StylusProbe.sol`) + `cast call`, driven by `script/stylus-bench.mjs`. Stylus ≡ Solidity `computeMaxIL` **exact (`|diff| = 0 wei`)** on all 3 fixtures. _Done on-node, not in a `forge` test: Foundry's revm cannot execute Stylus WASM, so equivalence is checked via `eth_call` against the live node._
+- [x] (2026-06-01) **2.12 — Gas benchmark** — per warm `computeMaxIL` sub-call: Solidity ≈ 4.8k, Stylus **uncached ≈ 41.1k (8.58×)**, **cached ≈ 25.5k (5.33×)**. Recorded in `docs/MATH.md` §7. ⚠️ **The spec's "~10× cheaper" pitch is wrong for `ILMath`** — Stylus is ~5.3× _more_ expensive even cached, because this tiny `mulDiv`+`sqrt` kernel can't amortise Stylus's ~25k fixed per-call floor. **Flagged for spec revision (not silently edited).**
+- [x] (2026-05-31) **2.13 — `docs/MATH.md`** — full derivation (spec §3.1), the convexity proof (spec §3.2), reference-magnitudes table regenerated from tests (replacing the spec's "to be regenerated" placeholders).
+- [x] (2026-05-31) **2.14 — Commit milestone** — `feat(stylus): ILMath with computeMaxIL + computeIL + full test suite + MATH.md`. _(Stylus ILMath landed on WSL2; host suite 29/29 green; `export-abi` validated. Tasks 2.10–2.12 deferred — need a live Nitro node.)_
 
 ## Phase 3 — `OracleManager.sol` _(Day 3–4)_
 
