@@ -197,8 +197,54 @@ notebook, `quant/`, not hardcoded):
 - **Fuzz (Tasks 2.8–2.9)** — cap holds in range (convexity), and
   `MaxIL = max(IL(Pa), IL(Pb))` for any valid asymmetric entry, **2 000×** each.
 
-> **Gas benchmark (Task 2.12) — deferred.** The Stylus-vs-Solidity gas
-> comparison and the on-chain integration cross-check (Task 2.11) require a
-> live Nitro dev-node deploy (Group C), tracked in `ROADMAP.md` Phase 2. This
-> document is updated with the measured `computeMaxIL` / `computeIL` gas once
-> that lands.
+---
+
+## 7. On-node cross-check + gas benchmark (Tasks 2.11–2.12)
+
+Measured on a local **Arbitrum Nitro** dev node (`nitro-testnode`, chain-id
+`412346`), `2026-06-01`. Foundry's revm cannot execute Stylus WASM, so the
+Stylus impl is exercised **on-node** via `eth_call`: a `StylusProbe`
+(`script/StylusProbe.sol`) calls `computeMaxIL` cross-contract on both the
+deployed Stylus `ILMath` and the Solidity reference, returning each result and
+its warm sub-call gas. Driver: `script/stylus-bench.mjs`. Deployed Stylus
+`ILMath`: `0x1294b86822ff4976bfe136cb06cf43ec7fcf2574`.
+
+### Equivalence (Task 2.11) — exact to the wei
+
+Across all three fixtures the Stylus and Solidity `computeMaxIL` agree with
+`|diff| = 0 wei` — they share the same `mulDiv` chain and floor rounding by
+construction:
+
+| Fixture                             | `computeMaxIL` (both impls) |
+| ----------------------------------- | --------------------------- |
+| canonical `[80,100,125]` L=1e18     | `139_320_225_002_103_011`   |
+| tight `[90,100,110]` L=1e18         | `26_334_038_989_723_983`    |
+| eth-scale `[1500,2000,2500]` L=5e18 | `4_013_561_441_721_508_360` |
+
+The on-node integer-floor MaxIL (`…103_011`) sits `1_691` wei from the Python
+anchor `139_320_225_002_101_320` — inside the suite's `10_000`-wei
+float-vs-integer tolerance (§4). Stylus≡Solidity is exact; the small anchor gap
+is Python-float vs on-chain-integer sqrt rounding, as expected.
+
+### Gas (Task 2.12) — per warm `computeMaxIL` sub-call
+
+| Implementation                                | Gas      | vs Solidity |
+| --------------------------------------------- | -------- | ----------- |
+| Solidity reference (`via_ir`, optimizer 1M)   | ≈ 4_800  | 1.00×       |
+| Stylus, **uncached**                          | ≈ 41_078 | 8.58×       |
+| Stylus, **cached** (`cargo stylus cache bid`) | ≈ 25_535 | 5.33×       |
+
+> **Finding — for `ILMath`, Stylus is _more_ expensive than Solidity**, ~5.3×
+> even when cached. `computeMaxIL` is a few `mulDiv`s plus one `integer_sqrt` —
+> far too little compute to amortise Stylus's fixed per-call overhead (WASM
+> instance init + minimum ink + program load). Caching removes the ~15.5k
+> program-load penalty (41k → 25.5k) but cannot erase the ~25k Stylus call
+> floor, against a ~4.8k warm Solidity external call. Stylus's gas advantage
+> appears only on compute-heavy paths (keccak/secp loops, large-bigint, wide
+> memory), **not** on a short fixed-point kernel like this.
+>
+> ⚠️ The "~10× cheaper than Solidity" figure in `spec.md` (§ pitch) does **not**
+> hold for this contract and is flagged for revision — recorded here rather
+> than silently editing the spec (see `CLAUDE.md`). `computeIL` shares the
+> identical `mulDiv`/`integer_sqrt` primitive chain, so its relative profile
+> matches `computeMaxIL`.
