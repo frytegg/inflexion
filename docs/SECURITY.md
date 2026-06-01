@@ -201,7 +201,7 @@ slither packages/contracts --filter-paths "test|script|lib"
 
 **1 medium fixed — `reentrancy-no-eth` in `InflexionCore.settle`:**
 
-Before the fix, `s.status = SETTLED` was written *after* `oracle.getSettlementPrice`
+Before the fix, `s.status = SETTLED` was written _after_ `oracle.getSettlementPrice`
 and `ilMath.computeIL`. A malicious oracle or IL-math implementation
 could re-enter `settle` on the same `swapId` while it was still
 ACTIVE. Both are owner-deployed trusted contracts in practice, but the
@@ -213,15 +213,15 @@ hits the `Status.ACTIVE` precondition and reverts. PR/commit: 5.13.
 
 **Accepted findings (26) — disposition:**
 
-| Detector | Count | Disposition |
-|---|---|---|
-| `unused-return` (medium) | 10 | All on multi-field tuple destructuring from `NPM.positions()` (12 fields, we use 6), `Chainlink.latestRoundData()` / `getRoundData()` (5 fields, we use 2), and `Uniswap.pool.observe()` (2 fields, we use 1). Intentional + idiomatic. |
-| `reentrancy-benign` (low) | 1 | `InflexionCore.createSwap` writes `swaps[swapId]` *after* `underwriterVault.lockCollateral`. `lockCollateral` is an internal trusted contract that does not transfer tokens — only updates internal accounting. If it reverts the entire tx reverts, so the post-call SwapRecord write is atomic with the lock. |
-| `reentrancy-events` (low) | 4 | Events emitted after external calls in `ILVault.{claimFees, returnNFT}` and `InflexionCore.{createSwap, settle}`. Canonical Solidity pattern (event metadata depends on call results). Not a vulnerability — events are observational only. |
-| `timestamp` (low) | 7 | Expiry / validity / staleness comparisons against `block.timestamp` in `InflexionCore` + `OracleManager`. Expected — these are time-based protocol checks where small miner-window drift (seconds) is irrelevant against our windows (minutes–hours). |
-| `cyclomatic-complexity` (info) | 1 | `createSwap` has complexity 20 (Slither threshold: 11). Driven by the spec §5.2 4-phase CEI pattern with explicit per-revert custom errors. Splitting would obscure the spec-traceable structure for negligible win. |
-| `solc-version` (info) | 2 | `pragma solidity 0.8.24;` (exact, not range). Slither suggests using `>=0.8.0` but we pin to a specific version per project convention. |
-| `naming-convention` (info) | 3 | `setCore(address _core)` / `setTreasury(address _treasury)` use leading-underscore parameter names. Project convention for setter args (avoids shadowing the storage variable). |
+| Detector                       | Count | Disposition                                                                                                                                                                                                                                                                                                     |
+| ------------------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unused-return` (medium)       | 10    | All on multi-field tuple destructuring from `NPM.positions()` (12 fields, we use 6), `Chainlink.latestRoundData()` / `getRoundData()` (5 fields, we use 2), and `Uniswap.pool.observe()` (2 fields, we use 1). Intentional + idiomatic.                                                                         |
+| `reentrancy-benign` (low)      | 1     | `InflexionCore.createSwap` writes `swaps[swapId]` _after_ `underwriterVault.lockCollateral`. `lockCollateral` is an internal trusted contract that does not transfer tokens — only updates internal accounting. If it reverts the entire tx reverts, so the post-call SwapRecord write is atomic with the lock. |
+| `reentrancy-events` (low)      | 4     | Events emitted after external calls in `ILVault.{claimFees, returnNFT}` and `InflexionCore.{createSwap, settle}`. Canonical Solidity pattern (event metadata depends on call results). Not a vulnerability — events are observational only.                                                                     |
+| `timestamp` (low)              | 7     | Expiry / validity / staleness comparisons against `block.timestamp` in `InflexionCore` + `OracleManager`. Expected — these are time-based protocol checks where small miner-window drift (seconds) is irrelevant against our windows (minutes–hours).                                                           |
+| `cyclomatic-complexity` (info) | 1     | `createSwap` has complexity 20 (Slither threshold: 11). Driven by the spec §5.2 4-phase CEI pattern with explicit per-revert custom errors. Splitting would obscure the spec-traceable structure for negligible win.                                                                                            |
+| `solc-version` (info)          | 2     | `pragma solidity 0.8.24;` (exact, not range). Slither suggests using `>=0.8.0` but we pin to a specific version per project convention.                                                                                                                                                                         |
+| `naming-convention` (info)     | 3     | `setCore(address _core)` / `setTreasury(address _treasury)` use leading-underscore parameter names. Project convention for setter args (avoids shadowing the storage variable).                                                                                                                                 |
 
 **Manual review pass:** verified all I1–I9 invariants are enforced by
 the code paths the tests cover (see §1). No additional findings beyond
