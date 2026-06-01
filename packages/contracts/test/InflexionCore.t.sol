@@ -243,7 +243,7 @@ contract InflexionCoreTest is Test {
         uint128 expectedPremium = 75e6;
 
         // Sanity: swap stored, NFT in custody, premium split
-        (uint256 storedTokenId, address storedLp, address storedMm,,,, uint128 premium,,,,,,,,,) = _readSwap(swapId);
+        (uint256 storedTokenId, address storedLp, address storedMm,,,, uint128 premium,,,,,,,,) = _readSwap(swapId);
         assertEq(storedTokenId, tokenId);
         assertEq(storedLp, lp);
         assertEq(storedMm, mmWallet.addr);
@@ -448,7 +448,6 @@ contract InflexionCoreTest is Test {
             uint8 settlement,
             uint64 createdAt,
             uint64 expiry,
-            uint160 sqrtP0,
             uint128 a0,
             uint128 a1,
             uint128 liquidity,
