@@ -2,7 +2,16 @@
 
 > **Living guide from empty repo to hackathon demo.** Update checkboxes as work completes; update the **▶ NEXT** pointer at the end of every session so the next one starts instantly.
 >
-> **Authoritative spec:** [`spec.md`](spec.md) v3.3 (build-ready, both audit forks resolved).
+> **Authoritative spec:** [`spec.md`](spec.md) — being finalized to the **cvAMM hybrid** design (Path A pooled on-chain underwriter + Path B MM signed quotes; on-chain published FairValue; invariant I10). The forward phases below are re-sequenced to **P1–P5**. **Time is NOT the constraint — order for correctness.**
+>
+> **Retag legend** (applied to the DONE/legacy history below):
+>
+> | Tag                       | Meaning                                                                                                                                                             |
+> | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | **KEEP**                  | Done and unchanged by the pivot — every change is **upstream of `settle`**; `settle` / MaxIL / **I1–I9 are UNTOUCHED**.                                             |
+> | **MODIFY**                | Done, but the pivot adds work on top (see the note) — the shipped artifact stays; new tasks live in P1–P5.                                                          |
+> | **DONE-BUT-NOW-OBSOLETE** | Planned-but-**never-built** multi-MM RFQ-book machinery (6.4 / 6.6 / 6.8) — **deprioritized**, a single real MM demos Path B. Not archived code; nothing to delete. |
+> | **NEW**                   | Did not exist in the old roadmap; introduced by the pivot.                                                                                                          |
 
 ---
 
@@ -12,26 +21,26 @@
 | ------------- | ---------------------------------------------------- |
 | **Hackathon** | Arbitrum Open House London — Online Buildathon       |
 | **Window**    | 25 May 2026 → **14 June 2026** (submission deadline) |
-| **Today**     | 31 May 2026 — Day 7                                  |
-| **Days left** | 14                                                   |
+| **Today**     | 1 June 2026 — Day 8                                  |
+| **Days left** | 13                                                   |
 | **After**     | In-person Founder House (separate scope)             |
 
-The original spec §17 timeline assumed pre-buildathon prep was already done; it wasn't. So **Phase 0 + Phase 1 compress into Days 1–2** of the actual window, and every subsequent phase rolls forward by ~2 days. The roadmap below uses Day numbers; the calendar maps `Day N → 25 May + N − 1`.
+The forward calendar is intentionally **not** day-pinned anymore. The pivot re-orders for correctness (quant-first → oracle → vault → app → finalize), not for the shortest path to a demo. P1–P5 are ordered by dependency, and **TIME IS NOT THE CONSTRAINT** — a correct, honest cvAMM with one real MM beats a rushed fake book.
 
 ---
 
 ## Current state _(update every session — this is the resume point)_
 
-|                  |                                                                                                                                                                                                                                                                                                                       |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase**        | 5 — Solidity `ILMath` + InflexionCore architecture + invariant suite + mainnet-fork integration + gas pass + Slither pass all complete. **Phase 2 Stylus `ILMath` COMPLETE** — incl. local-Nitro deploy + on-node equivalence + gas bench (2.10–2.12 ✓). Sepolia deploy remains.                                      |
-| **▶ NEXT**       | **Task 5.14** Sepolia deploy (`forge script script/Deploy.s.sol --rpc-url sepolia --broadcast --verify`; record addresses in `deployments/arbitrum-sepolia.json`). Requires a funded Sepolia deployer wallet + ARBISCAN_API_KEY. Then 5.15 (milestone commit).                                                        |
-| **Spec version** | v3.3 build-ready · _Fork-1 design observation surfaced in Phase 3: feasible settlement window is `[expiry+LIVENESS, expiry+MAX_STALENESS) ≈ 1h`, tighter than I8 wording suggests._                                                                                                                                   |
-| **Last commit**  | `sec(core): Task 5.13 — Slither pass, hoist settle status flip for strict CEI; 27 findings → 1 fixed + 26 documented accepts; SECURITY.md §4.3 filled`                                                                                                                                                                |
-| **Repo**         | https://github.com/frytegg/inflexion (private)                                                                                                                                                                                                                                                                        |
-| **Quant track**  | 14.1–14.11 done (123 tests green). `quant/params.json` v2.0.0: c_min=7.25%, fund_target=$74k (CVaR), per_market_cap=700, per_mm_cap=140                                                                                                                                                                               |
-| **Last update**  | 2026-06-01 — Phase 5 (5.11+5.12+5.13) landed: real-Chainlink fork test, dead-storage gas save (-22.1k/op), Slither pass with strict CEI hardening. Phase 2 Stylus on local Nitro: wei-exact equivalence with Solidity, cached 25.5k gas = 5.33× Sol (spec's "~10× cheaper" flagged wrong, `docs/MATH.md` §7).         |
-| **Blockers**     | None for Phase 2 — fully landed (2.2–2.14 ✓). Windows MSVC native remains broken (`native_keccak256` link error in `stylus-proc`, no upstream fix), so Stylus dev/deploy stays on WSL2; `forge`/`cast` on Windows. Local Nitro (Docker) via `scripts/dev-node.mjs` → `nitro-testnode` (L2 `8547`, chain-id `412346`). |
+|                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase**        | **PIVOT to cvAMM hybrid.** Settlement core (Phases 2–5.13) is built and **stays UNTOUCHED** — ILMath (Sol + Stylus), OracleManager, UnderwriterVault (now Path-B capital), ILVault, NoOpYieldAdapter, InflexionCore (createSwap/settle, EIP-712, bitmap nonces, I9 band, I1–I9 all tested), TickMath. The pivot is entirely **upstream of `settle`**.                                                                                                                                                                                        |
+| **▶ NEXT**       | **P1.1 — single-asset cvAMM quant.** Promote `quant/_scratch_cvamm_sim.py` → a committed `cvamm.py` module and produce the 10 deliverables (fairRate S-curve, baseLoad, maxLoad, util*skew, dispersion_skew, diversification CVaR collapse, routable-idle fraction, tranche cut, pool-hedge fraction, single-asset disclosure numbers). These gate **every** downstream phase. *(Old NEXT — Task 5.14 Sepolia deploy — is **paused**: it predates FairValueOracle + ConvexityVault and must deploy the new set; re-sequenced into P3.x.)\_   |
+| **Spec version** | Pivot in progress (was v3.3 build-ready). On finalize (P5) the spec gains §3.0 Three Pillars, FairValueOracle, ConvexityVault, sigma-EWMA vol oracle, invariant I10, the two skews, the Inefficiency Ledger, and the single-asset depositor disclosure. _Fork-1 observation still stands: feasible settlement window ≈ 1h, tighter than I8 wording._                                                                                                                                                                                         |
+| **Last commit**  | `chore: prettier --write the four files CI flagged`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Repo**         | https://github.com/frytegg/inflexion (private) — branch `phase-5-finish`                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Quant track**  | 14.1–14.9 + 14.11 done (122 tests green). `quant/params.json` **v2.0.0** (PARTIAL multi-asset: c_min=7.25%, fund_target=$74k, per_market_cap=700, per_mm_cap=140). **This block is now LEGACY** — it targets the old multi-asset PARTIAL design. `params.json` + `params.py` are **frozen this turn** (pydantic `extra='forbid'` + byte-roundtrip test gates them). The cvAMM params block is **documented in a NEW schema doc**, not retrofitted here. The PARTIAL stack (portfolio/stress/calibrate/deck_charts) moves to `quant/legacy/`. |
+| **Last update**  | 2026-06-01 — **cvAMM hybrid pivot.** Roadmap re-sequenced to P1–P5. Settlement core (I1–I9) confirmed untouched. `_scratch_cvamm_sim.py` verified to reproduce the authoritative numbers (MaxIL geometric 1.27/2.56/5.23/13.76%; fairRate ±10%/30d=70.8%; Example A MaxIL=$1,280, fair=$906, @+15%=$1,042; lone-writer CVaR95 ~91–100%).                                                                                                                                                                                                     |
+| **Blockers**     | None blocking P1 (pure quant). Windows MSVC native Stylus build remains broken (`native_keccak256` link error in `stylus-proc`, no upstream fix) → Stylus dev/deploy stays on **WSL2**; `forge`/`cast` on Windows. Local Nitro (Docker) via `scripts/dev-node.mjs` → `nitro-testnode` (L2 `8547`, chain-id `412346`).                                                                                                                                                                                                                        |
 
 ---
 
@@ -41,264 +50,258 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 2. Mark `- [x] (YYYY-MM-DD)` when complete.
 3. At end of every work session: update **▶ NEXT** and `Last update`.
 4. Tasks are sized to 1–4h. If a task balloons, split it into sub-checkboxes inline.
-5. Tasks marked ⭐ are stretch — skip unless Phases 1–13 are green and time remains.
-6. Phase 14 (quant) runs in **parallel** with everything else — start it early.
-7. Before committing, run the **Per-session checklist** at the bottom.
+5. Tasks marked ⭐ are stretch — skip unless P1–P5 are green and time remains.
+6. The cvAMM **quant (P1) gates everything downstream** — no pricing primitive may be hardcoded; all come from `params.json` (the cvAMM block). Hardcoding any is the exact audit failure.
+7. **Never touch `settle` / MaxIL / invariants I1–I9.** Every pivot change is upstream of `settle`.
+8. Before committing, run the **Per-session checklist** at the bottom.
 
 ---
 
-## Phase 0 — Repo foundation _(Day 1)_
+# Part I — Built foundation (retagged for the pivot)
 
-- [x] (2026-05-26) **0.0 — Prerequisites check** — done when all installed and on PATH: `node ≥ 20`, `pnpm ≥ 9`, `rustc ≥ 1.75`, `cargo-stylus`, `foundryup` (latest `forge`/`cast`/`anvil`), `python ≥ 3.12`, `uv` (or poetry), `docker` (for Nitro), `gh` CLI. Record versions in `RUNBOOK.md`.
-- [x] (2026-05-26) **0.1 — `git init`** — `git init -b main` in `C:\dev\inflexion\`. Do not commit anything yet (we'll batch foundation files into the first commit).
-- [x] (2026-05-26) **0.2 — `.gitignore`** — covers `node_modules/`, `target/`, `out/`, `cache/`, `broadcast/`, `.env*` (except `.env.example`), `coverage/`, `lcov.info`, `*.log`, `.DS_Store`, `.idea/`, `.vscode/` (whitelist `settings.json` if needed), Foundry artifacts, Stylus build artifacts (`stylus/**/target/`), Python `__pycache__/`, `.venv/`, `.ipynb_checkpoints/`, and Claude artifacts.
-- [x] (2026-05-26) **0.3 — `LICENSE`** — MIT, with year 2026 and author "Alex / Inflexion contributors".
-- [x] (2026-05-26) **0.4 — `CLAUDE.md`** — project-wide guidance for Claude Code (and any teammate reading the repo). Must include:
-  - **What** Inflexion is (1 paragraph, pulling from spec §0).
-  - **Authoritative docs**: `spec.md` (latest), `ROADMAP.md` (this file), `MEMORY.md` for project memory.
-  - **Build / test / dev** commands per package (filled in as packages land).
-  - **Conventions**: TS strict, Solidity 0.8.24 + via_ir, Rust 1.75 + edition 2021, `forge fmt`, `cargo fmt`, prettier.
-  - **Critical invariants — never break** (paraphrased from spec §13):
-    1. `payout ≤ collateral` (FULL no-bad-debt).
-    2. `payout = min(realized_IL, MaxIL)`.
-    3. Settlement uses the `L` **stored at creation**, never re-read.
-    4. `Pa ≤ P0 ≤ Pb` enforced at creation.
-    5. Quote auto-voids if `|P_live − quotePrice| > priceBandBps`.
-    6. **No PARTIAL constant is hardcoded** — all read from `quant/params.json`.
-    7. **Locked collateral never routed to utilization-gated venues** (Aave/Compound), only liquid wrappers.
-  - **Workflow**: branch per phase (`phase-N-short-name`); conventional commits, no co-author; never push to `main` directly; never `git push --force`; never bypass hooks.
-  - **What NEVER to do**: don't edit `spec.md` to make a test pass (fix the code); don't add new mainnet addresses without a comment + source link; don't fabricate Chainlink heartbeat values (always verify against `data.chain.link`); don't claim "bad debt impossible" without the qualifying clause (capped payoff + solvent USDC + oracle liveness).
-- [x] (2026-05-26) **0.5 — `README.md`** — stub: one-paragraph value prop + pointers to `spec.md`, `ROADMAP.md`, `docs.inflexion.xyz` (once live), `apps/web` URL (once live), and the public API URL.
-- [x] (2026-05-26) **0.6 — `RUNBOOK.md`** — sibling to README: environment versions (from 0.0), required env vars, common dev commands, demo-day playbook (to be filled in Phase 12). Empty stub now.
-- [x] (2026-05-26) **0.7 — `.editorconfig`** — 2-space, LF, UTF-8, trim trailing whitespace, final newline.
-- [x] (2026-05-26) **0.8 — Initial commit** — `git add -A`; commit `chore: initial repo foundation (spec v3.3, roadmap, CLAUDE.md)`.
-- [x] (2026-05-26) **0.9 — GitHub remote** — `gh repo create inflexion --private --source . --remote origin --push`.
+> Phases 0–5.13 + 14.1–14.11 below are **already done**. They are retagged **KEEP / MODIFY / DONE-BUT-NOW-OBSOLETE** to show how the pivot relates to them. **Do not redo this work.** New work lives in Part II (P1–P5).
 
-## Phase 1 — Monorepo scaffold _(Day 1–2)_
+## Phase 0 — Repo foundation _(Day 1)_ — **KEEP**
 
-- [x] (2026-05-26) **1.1 — pnpm workspace** — `pnpm-workspace.yaml` listing `packages/*`, `apps/*`. Root `package.json` with scripts: `build`, `test`, `lint`, `fmt`, `clean`, `dev:node`, `demo:reseed`.
-- [x] (2026-05-26) **1.2 — Root TS config** — `tsconfig.base.json` (strict, ES2022, NodeNext, no implicit any, no unchecked indexed access). Per-package `tsconfig.json` extends base.
-- [x] (2026-05-26) **1.3 — Repo layout** — create directories (empty `.gitkeep` where needed):
-  ```
-  packages/contracts/{src,test,script,lib,stylus/ILMath/src}
-  packages/engine/src
-  packages/sdk/{src,examples}
-  packages/subgraph/{src,abis}
-  packages/api/src
-  apps/web/src
-  apps/docs
-  quant/notebooks
-  docs/                           (root-level: MATH, SECURITY, INTEGRATION, API stubs)
-  scripts/                        (cross-platform: .ps1 + .sh)
-  deployments/                    (sepolia.json etc.)
-  ```
-- [x] (2026-05-26) **1.4 — Foundry init** — `forge init --no-commit --no-git packages/contracts`. Edit `foundry.toml`: `solc_version = "0.8.24"`, `optimizer = true`, `optimizer_runs = 1_000_000`, `via_ir = true`, `fs_permissions = [{ access = "read", path = "./deployments"}]`. Profiles: `[profile.default]`, `[profile.local]` (`fork_url = "http://localhost:8545"`), `[profile.sepolia]`.
-- [x] (2026-05-26) **1.5 — OZ + Uniswap libs** _(libs are root-level submodules at `--depth 1`; used `chainlink-brownie-contracts` instead of full `chainlink` repo for size)_ — `forge install OpenZeppelin/openzeppelin-contracts Uniswap/v3-core Uniswap/v3-periphery foundry-rs/forge-std smartcontractkit/chainlink`. Remappings in `remappings.txt`.
-- [x] (2026-05-26) **1.6 — Stylus toolchain** _(skeleton written: `Cargo.toml` + `src/lib.rs` + `src/main.rs` with `sol_storage!` + `#[public]`. `cargo install cargo-stylus` and `cargo stylus check` deferred until rust toolchain installed at Phase 2 entry.)_ — `cargo install --force cargo-stylus`. Scaffold `packages/contracts/stylus/ILMath/{Cargo.toml,src/lib.rs}` with the `sol_storage!` + `#[external]` skeleton (no logic yet — `cargo stylus check` must pass).
-- [x] (2026-05-26) **1.7 — Local Nitro dev node** _(`scripts/dev-node.mjs` wired to `pnpm dev:node`; not yet run end-to-end because Docker isn't installed locally — verify on first Docker install)_ — `scripts/dev-node.{sh,ps1}` clones [OffchainLabs/nitro-testnode](https://github.com/OffchainLabs/nitro-testnode) into `~/.inflexion/nitro` (if missing) and starts it forking Arbitrum One. `pnpm dev:node` runs it. Document in `RUNBOOK.md`.
-- [x] (2026-05-26) **1.8 — Env management** — `.env.example` at root with placeholders: `ARBITRUM_RPC`, `SEPOLIA_RPC`, `LOCAL_RPC=http://localhost:8545`, `DEPLOYER_PRIVATE_KEY`, `OPERATOR_PRIVATE_KEY` (demo only), `ETHERSCAN_API_KEY`, `THEGRAPH_DEPLOY_KEY`. `dotenv-cli` for TS packages; `--env-file` for Foundry.
-- [x] (2026-05-26) **1.9 — Formatter + linter** _(prettier + ESLint flat-config + `forge fmt` + `cargo fmt` (soft-skips when cargo missing). `pnpm fmt` / `pnpm fmt:check` both green.)_ — Prettier (+`prettier-plugin-solidity`), ESLint (typescript-eslint), `forge fmt`, `cargo fmt`. Single root script `pnpm fmt` runs all three. Add a `lint-staged` config (or skip if time-pressed).
-- [x] (2026-05-26) **1.10 — CI scaffold** _(landed early — fmt-check + forge build/test jobs)_ — `.github/workflows/ci.yml`: `pnpm fmt --check`, `forge test`, `cargo stylus check`, `pnpm -r build`. _(Non-blocking — can land after Phase 5.)_
-- [x] (2026-05-26) **1.11 — Commit milestone** — `chore(scaffold): pnpm monorepo + foundry + stylus + nitro dev-node green`.
+_All complete and pivot-agnostic (git, gitignore, license, CLAUDE.md, README, RUNBOOK, editorconfig, initial commit, remote)._
 
-## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_
+- [x] (2026-05-26) **0.0 — Prerequisites check** — all installed and on PATH: `node ≥ 20`, `pnpm ≥ 9`, `rustc ≥ 1.75`, `cargo-stylus`, `foundryup`, `python ≥ 3.12`, `uv`, `docker`, `gh`. Versions in `RUNBOOK.md`.
+- [x] (2026-05-26) **0.1 — `git init`** — `git init -b main`.
+- [x] (2026-05-26) **0.2 — `.gitignore`** — node/target/out/cache/broadcast/.env/coverage/Stylus/Python/Claude artifacts.
+- [x] (2026-05-26) **0.3 — `LICENSE`** — MIT, 2026.
+- [x] (2026-05-26) **0.4 — `CLAUDE.md`** — project-wide guidance + critical invariants + workflow + what-never-to-do.
+- [x] (2026-05-26) **0.5 — `README.md`** — value-prop stub + doc pointers.
+- [x] (2026-05-26) **0.6 — `RUNBOOK.md`** — env versions + commands + demo-day playbook stub.
+- [x] (2026-05-26) **0.7 — `.editorconfig`** — 2-space, LF, UTF-8, final newline.
+- [x] (2026-05-26) **0.8 — Initial commit** — `chore: initial repo foundation`.
+- [x] (2026-05-26) **0.9 — GitHub remote** — `gh repo create inflexion --private`.
 
-- [x] (2026-05-26) **2.1 — `IILMath.sol` interface** — Solidity interface per spec §11.2.
-- [x] (2026-05-31) **2.2 — Fixed-point primitives in Rust** — `sqrt_x96` (Babylonian / Uniswap-style), `mul_div`, `abs_diff`. Property-test each (10k iterations) vs a `num-bigint` reference. _(`math.rs`: `mul_div` via 512-bit intermediate, `integer_sqrt` Newton, `sqrt_price_x96` + `abs_diff` host/test-only. 4 proptest properties @10k cases + 2 domain fuzzes @2k, all green.)_
-- [x] (2026-05-31) **2.3 — `compute_max_il`** — signature per spec §11.2. Implement `MaxIL = max(IL(Pa), IL(Pb))` per spec §3.2. _(Pure fn returns `Option` (None ⇒ out-of-range); the `#[public]` wrapper maps None → `PositionOutOfRange` revert, enforcing `Pa ≤ P0 ≤ Pb` at creation.)_
-- [x] (2026-05-31) **2.4 — Hand-calc unit tests for `compute_max_il`** — 8 cases: centered ±5/±10/±20/±50% ranges; entry near Pa; entry near Pb; v2-like (very wide). Each vs Python spreadsheet reference; tolerance ≤ 1 wei after normalization. _(8 MaxIL tests; captured fixture MaxIL = 139_320_225_002_101_320 at L = 1e18.)_
+## Phase 1 — Monorepo scaffold _(Day 1–2)_ — **KEEP**
+
+_Workspace, tsconfig, layout, foundry, libs, stylus toolchain, nitro node, env, formatter, CI — all complete and pivot-agnostic. The directory layout already accommodates the new contracts (FairValueOracle, VolOracle, ConvexityVault)._
+
+- [x] (2026-05-26) **1.1 — pnpm workspace** — `pnpm-workspace.yaml` + root scripts.
+- [x] (2026-05-26) **1.2 — Root TS config** — `tsconfig.base.json` strict, ES2022, NodeNext.
+- [x] (2026-05-26) **1.3 — Repo layout** — all package/app/quant/docs/scripts/deployments dirs created.
+- [x] (2026-05-26) **1.4 — Foundry init** — solc 0.8.24, optimizer 1M runs, via_ir, profiles default/local/sepolia.
+- [x] (2026-05-26) **1.5 — OZ + Uniswap libs** — submodules. **NOTE:** OZ `SignatureChecker` (EIP-1271) and OZ `ERC4626` are both **already vendored** → ConvexityVault + the vault-signer add **no new external dependency**.
+- [x] (2026-05-26) **1.6 — Stylus toolchain** — `cargo-stylus` + ILMath skeleton.
+- [x] (2026-05-26) **1.7 — Local Nitro dev node** — `scripts/dev-node.{sh,ps1}` → `pnpm dev:node`.
+- [x] (2026-05-26) **1.8 — Env management** — `.env.example` + dotenv.
+- [x] (2026-05-26) **1.9 — Formatter + linter** — prettier + ESLint + `forge fmt` + `cargo fmt`, `pnpm fmt` green.
+- [x] (2026-05-26) **1.10 — CI scaffold** — fmt-check + forge build/test.
+- [x] (2026-05-26) **1.11 — Commit milestone** — `chore(scaffold): pnpm monorepo + foundry + stylus + nitro`.
+
+## Phase 2 — `ILMath` (Stylus / Rust) _(Day 2–3)_ — **KEEP**
+
+_MaxIL is **pure geometry, frozen at creation, identical across durations** — exactly the cvAMM Pillar-1 design fact. The settle-path math is the reference for both Path A and Path B. **Untouched (I1–I4).** Only spec **§3.2 magnitudes** are corrected in P5 (they were placeholders; the shipped code is already correct)._
+
+- [x] (2026-05-26) **2.1 — `IILMath.sol` interface**.
+- [x] (2026-05-31) **2.2 — Fixed-point primitives in Rust** — `sqrt_x96`, `mul_div`, `abs_diff`; proptests @10k vs `num-bigint`.
+- [x] (2026-05-31) **2.3 — `compute_max_il`** — `MaxIL = max(IL(Pa), IL(Pb))`; out-of-range → revert.
+- [x] (2026-05-31) **2.4 — Hand-calc unit tests for `compute_max_il`** — 8 cases vs Python reference.
 - [x] (2026-05-31) **2.5 — `compute_il` (Case 1: in-range)** — 6 tests.
-- [x] (2026-05-31) **2.6 — `compute_il` (Case 2: below Pa, full token0)** — 4 tests.
-- [x] (2026-05-31) **2.7 — `compute_il` (Case 3: above Pb, full token1)** — 4 tests.
-- [x] (2026-05-31) **2.8 — Cap-correctness fuzz** — fuzz `sqrt_p_t` across all three regimes; assert `min(IL, MaxIL) ≤ MaxIL` always (invariants I1/I2). _(Guarded subtraction in `il_at` enforces I3 non-negativity — `V_hold > V_lp ? V_hold − V_lp : 0`.)_
-- [x] (2026-05-31) **2.9 — Asymmetric-entry fuzz** — P0 very near Pa or Pb (the auditor concern from §3.2 proof); assert MaxIL still bounds across full fuzz.
-- [x] (2026-06-01) **2.10 — Deploy `ILMath` to local Nitro** — deployed + activated on `nitro-testnode` (chain-id `412346`) at **`0x1294b86822ff4976bfe136cb06cf43ec7fcf2574`** (size 12.7 KB, data fee ≈ 0.000097 ETH), then cached via `cargo stylus cache bid` (bid 0). _Endpoint is the **L2 sequencer `http://localhost:8547`** — not `8545` (that's the L1 geth). `cargo stylus` runs in WSL2; `forge`/`cast` on Windows; both reach the Docker-forwarded L2._
-- [x] (2026-06-01) **2.11 — Solidity integration test** — on-node cross-check via `StylusProbe` (`script/StylusProbe.sol`) + `cast call`, driven by `script/stylus-bench.mjs`. Stylus ≡ Solidity `computeMaxIL` **exact (`|diff| = 0 wei`)** on all 3 fixtures. _Done on-node, not in a `forge` test: Foundry's revm cannot execute Stylus WASM, so equivalence is checked via `eth_call` against the live node._
-- [x] (2026-06-01) **2.12 — Gas benchmark** — per warm `computeMaxIL` sub-call: Solidity ≈ 4.8k, Stylus **uncached ≈ 41.1k (8.58×)**, **cached ≈ 25.5k (5.33×)**. Recorded in `docs/MATH.md` §7. ⚠️ **The spec's "~10× cheaper" pitch is wrong for `ILMath`** — Stylus is ~5.3× _more_ expensive even cached, because this tiny `mulDiv`+`sqrt` kernel can't amortise Stylus's ~25k fixed per-call floor. **Flagged for spec revision (not silently edited).**
-- [x] (2026-05-31) **2.13 — `docs/MATH.md`** — full derivation (spec §3.1), the convexity proof (spec §3.2), reference-magnitudes table regenerated from tests (replacing the spec's "to be regenerated" placeholders).
-- [x] (2026-05-31) **2.14 — Commit milestone** — `feat(stylus): ILMath with computeMaxIL + computeIL + full test suite + MATH.md`. _(Stylus ILMath landed on WSL2; host suite 29/29 green; `export-abi` validated. Tasks 2.10–2.12 deferred — need a live Nitro node.)_
+- [x] (2026-05-31) **2.6 — `compute_il` (Case 2: below Pa)** — 4 tests.
+- [x] (2026-05-31) **2.7 — `compute_il` (Case 3: above Pb)** — 4 tests.
+- [x] (2026-05-31) **2.8 — Cap-correctness fuzz** — `min(IL, MaxIL) ≤ MaxIL` (I1/I2); guarded subtraction (I3).
+- [x] (2026-05-31) **2.9 — Asymmetric-entry fuzz** — P0 near Pa/Pb; MaxIL still bounds.
+- [x] (2026-06-01) **2.10 — Deploy `ILMath` to local Nitro** — at `0x1294b86822ff4976bfe136cb06cf43ec7fcf2574`, cached.
+- [x] (2026-06-01) **2.11 — Solidity integration test** — Stylus ≡ Solidity `computeMaxIL` exact (0 wei) on-node.
+- [x] (2026-06-01) **2.12 — Gas benchmark** — Sol ≈ 4.8k; Stylus uncached ≈ 41.1k (8.58×), cached ≈ 25.5k (5.33×). ⚠️ **The spec's "~10× cheaper" pitch is wrong for `ILMath`** — Stylus is ~5.3× _more_ expensive even cached (tiny kernel can't amortise the ~25k fixed floor). **→ folded into the P5 spec §13/§16 edit.** Carry the honest number into the pitch.
+- [x] (2026-05-31) **2.13 — `docs/MATH.md`** — derivation + convexity proof + reference table from tests.
+- [x] (2026-05-31) **2.14 — Commit milestone** — `feat(stylus): ILMath + computeMaxIL + computeIL + suite + MATH.md`.
 
-## Phase 3 — `OracleManager.sol` _(Day 3–4)_
+## Phase 3 — `OracleManager.sol` _(Day 3–4)_ — **MODIFY**
 
-- [x] (2026-05-28) **3.1 — Sequencer feed + grace check** — internal helper; reverts on `sequencer down` and during grace. _(`OracleManager._requireSequencerHealthy()`. `sequencerFeed == address(0)` skips (testnet path — Arbitrum Sepolia has no published feed; documented in `deployments/arbitrum-sepolia.json`).)_
-- [x] (2026-05-28) **3.2 — `getPrice(token)`** — entry price; `latestRoundData` with staleness check; returns canonical price. _(Per-token `maxStaleness` mapping (spec §6.2 recommends heartbeat+3600s = 90,000s for Arbitrum majors). Reverts on negative answer, future-dated updatedAt (fail-closed), or staleness.)_
-- [x] (2026-05-28) **3.3 — `uniswapTWAPat(token, window, anchor)`** — historical TWAP via `IUniswapV3Pool.observe` with computed `secondsAgo` offsets relative to `anchor`. _(Returns the raw average tick (int256) rather than a normalized price — converting requires per-market token decimals which the consumer applies via `OracleLibrary.getQuoteAtTick`. Documented in interface.)_
-- [x] (2026-05-28) **3.4 — `getSettlementPrice(token, expiry, hintRoundId)`** — exact spec §6.1 logic: round-at-T pinning (`updatedAt ≤ expiry < nextUpdatedAt`), staleness, **lone-spike check** vs `hintRoundId − 1` and `hintRoundId + 1`, **liveness backstop** (after `LIVENESS_WINDOW` accept unconditionally), advisory TWAP flag in return. _(TWAP advisory currently a no-op (always `false`) — emitting it needs per-market tick→price scaling that is deferred to Task 3.7. Spec-compliant since advisory is non-blocking. `LoneSpikeDeferred` and `LivenessBackstopTriggered` events emitted.)_
-- [x] (2026-05-28) **3.5 — `absBps(a, b)` pure helper**. _(Public so external consumers can use it. Reverts on non-positive inputs to surface bad input early.)_
-- [x] (2026-05-28) **3.6 — Constants** — `GRACE_PERIOD=3600`, `MAX_STALENESS=90_000` (per-feed mapping), `TWAP_WINDOW=1800`, `MAX_DEVIATION_BPS=200`, `LONE_SPIKE_BPS=500`, `LIVENESS_WINDOW=86_400`. _(All `public constant` — exposed for off-chain consumers and tests.)_
-- [x] (2026-05-28) **3.7 — Pool observation-cardinality bump script** — `script/IncreaseCardinality.s.sol` for each target market pool so `[T−1800, T]` is always observable; idempotent. _(Forge script: `run(address)` for single pool, `runMany(address[])` for batch. Target = 200 slots — empirically covers 30 min TWAP on Arbitrum One major pairs. Idempotent: skips if `observationCardinalityNext ≥ TARGET`. 6 tests via `MockUniswapV3Pool` (recording mock that captures `increaseObservationCardinalityNext` calls).)_
-- [x] (2026-05-28) **3.8 — Unit tests with mock Chainlink** — fresh round, stale round, sequencer down, grace period active, lone-spike (3-neighbor outlier), real fast move (not lone — passes), liveness backstop firing, advisory TWAP flag set vs not set. _(`MockAggregator` controllable per-round + 16 tests including `testFuzz_settle_alwaysSucceedsAtBackstop` (256 runs) for invariant I8 sketch. TWAP advisory tests deferred with Task 3.7 — currently the flag is wired to `false`. Sepolia-path test (`test_getPrice_skipsSequencerWhenUnset`) covers the `sequencerFeed == 0` testnet bypass.)_
-- [x] (2026-05-28) **3.9 — Fork tests against Arbitrum mainnet** — fetch real round IDs around chosen historical timestamps (incl. a known volatile day); `getSettlementPrice` matches expectations. _(`OracleManager.fork.t.sol`: 5 tests forking Arbitrum One via `ARBITRUM_RPC`. Sanity-bounds ETH/BTC/USDC prices, then walks `latestRoundData` backwards to find a round bracketing T=now-1h, pins settlement, asserts a wrong-hint reverts. Validated end-to-end against public `arb1.arbitrum.io/rpc` (ETH=$1,986, BTC=$73,230, USDC=$0.9995). Cleanly skips when `ARBITRUM_RPC` unset — CI without an RPC still passes.)_
-- [x] (2026-05-28) **3.10 — Invariant I8 fuzz** — arbitrary price paths through `T`; assert `settle()` eventually succeeds within `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`. _(`OracleManager.invariant.t.sol`: 5 fuzz tests, 1280 runs total. Pins down the **actual feasible settlement window** = `[expiry+LIVENESS_WINDOW, expiry+MAX_STALENESS) ≈ 1h` with current constants — tighter than the spec I8 wording suggests. The gap (a fork-1 design observation) is documented in `OracleManager.getSettlementPrice` NatSpec with a pointer to the `test_I8_revertsPastStaleness_boundary` pin. Tests prove: arbitrary spike + arbitrary offset in window → succeeds; sustained move → succeeds immediately; lone-spike before backstop → defers (any magnitude); sequencer grace transitions honoured exactly.)_
-- [x] (2026-05-28) **3.11 — Commit milestone** — `feat(contracts): OracleManager with round-at-T + lone-spike + liveness backstop (Fork 1)`. _(34 tests across 5 suites: 16 unit + 5 fork + 5 I8 fuzz + 6 cardinality + 2 scaffold. PR #6.)_
+_Settlement-price round-at-T + lone-spike + liveness backstop (Fork 1 / I8) + sequencer gate are **KEEP-done and untouched**. The pivot **adds** a separate **VolOracle (sigma_ref EWMA)** consumed by the new FairValueOracle — that is **new P2 work**, not a change to the shipped 3.1–3.11. Do **not** overload OracleManager with vol estimation._
 
-## Phase 4 — Vaults _(Day 5)_
+- [x] (2026-05-28) **3.1 — Sequencer feed + grace check**.
+- [x] (2026-05-28) **3.2 — `getPrice(token)`** — entry price + per-token staleness.
+- [x] (2026-05-28) **3.3 — `uniswapTWAPat(...)`** — historical TWAP via `observe`.
+- [x] (2026-05-28) **3.4 — `getSettlementPrice(...)`** — round-at-T pinning + lone-spike + liveness backstop.
+- [x] (2026-05-28) **3.5 — `absBps(a, b)` pure helper**.
+- [x] (2026-05-28) **3.6 — Constants** — GRACE/MAX_STALENESS/TWAP/MAX_DEVIATION/LONE_SPIKE/LIVENESS.
+- [x] (2026-05-28) **3.7 — Cardinality bump script** — idempotent, target 200 slots.
+- [x] (2026-05-28) **3.8 — Unit tests with mock Chainlink** — 16 tests incl. I8 sketch.
+- [x] (2026-05-28) **3.9 — Fork tests against Arbitrum mainnet** — 5 tests, real round IDs.
+- [x] (2026-05-28) **3.10 — Invariant I8 fuzz** — feasible window `[expiry+LIVENESS, expiry+MAX_STALENESS) ≈ 1h`.
+- [x] (2026-05-28) **3.11 — Commit milestone** — `feat(contracts): OracleManager (Fork 1)`. PR #6.
 
-- [x] (2026-05-28) **4.1 — `IYieldAdapter` interface** — `deposit/withdraw/balance(mm)`. Documented constraint: instantly redeemable, not utilization-gated (Fork F-#3). _(Plus `underlying()` and `isInstantlyRedeemable()` so the Vault can sanity-check any future adapter satisfies F-#3 at runtime.)_
-- [x] (2026-05-28) **4.2 — `NoOpYieldAdapter`** — holds USDC, returns it on withdraw, zero yield. Default for Phase 1. _(Per-MM accounting via `balanceOf` mapping; uses `SafeERC20`. Not yet wired into `UnderwriterVault` — Phase 5 (Core) will compose them.)_
-- [x] (2026-05-28) **4.3 — `UnderwriterVault.sol`** — per spec §7.1: `deposited`/`locked` mappings; `deposit/withdraw/lockCollateral/releaseAndDistribute/availableBalance`; `CapitalLow` event at 20% of deposited. _(`Ownable`-managed Core wiring with one-shot `setCore` + `freezeCore`; OnlyCore modifier on `lockCollateral` / `releaseAndDistribute`. Invariant **I5** (`locked ≤ deposited`) preserved by construction in every state-changing path; documented in NatSpec.)_
-- [x] (2026-05-28) **4.4 — `UnderwriterVault` tests** — deposit/withdraw happy paths; over-lock reverts; over-withdraw reverts; `CapitalLow` emits at correct threshold; invariant **I5** (`locked ≤ deposited` per MM). _(16 tests including `testFuzz_I5_lockedNeverExceedsDeposited` (256 runs). Both branches of `CapitalLow` covered: emits below 20%, silent above. Tests also pin `setCore` access control + `freezeCore` one-way switch.)_
-- [x] (2026-05-28) **4.5 — `ILVault.sol`** — `onERC721Received` accepts only the canonical NonfungiblePositionManager (hardcoded mainnet/Sepolia addresses); `(swapId → tokenId)` mapping; `claimFees(swapId)` callable by the stored LP only (forwards to PositionManager `collect`); `returnNFT(swapId, to)` onlyCore. _(`recipient` in `collect` is FORCED to the registered LP — calldata cannot redirect fees. Slim local `INonfungiblePositionManagerCollect` interface avoids importing v3-periphery's full ABI, which pulls in OZ v4 paths broken under OZ v5.)_
-- [x] (2026-05-28) **4.6 — `ILVault` tests** — fee-claim passthrough; reject non-PositionManager NFTs; verify the contract never calls `decreaseLiquidity` on custodied NFTs; **F-#2 fuzz**: third-party `increaseLiquidity` between create and `returnNFT` does not break custody invariants. _(14 tests including `testFuzz_F2_externalIncreaseLiquidity_arbitraryAmount` (256 runs) — inflating `liquidity` on a custodied NFT changes nothing about ILVault's ability to return it (invariant I6 is enforced in Core's stored `L`, not here). Plus `HostileERC721` test for the rejection path.)_
-- [x] (2026-05-28) **4.7 — Commit milestone** — `feat(contracts): UnderwriterVault + ILVault + IYieldAdapter (no-op)`. _(30 new tests; full Solidity suite 64/64 across 7 contracts.)_
+## Phase 4 — Vaults _(Day 5)_ — **MODIFY**
 
-## Phase 5 — `InflexionCore.sol` _(Day 6–7) — the heaviest contract phase_
+_`UnderwriterVault` (per-MM, I5) is **KEEP-done** and is now explicitly the **Path-B** collateral home — **not obsolete**. `ILVault` (NFT custody, F-#2/I6) and `NoOpYieldAdapter` (idle-only, instantly-redeemable F-#3) are **KEEP-done**. The pivot **adds** the **ConvexityVault** (ERC-4626 pooled USDC, one-per-pair, 9 markets, EIP-1271 owner) as a **new P3** vault that coexists with UnderwriterVault._
 
-- [x] (2026-05-28) **5.1 — EIP-712 typed-data setup** — domain separator; `SignedQuote` type-hash; `_hashTypedDataV4`; verify via OZ `ECDSA.recover`. _(Domain name "Inflexion", version "1". `SIGNED_QUOTE_TYPEHASH` covers all 13 fields excluding the signature itself. `hashQuote()` + `recoverSigner()` are public; tests verify deterministic hashing and tamper-detection.)_
-- [x] (2026-05-28) **5.2 — Bitmap nonce (Permit2-style)** — `mapping(address mm => mapping(uint256 word => uint256 bits)) nonces`; `useNonce/isNonceUsed`. Documented in [`docs/SECURITY.md`](docs/SECURITY.md). _(Nonce encoded as `(word << 8) | bit`. `_useNonce` is internal + atomic — asserts and marks in one storage write. `isNonceUsed` is a public view. SECURITY.md doc is pending — flagged in Phase 5.13 (Slither + manual review).)_
-- [x] (2026-05-28) **5.3 — `cancelNonces(uint256[] nonces)` external** — MM flips bits to invalidate quotes (F-#7). _(Caller-restricted to `msg.sender`'s own nonce map — cannot cancel another MM's nonces. Emits `NoncesCancelled(mm, nonces[])`. Per-MM isolation pinned in `test_nonce_perMM_isolated`.)_
-- [x] (2026-05-28) **5.4 — `consumedNotional[quoteId]`** — capacity-authority storage (F-#6). _(Per-`quoteId` `uint128`; incremented atomically in PHASE 3 effects BEFORE any external call so concurrent submissions can't over-consume.)_
-- [x] (2026-05-28) **5.5 — `SwapRecord` storage** — per spec §5.1, including the `liquidity` field (F-#2). _(Full struct: tokenId, lp, mm, V0, maxIL, collateral, premium, model, settlement, createdAt, expiry, sqrtP0X96, amount0Entry, amount1Entry, liquidity, status. Stored in `swaps[swapId]`; `nextSwapId` auto-increments from 1.)_
-- [x] (2026-05-28) **5.6 — Constants** — `MIN_POSITION_V0` ($100 USDC = 100e6), `MIN_PREMIUM` ($1 USDC = 1e6), `PRICE_BAND_MIN_BPS=25`, `PRICE_BAND_MAX_BPS=500`, validity band `[5,15]`. _(All `public constant`. Plus `FULL_MM_BPS=9900` / `FULL_TREASURY_BPS=100` for the §5.2 premium split.)_
-- [x] (2026-05-28) **5.7 — `createSwap(quote, tokenId, maxPremium, hintRoundId_unused)`** — strict CEI per spec §5.2 PHASE 1–4. _(Full 4-phase CEI implemented. `MarketConfig` registry (owner-managed) resolves `marketId → (token0, token1, fee, durationSeconds, oracleToken)`; the position's `(token0, token1, fee)` is cross-checked against the registered market. EIP-712 signature verification, ratio band, validity band [5,15]s, nonce, oracle-anchored price band (Fork 2 / invariant I9), capacity, slippage, FULL-only model gate, vault solvency — all pre-effects. State updates atomic in PHASE 3, NFT custody + USDC + premium split in PHASE 4. `safeTransferFrom` of NFT encodes `swapId` so ILVault pins the (swapId → tokenId, lp) mapping. **IL math delegated to `IILMath`** — Stylus in production (Phase 2.2+) or a Solidity ref impl (separate task). 9 tests covering happy path + 6 revert branches.)_
-- [x] (2026-05-28) **5.8 — `settle(swapId, hintRoundId)`** — per spec §5.4: oracle gate, `computeIL` with **stored** `swap.liquidity`, `payout = min(IL, MaxIL)`, transfer, NFT return, event. _(Callable by anyone at `block.timestamp ≥ expiry`. Oracle round-at-T via `getSettlementPrice` (full Fork-1 gate). IL recomputed from STORED `liquidity` + `amount0Entry` + `amount1Entry` (invariant I6 enforced). Payout capped at `maxIL` (invariants I1 + I2). Status flipped to SETTLED BEFORE vault + NFT external calls. Tests cover happy path + payout-cap + before-expiry revert.)_
-- [x] (2026-05-28) **5.9 — `settlePreview(swapId, sqrtP_T, sqrtPa, sqrtPb)` view** — used by invariant tests (I3/I4/I8) without touching state. _(Computes IL via IILMath using the stored swap fields, returns `(realisedIL, payout)`. Test verifies both the uncapped and capped branches.)_
-- [x] (2026-05-28) **5.10 — Invariant test suite (`InflexionCore.invariants.t.sol`)** — fuzz handlers for createSwap / settle / cancel / mutate-L. _(6 tests across 1 fuzz suite + 1 stateful suite, full Solidity total 88/88.)_
-  - **I1** + **I2** no bad debt + cap: `testFuzz_I1_I2_payoutCappedAtMaxIL` (256 runs over fuzzed `(maxIL, realisedIL)`) asserts `payout == min(IL, maxIL)`. ✓
-  - **I3** non-neg / no underflow: ✅ covered in `ILMath.t.sol::testFuzz_I3_ilNonNegative` (256 runs) — fuzzes `sqrt_PT` across in-range AND out-of-range and proves the math never reverts on `V_lp > V_hold`; the `max(0, V_hold - V_lp)` clamp in `_ilAt` does the work.
-  - **I4** LP no profit: ✅ covered in `ILMath.t.sol::test_il_atEntryIsZero` + the same clamp from I3 — the formula encodes "LP can never profit from the swap" by construction.
-  - **I5** vault solvency: **stateful invariant `invariant_I5_lockedLeDeposited` ran 256 sequences × 128,000 fuzzed vault op calls × 0 reverts** with a `VaultHandler` exposing deposit/withdraw/lock/release randomly to the runner. Strongest evidence on the safety stack. ✓
-  - **I6** liquidity immutability: `testFuzz_I6_recordsStoredLiquidity` (256 runs) inflates the position's L mid-swap and asserts the exact `liquidity` value passed to `IILMath.computeIL` at settle equals the STORED `s.liquidity`, via a new recorder in `MockILMath` (`lastILCallLiquidity`). ✓ Plus the F-#2 fuzz already in `ILVault.t.sol`.
-  - **I7** capacity authority: partial coverage in `InflexionCore.t.sol` (`test_createSwap_consumedNotional_tracked`, `test_createSwap_rejectsUsedNonce`). Full Handler-driven stateful test is post-mainnet — overkill at hackathon scope.
-  - **I8** settlement liveness: **covered in `OracleManager.invariant.t.sol` from Phase 3** — 5 fuzz tests / 1,280 runs proving settlement succeeds anywhere in the feasible window `[expiry+LIVENESS, expiry+MAX_STALENESS)`.
-  - **I9** band enforcement: `testFuzz_I9_priceBandViolationReverts` (256 runs) and `testFuzz_I9_priceBandWithinBandAccepts` (256 runs) use DOWN drift to deterministically exercise both branches of the oracle-anchored band gate. ✓
-- [x] (2026-05-29) **5.11 — Mainnet-fork integration test** — `test/InflexionCore.fork.t.sol`. Full `createSwap → settle` cycle against real Arbitrum One: WETH/USDC 0.05% pool, real Uniswap NPM (NFT minted via `INPM.mint`), real ETH/USD Chainlink + sequencer-uptime feeds, real Solidity `ILMath`. Pattern: fork at N1 ≈ 90 min ago; LP mints v3 NFT (`tickCurrent ± 200`, ~±2% range); MM signs EIP-712 quote; `createSwap`; `vm.makePersistent` deployed contracts + WETH/USDC/NPM; `vm.rollFork` to HEAD so Chainlink advances past `T_expiry`; settle picks bracketing round and pays out. Result: `V0 ≈ $19.8k`, `MaxIL ≈ $104`, `premium ≈ $5.20`. Run with `ARBITRUM_RPC=<archive> ARBITRUM_FORK_BLOCK=<HEAD-22000> forge test --match-path test/InflexionCore.fork.t.sol`. Public archive RPC required (e.g. `arbitrum-one.public.blastapi.io`); the default `arb1.arbitrum.io/rpc` is not archive. _(Out-of-range terminal-price branch deferred — happy path is sufficient evidence the integration is wired; pool drift between fork blocks makes asserting a specific payout brittle.)_
-- [x] (2026-05-29) **5.12 — Gas pass** — `forge snapshot` baseline captured (`.gas-snapshot` checked in). Top hotspot: `createSwap` (max 538k gas) + `settle` (216k). Identified dead-storage: `SwapRecord.sqrtP0X96` was written at create but never read at settle (settle re-derives `sqrtPa/Pb` from immutable ticks via TickMath; `sqrtP_T` is supplied by the caller; the at-creation P0 is not needed). Removed the field → **-22.1k gas per `createSwap`** + **-22.1k per `settle`** + **-22.4k per `settlePreview`**. Cross-check: all `createSwap`/`settle` happy-path tests dropped by ~22,100 gas exactly (one SSTORE*NEW / SLOAD slot). 104/104 tests still green. Contract size 20,366 bytes (4.2 KB headroom under EIP-170). *(Tighter packing via field reorder (lp + createdAt + model + settlement + status → one slot) would save another ~22.1k but invalidates all positional `swaps()` destructurings; deferred — diminishing returns vs test churn at hackathon scope.)\_
-- [x] (2026-05-29) **5.13 — Slither + manual review** — Slither 0.11.5 against `packages/contracts` (test/script/lib filtered out). 27 findings, 1 fixed + 26 accepted. **Fix:** `reentrancy-no-eth` in `InflexionCore.settle` — hoisted `s.status = SETTLED` before `oracle.getSettlementPrice` / `ilMath.computeIL` external calls (strict CEI). Both oracle and ilMath are owner-deployed trusted contracts in practice; this is defensive hardening. **Accepted (false positives):** 10 `unused-return` (intentional tuple destructure on NPM.positions / Chainlink.{latest,getRound}Data / pool.observe), 1 `reentrancy-benign` (createSwap SwapRecord write after `lockCollateral` — internal trusted contract, no token transfer, atomic on revert), 4 `reentrancy-events` (events after external calls — canonical), 7 `timestamp` (expiry/validity/staleness — protocol time checks), 3 informational (cyclomatic, solc-version pinned, naming convention `_param`). Full triage table in [`docs/SECURITY.md`](docs/SECURITY.md) §4.3. 104/104 tests still green.
-- [ ] **5.14 — Deploy Phase-1 to Arbitrum Sepolia** — `forge script script/Deploy.s.sol --rpc-url sepolia --broadcast --verify`. Record all addresses in `deployments/sepolia.json`. Update `apps/web` and `packages/sdk` to read from this file.
-- [ ] **5.15 — Commit milestone** — `feat(core): InflexionCore complete; FULL/European end-to-end on Sepolia; all 9 invariants green`.
+- [x] (2026-05-28) **4.1 — `IYieldAdapter` interface** — instantly-redeemable, not utilization-gated (F-#3).
+- [x] (2026-05-28) **4.2 — `NoOpYieldAdapter`** — holds USDC, zero yield. _(Future sDAI / T-bill adapter plugs in here for **IDLE/FREE vault USDC only** — never locked, never utilization-gated. The "Aave for locked collateral" idea is **EXPLICITLY BLOCKED** by this interface's contract + CLAUDE.md — see P3 / Phase 15 roadmap flag.)_
+- [x] (2026-05-28) **4.3 — `UnderwriterVault.sol`** — per-MM `deposited`/`locked`; lock/release; I5 by construction. **Now: Path-B capital.**
+- [x] (2026-05-28) **4.4 — `UnderwriterVault` tests** — 16 tests incl. `testFuzz_I5_lockedNeverExceedsDeposited`.
+- [x] (2026-05-28) **4.5 — `ILVault.sol`** — `onERC721Received` (canonical NPM only); `claimFees`; `returnNFT` onlyCore. **Path-agnostic** — LP deposits the NFT regardless of who underwrites.
+- [x] (2026-05-28) **4.6 — `ILVault` tests** — 14 tests incl. F-#2 fuzz (external `increaseLiquidity` doesn't break custody).
+- [x] (2026-05-28) **4.7 — Commit milestone** — `feat(contracts): UnderwriterVault + ILVault + IYieldAdapter`.
 
-## Phase 6 — Off-chain matching engine _(Day 8–9)_
+## Phase 5 — `InflexionCore.sol` _(Day 6–7)_ — **MODIFY**
 
-- [ ] **6.1 — Skeleton** — Node 20 + TS + Fastify (or Hono) + Redis (or in-memory fallback for the hack) + Zod schemas.
-- [ ] **6.2 — Shared EIP-712 helpers** — `signQuote`, `verifyQuote` exported from a shared package consumed by engine + SDK + tests.
-- [ ] **6.3 — WS quote intake (`/ws/quotes`)** — MMs connect; engine validates signature, validity, that signer has collateral in UnderwriterVault (RPC call); stores by `marketId`.
-- [ ] **6.4 — Best-per-band index** — for each `(market × ratio band)` track the live best (lowest `rate × candidate-MaxIL`) quote.
-- [ ] **6.5 — `/quote?tokenId&duration`** — read position params via RPC, compute MaxIL via `@inflexion/sdk` (which calls Stylus), filter live quotes by band + capacity + validity + price-band-feasibility, return best signed payload + computed premium.
-- [ ] **6.6 — Quote drop policy** — drop quotes not refreshed within ~1.5s; emit `QuoteDropped` event over the public log.
-- [ ] **6.7 — Append-only quote log** — per spec §4.5 (F-#13): all received quotes + match decisions to a rotating file (or S3). Public read endpoint `/log/stream`.
-- [ ] **6.8 — Example MM bot** — `packages/engine/examples/mm-bot.ts`: configurable strategy that streams quotes (rate + band + priceBand + capacity), responds to mock-vol events, prints fills. Used for demo seeding.
-- [ ] **6.9 — Engine integration test** — spin up engine + 2 MM bots locally; fetch best quote; submit on-chain (against Nitro fork); verify fill. Then cancel one MM's bit; verify next-best is served. Then move mock oracle past band; verify createSwap reverts with `price out of band`.
-- [ ] **6.10 — Commit milestone** — `feat(engine): off-chain matching relayer + signed-quote API + example MM bot`.
+_`settle` (5.8), `settlePreview` (5.9), the `min(IL, MaxIL)` cap, **stored-L** (F-#2/I6), CEI ordering, and invariants **I1–I9 are KEEP-done and UNTOUCHED**. The pivot modifies **only `createSwap` (5.7)** — upstream of settle — to become a **router** over {Path A pool price, Path B best MM quote} and to enforce **I10**. The signed-quote machinery (EIP-712, bitmap nonces, Fork-2 band, capacity) is **retained** (it protects third-party-carried Path-B quotes). The Path-B quote schema gains `loadBps` and `ECDSA.recover` becomes `SignatureChecker.isValidSignatureNow` (EIP-1271) — both **pre-authorized** changes, stated explicitly in P3._
 
-## Phase 7 — `@inflexion/sdk` _(Day 9–10)_
+- [x] (2026-05-28) **5.1 — EIP-712 typed-data setup** — domain "Inflexion" v1; `SIGNED_QUOTE_TYPEHASH`. _(P3 bumps the typehash string for the `loadBps` field — pre-authorized.)_
+- [x] (2026-05-28) **5.2 — Bitmap nonce (Permit2-style)** — `useNonce/isNonceUsed`. **KEEP** — Path-B protection; Path A skips it.
+- [x] (2026-05-28) **5.3 — `cancelNonces(uint256[])`** — F-#7. **KEEP** (Path B).
+- [x] (2026-05-28) **5.4 — `consumedNotional[quoteId]`** — capacity authority (F-#6 / I7). **KEEP** (Path B; optionally reused as a per-market cap on Path A).
+- [x] (2026-05-28) **5.5 — `SwapRecord` storage** — incl. `liquidity` (F-#2). _(On Path A, `mm = address(convexityVault)`; collateral still == MaxIL in FULL. Settle is path-agnostic. P3 records which path/vault holds collateral + the load actually charged. **NOTE:** spec §5.1 still lists `sqrtP0X96`, which Task 5.12 **removed from the shipped contract** — fix the spec drift in P5.)_
+- [x] (2026-05-28) **5.6 — Constants** — MIN_POSITION_V0, MIN_PREMIUM, price-band, validity band, FULL split. **KEEP** (dust floors apply to both paths).
+- [x] (2026-05-28) **5.7 — `createSwap(...)`** — strict CEI PHASE 1–4. **← THE PIVOT SITE (modified in P3).** Untouched inside: ownerOf, `positions()` read + marketId cross-check, on-chain Pa/Pb via TickMath, in-range gate `Pa ≤ P0 ≤ Pb`, computeMaxIL, entry-amount snapshot, V0, dust floors, lockCollateral mechanics, SwapRecord write, CEI ordering.
+- [x] (2026-05-28) **5.8 — `settle(swapId, hintRoundId)`** — **KEEP, UNTOUCHED.** Stored `L` (I6), `payout = min(IL, MaxIL)` (I1/I2), status-flip-first CEI.
+- [x] (2026-05-28) **5.9 — `settlePreview(...)` view** — **KEEP, UNTOUCHED.**
+- [x] (2026-05-28) **5.10 — Invariant test suite** — I1–I9 all covered (fuzz + stateful). **KEEP.** _(P3 adds the **I10** test as a sibling.)_
+- [x] (2026-05-29) **5.11 — Mainnet-fork integration test** — real NPM + Chainlink + Solidity ILMath, full createSwap→settle. **KEEP** (Path-B path today; P3 adds a Path-A fork test).
+- [x] (2026-05-29) **5.12 — Gas pass** — removed dead `SwapRecord.sqrtP0X96` (−22.1k gas/op). **KEEP.** _(Spec §5.1 drift to fix in P5.)_
+- [x] (2026-05-29) **5.13 — Slither + manual review** — 27 findings, 1 fixed (settle CEI hoist) + 26 documented accepts. **KEEP.** _(P3 re-runs Slither on the new contracts.)_
+- [ ] **5.14 — Deploy to Arbitrum Sepolia** — **PAUSED / re-sequenced into P3.x.** Must deploy the **new contract set** (FairValueOracle + VolOracle + ConvexityVault) alongside the existing core, not the old set. Record in `deployments/arbitrum-sepolia.json`.
+- [ ] **5.15 — Commit milestone** — superseded by the per-phase milestones in P2/P3.
 
-- [ ] **7.1 — Package skeleton** — viem-based; tree-shakable; ESM + CJS dual export.
-- [ ] **7.2 — Contract bindings** — auto-generated from ABIs (`forge build` → `abis/`); wagmi-generate or hand-rolled.
-- [ ] **7.3 — LP surface** — `previewSwap`, `createSwap` (NFT approve + USDC approve + on-chain), `claimFees`, `getActiveSwaps`, `getPositionSummary` (δ, fees vs premium, IL-to-date).
-- [ ] **7.4 — Auto-refetch on band revert** — `createSwap` catches `price out of band` revert, refetches best quote, retries once (transparent UX, Fork 2).
-- [ ] **7.5 — MM quoter client** — connects to engine WS; `stream/cancel/requoteLoop(modelFn)`; signs quotes locally.
-- [ ] **7.6 — Risk helpers** — `bookDelta`, `bookGamma` (approximations from position structure).
-- [ ] **7.7 — Hedge helpers** — `suggestDeltaHedge` (returns "go short X ETH on Hyperliquid/GMX to flatten"); informational only.
-- [ ] **7.8 — Data surface** — `getConvexityPremiumIndex(market, band)`, `getRiskAppetiteIndex(market)`, `getConvexityDepth(market)`.
-- [ ] **7.9 — Examples** — `examples/lp-basic.ts` (10-line LP flow), `examples/mm-bot.ts` (10-line MM streamer), `examples/data-consumer.ts` (5-line surface fetch).
-- [ ] **7.10 — Publish (or local pack)** — for the hack, `pnpm pack` an artifact + post on GitHub release; full npm publish optional.
-- [ ] **7.11 — Commit milestone** — `feat(sdk): @inflexion/sdk LP / MM / data surfaces + examples`.
+## Parallel track ⊕ Phase 14 — Quant model (`quant/`) — **MODIFY → LEGACY**
 
-## Phase 8 — Subgraph _(Day 10–11)_
+_The reusable simulators **`il.py` / `prices.py` / `positions.py`** carry forward into the cvAMM module (P1). **`il.py` is verified-correct and is the single source of truth** — running `_scratch_cvamm_sim.py` against it reproduces every authoritative number. The **PARTIAL multi-asset calibration stack** (`portfolio.py` waterfall + `calibrate.py` + `stress.py` + `deck_charts.py`, and their tests) moves to **`quant/legacy/`** intact (preserved for the PARTIAL roadmap + senior/junior tranche sizing). **`params.json` (v2.0.0) and `params.py` are frozen this turn** — pydantic `extra='forbid'` + byte-roundtrip test gate them; the cvAMM block goes in a **NEW doc**, never into this file._
 
-- [ ] **8.1 — `schema.graphql`** — entities per spec §11.5.
-- [ ] **8.2 — `subgraph.yaml`** — data sources for `InflexionCore` + `UnderwriterVault` on Arbitrum Sepolia.
-- [ ] **8.3 — Mapping handlers (AssemblyScript)** — `handleSwapCreated`, `handleSwapSettled`, `handleCapitalLow`, `handleNoncesCancelled`, etc.
-- [ ] **8.4 — Surface back-computations** — convexity-premium index per `(market × band)`; risk-appetite signals; convexity-supply depth.
-- [ ] **8.5 — Deploy to Graph Studio** — Sepolia subgraph; record endpoint URL in `deployments/sepolia.json` and `apps/web` env.
-- [ ] **8.6 — Commit milestone** — `feat(subgraph): live indexer for swaps + quotes + vault`.
-
-## Phase 9 — REST API _(Day 11)_
-
-- [ ] **9.1 — `packages/api` skeleton** — Fastify + Apollo client to subgraph + Zod schemas.
-- [ ] **9.2 — Endpoints (spec §11.7)** — `/markets`, `/markets/:pair/:fee/:dur/{iv|risk-appetite|depth}` (rename `iv` → `cpi` for convexity-premium-index per Fork F-#12; keep `iv` as alias for back-compat), `/swap/:id`, `/mm/:address/stats`, `/vault/health`.
-- [ ] **9.3 — Dockerfile + Railway/Fly deploy** — public URL.
-- [ ] **9.4 — OpenAPI / Swagger spec** — auto-generated from Zod; served at `/docs`.
-- [ ] **9.5 — Commit milestone** — `feat(api): public REST API live + OpenAPI`.
-
-## Phase 10 — Frontend (`apps/web`) _(Day 12–15)_
-
-- [ ] **10.1 — Bootstrap** — React 19 + Vite + TS + wagmi v2 + viem + RainbowKit + Apollo + shadcn/ui + Recharts + Tailwind.
-- [ ] **10.2 — Theme + layout** — header w/ wallet + nav; footer w/ Docs / API / GitHub; live stats strip at the bottom.
-- [ ] **10.3 — `/` landing** — value prop, 3 CTAs ("Protect my LP" / "Underwrite & earn" / "Vault" (Phase 2)), live stats, trust band ("FULL: bad debt is mathematically impossible — see proof →").
-- [ ] **10.4 — `/protect` LP flow** —
-  - auto-detect v3 NFTs (read PositionManager)
-  - position cards (pair, range, V0, in/out of range badge)
-  - duration picker (7/30/90d; demo: seconds)
-  - **ONE quote view**: "Pay $X to cover up to $Y of impermanent loss for 30 days" + plain English MM + settlement = European
-  - `[Advanced ▸]` reveals rate (% MaxIL), MM, ratio band, raw MaxIL, oracle source, **priceBand**
-  - **Payoff diagram** (F-#5 user-facing rule): covered region up to MaxIL, uncovered beyond range, with the in-range-convexity-hedge label
-  - Confirm → approve NFT + USDC → on-chain
-  - **Auto-refetch on band revert** (Fork 2 UX): show "Refreshing quote — market moved" toast; retry once
-- [ ] **10.5 — `/dashboard` LP** — active-swap cards: δ, IL-to-date, fees-vs-premium, expiry countdown, Claim Fees button. Settled history.
-- [ ] **10.6 — `/underwrite` MM cockpit** — deposit/withdraw; quoting panel (rate, ratio band, capacity, validity, **priceBand**); live book preview; portfolio Greeks; ROC/P&L; CapitalLow alerts.
-- [ ] **10.7 — `/markets` — three data surfaces** —
-  - Convexity-Premium Index heatmap (pair × duration × band) — **NOT labeled "IV"**, with the caveat tooltip
-  - Risk-appetite gauge + time series
-  - Convexity-supply depth per market
-  - "Free public data — API →"
-- [ ] **10.8 — Demo-mode price ticker** _(consumed by Phase 12)_ — shows live oracle so the audience watches IL accrue.
-- [ ] **10.9 — Settlement animation** — at settle, "LP made whole · MM paid residual · NFT returned" with tx links.
-- [ ] **10.10 — Mobile-acceptable layout** — judges sometimes review on phone.
-- [ ] **10.11 — Commit milestone** — `feat(web): /protect /dashboard /underwrite /markets live and end-to-end`.
-
-## Phase 11 — `docs.inflexion.xyz` _(Day 14–16, parallel with frontend)_
-
-- [ ] **11.1 — Bootstrap** — Mintlify (preferred for the polish + interactive components) or Docusaurus in `apps/docs`.
-- [ ] **11.2 — Audience 1 — zero-knowledge LP** — "What is impermanent loss?" with an **interactive price slider** that draws hold-vs-LP curves and the IL gap; analogy ("like insurance for your LP"); glossary; FAQ. No math.
-- [ ] **11.3 — Audience 2 — LP guide** — UI flow + 10-line SDK example; explains the MaxIL cap simply with the payoff diagram; explains the "in-range convexity hedge" framing.
-- [ ] **11.4 — Audience 3 — MM guide** — running a quoting bot; the SDK quoter + hedging helpers; "uptime, not volume" principle; rate / ratio band / **priceBand** sizing.
-- [ ] **11.5 — Audience 4 — Data / API** — REST + GraphQL + SDK reference; the 3 surfaces; contamination caveats; curl + TS examples.
-- [ ] **11.6 — Audience 5 — Protocol / security** — math (from `docs/MATH.md`), no-bad-debt proof, cap reasoning, trust model (spec §4.5), Fork-1 + Fork-2 designs, quant model (Phase 14 outputs), all 9 invariants, attack vectors + mitigations.
-- [ ] **11.7 — Deploy** — Vercel / Cloudflare Pages; custom domain `docs.inflexion.xyz` if owned, else subdomain.
-- [ ] **11.8 — Commit milestone** — `docs: docs.inflexion.xyz live with 5-audience structure`.
-
-## Phase 12 — Demo deployment + testnet setup _(Day 17–18)_
-
-- [ ] **12.1 — `OracleManager` demo mode** — `setDemoPrice(token, price)` gated to `OPERATOR_KEY` and a `DEMO_MODE` immutable; only deployed in the demo deployment (never mainnet). Still routed through the lone-spike + health gates.
-- [ ] **12.2 — Configurable seconds-scale durations** — demo deployment accepts `duration` in seconds (e.g. 120s).
-- [ ] **12.3 — Pre-seed script** — `scripts/demo-seed.ts`: mint 2–3 ETH/USDC v3 NFTs (tight + wide ranges), deposit MM capital, start 2–3 MM bots, create one swap near-expiry. Idempotent with a `--reset` flag.
-- [ ] **12.4 — One-shot reseed** — `pnpm demo:reseed` tears down and re-seeds in <30s.
-- [ ] **12.5 — Live demo dry-run** — full 3-min sequence per spec §15.2 executed end-to-end; record timings; iterate.
-- [ ] **12.6 — Recorded fallback video** — full demo screen-recorded (OBS / Loom); uploaded; link in pitch deck and README.
-- [ ] **12.7 — Pin RPC URLs + pre-fund all gas** — Sepolia ETH + Circle USDC; document the playbook in `RUNBOOK.md` (demo-day section).
-- [ ] **12.8 — Commit milestone** — `feat(demo): Sepolia demo deployment + seed scripts + fallback video`.
-
-## Phase 13 — Pitch + submission _(Day 18–19)_
-
-- [ ] **13.1 — 30-second hook rehearsal** — spec §16.1 wording; time it (must be ≤ 30s).
-- [ ] **13.2 — Slide deck (~10 slides)** — Problem · Primitive · MaxIL + invariant · Quote-driven dealer market · Quant model · Data moat · Honesty slide · Roadmap · Team · Demo CTA.
-- [ ] **13.3 — 3-minute demo script** — choreography per spec §15.2; rehearse twice end-to-end.
-- [ ] **13.4 — Tough Q&A prep** — spec §16.6 Q&A; index-card answer to each.
-- [ ] **13.5 — HackQuest submission** — project page, video link, repo link, deck, addresses, API URL, docs URL.
-- [ ] **13.6 — Commit milestone (final)** — `release: v0.1.0 — Inflexion hackathon submission`.
+- [x] (2026-05-26) **14.1 — Notebook scaffold** — `inflexion_quant` package + `01_underlying.ipynb`.
+- [x] (2026-05-26) **14.2 — Underlying model** — jump-diffusion (Kou/Merton) + bootstrap + common factor. _(P1 reuses `gbm_paths` with **mu=0** as the **risk-neutral** engine for fairRate; Kou/common_factor/bootstrap stay for the PARTIAL/pool-hedge stress engine.)_
+- [x] (2026-05-26) **14.3 — Position-structure distribution** — `positions.py` + `crypto_majors()` mix. _(P1 reuses the sampling primitives for the **9-marketId width × distance-to-edge** grid; `crypto_majors()` stays as the PARTIAL/dispersion stress mix.)_
+- [x] (2026-05-26) **14.4 — Path → IL** — `il.py` (entry_amounts, lp_value, compute_il, compute_max_il, compute_payout). **KEEP — bedrock of the FairPremium surface.**
+- [x] (2026-05-27) **14.5 — Portfolio waterfall** — `portfolio.py`. **→ `quant/legacy/`** (pure PARTIAL: MM-posts-c split + insurance-fund tail; no cvAMM-FULL deliverable maps onto it).
+- [x] (2026-05-27) **14.6 — Stress scenarios** — `stress.py`. **→ `quant/legacy/`** (PARTIAL fund-solvency harness; `var_cvar` / `ruin_probability` re-imported by the new depositor-disclosure module).
+- [x] (2026-05-27) **14.7 — Parameter outputs** — `calibrate.py`. **→ `quant/legacy/`** (all 8 outputs are PARTIAL constants; **extract** the vectorised `_vectorised_payouts_and_maxils` numpy kernel into the new cvAMM module as the surface engine — ~50× faster than looping `il.py`).
+- [x] (2026-05-27) **14.8 — `quant/params.json`** — pydantic schema, v2.0.0. **FROZEN this turn** (do not edit `params.json` or `params.py`). cvAMM block → new doc; future schema bump (minor) adds it.
+- [x] (2026-05-27) **14.9 — Charts for the deck** — `deck_charts.py`. **→ `quant/legacy/`** (PARTIAL fund/ratio framing; new cvAMM deck charts are P1 deliverables, copying DECK_STYLE/palette).
+- [ ] **14.10 — Commit milestone** — `feat(quant): Monte Carlo solvency model + params.json + charts` _(still open; folds into the P1 milestone)._
+- [x] (2026-05-27) **14.11 — Audit fixes (GPT-5 + Gemini 2.5)** — 9 fixes, schema → 2.0.0, stability disclosure. **KEEP** (these hardenings carry into the PARTIAL roadmap).
 
 ---
 
-## Parallel track ⊕ Phase 14 — Quant model (`quant/`) _(start Day 3, runs through Day 18)_
+# Part II — The cvAMM hybrid pivot (P1 → P5)
 
-**Gates PARTIAL** and is a flagship pitch artifact ("we did not guess our risk parameters — we derived them from Monte Carlo stress under fat-tailed, correlated crashes").
+> **Ordered by dependency, not by calendar.** P1 (quant) gates P2/P3 (the pricing primitives are quant outputs — **never hardcoded**). P2 (oracles) gates P3 (the vault prices off the on-chain FairPremium). P3 is the headline build. P4 is the surfaces. P5 finalizes the docs.
+>
+> **Invariant law for all of P1–P5:** every change is **UPSTREAM of `settle`**. `settle`, the `MaxIL` formula, and **invariants I1–I9 are UNTOUCHED**. The new invariant **I10** (`premium ≤ FairPremium·(1+maxLoadBps)`) is enforced **by construction** at `createSwap` and never touches the settlement path.
 
-- [x] (2026-05-26) **14.1 — Notebook scaffold** — Python 3.12 + `uv`, jupyter, numpy/scipy/pandas/matplotlib, `arch` (vol models). `quant/notebooks/01_underlying.ipynb` etc. _(landed with `inflexion_quant` package + `01_underlying.ipynb` smoke test; `arch` deferred to Task 14.2 when GARCH actually gets used.)_
-- [x] (2026-05-26) **14.2 — Underlying model** — jump-diffusion (Kou or Merton) + historical bootstrap from 3y ETH/BTC/ARB data; common crash factor. _(All 4 simulators landed in `prices.py` with 13 property tests passing. Historical bootstrap uses synthetic Student-t(4) returns by default; `inflexion_quant.data.cached_fetch('ETH', days=1095)` swaps in real CoinGecko data offline. Notebook 01 drives all 4 with sample plots.)_
-- [x] (2026-05-26) **14.3 — Position-structure distribution** — realistic LP range widths × moneyness mix. _(`positions.py` + `PositionMix.crypto_majors()` mixture (30% tight / 40% moderate / 25% wide / 5% v2-like) with log-normal V0 and Beta(2,2) offsets. 6 tests; notebook 02 shows distributions + 200-position range-bar viz.)_
-- [x] (2026-05-26) **14.4 — Path → IL** — Python reimplementation of spec §3.1; sanity-check vs Stylus on a sample. _(Full float-based `il.py`: entry_amounts, lp_value (3 regimes), compute_il (guarded, I3+I4), compute_max_il (boundary-max, I1), compute_payout (capped, I1+I2). 15 tests incl. convexity, continuity, monotonicity, reference-magnitude bands that regenerate the spec §3.2 placeholders. Notebook 03 drives single-position IL sweeps + MaxIL/V0 reference table + 2k-position × Kou-path mix. **Stylus cross-check stubbed** — wires up in Phase 2.11 once cargo-stylus is in.)_
-- [x] (2026-05-27) **14.5 — Portfolio waterfall** — spec §9 step 3. _(`portfolio.py` with `WaterfallConfig`, `waterfall()`, `aggregate()`, and a convex `default_fee_curve` placeholder anchored at spec §8.3 (1% at c=20%, 5% at c=10%). 23 property tests: conservation `mm_pays+fund_pays==payout`, FULL recovery when `c·V0≥MaxIL`, calm-market positive carry, crash-regime negative P&L, fee-curve convexity. Notebook 04 drives a 500-position book through calm GBM and crash Kou scenarios, sweeps `c ∈ [5%, 50%]`, plots the inflow-vs-outflow crossover. Task 14.7 will calibrate the real `c_min` and fee curve from these.)_
-- [x] (2026-05-27) **14.6 — Stress scenarios** — correlated crash (common factor +6σ), vol regime shift, utilization spike. _(`stress.py` with three named scenarios on top of `prices.common_factor_paths` + the 14.5 waterfall: `correlated_crash` (with `moderate()` / `severe()` presets), `vol_regime_shift` (piecewise-σ GBM), `utilization_spike` (severe crash, 1–10× book). Tail helpers `ruin_probability`, `var_cvar`, `summarise`. 19 property tests: severe > moderate fund_pays, vol-shock → bigger tail, utilization scales pays, VaR-monotone-in-confidence, CVaR ≥ VaR, reproducibility, validation. Notebook 05 plots distributions + tail-risk sweeps + ruin-prob vs fund equity — direct input to 14.7.)_
-- [x] (2026-05-27) **14.7 — Parameter outputs** — `c_min`, convex `floor_curve(c)`, convex `fee(c)`, circuit-breaker thresholds, withdrawal-delay length, per-market/per-MM exposure caps, MM first-loss size, target fund balance for ruin < 0.1%. _(`calibrate.py`: `_ScenarioCache` + vectorised payout/max_il helper (50× faster than il.py loop, verified swap-for-swap to 1e-9). MC-derived: `calibrate_c_min` (bisection), `calibrate_fund_target` (closed-form quantile), `calibrate_exposure_caps` (book-size sweep), `calibrate_fee_curve` (bisection over fee scalar for median pnl ≥ 0). Heuristics packaged for delivery: breakers (1.0/0.7/0.4/0.0), withdrawal_delay (7d), first_loss (2%). `calibrate_all()` top-level orchestrator returns a `CalibrationResult` dataclass, `to_dict()`-serialisable to JSON. 17 property tests: vectorised matches `il.compute_payout` per swap in all 3 lp_value regimes, fund_pnl_from_cache matches 14.5 waterfall aggregate, c_min monotone in fund balance, fund_target = -quantile on handcrafted dist, fee refit closed-form-verified. **floor_curve** is single-σ — multi-σ fit deferred to Phase 15. Notebook 06 shows c_min vs fund_balance, fund-P&L distribution with budget quantile, fee refit vs placeholder, exposure-caps sweep, and the end-to-end `CalibrationResult` JSON.)_
-- [x] (2026-05-27) **14.8 — `quant/params.json`** — versioned, schema-validated, consumed by Phase 15 deploy. _(`params.py`: pydantic v2 `Params` model with `extra='forbid'`, semver `schema_version='1.0.0'`, provenance (created_at, rng_seed, n_runs, stress_scenario, quant_package_version, notes). Sub-models `FloorCurve`, `FeeCurveParams`, `BreakerLevels` (model_validator: L0 > L1 > L2 ≥ L3), `ExposureCaps` (model_validator: per_mm_cap ≤ per_market_cap). `Params.from_calibration(CalibrationResult)`, `.save(path)`, `.load(path)`. CLI: `uv run python -m inflexion_quant.params --output params.json --n-runs N --rng-seed S`. 16 property tests: schema rejects unknown fields, c_min OOR, version mismatch, breaker disorder, per_mm > per_market, non-finite, neg withdrawal; roundtrip equality; JSON-native output; byte-deterministic re-save. Calibration tweak: `calibrate_c_min` now defaults to `fee_pct=0` (decouples floor from placeholder fee's runaway at low c); severe stress bumped to true 99th-pct (24 crashes/yr, mean −50%, σ 60%). Generated `quant/params.json` (v1.0.0): c_min=13.6%, fund_target=$24,256, per_market_cap=100 swaps, per_mm_cap=20, fee placeholder=2.4% at c_min, breakers 1.0/0.7/0.4/0.0, withdrawal_delay=7d, first_loss=2%. The repo `params.json` is loaded + roundtripped in a test that gates schema bumps.)_
-- [x] (2026-05-27) **14.9 — Charts for the deck** — fund P&L distribution, ruin prob vs `c`, drawdown under 99.9th-pct correlated crash. Export to `apps/docs/static/quant/`. _(`deck_charts.py` module + CLI: `uv run python -m inflexion_quant.deck_charts`. Three slide-ready PNGs at 16:9, 200 DPI: `fund_pnl_distribution.png` (histogram at calibrated c_min with VaR99 + ruin-budget quantile + fund_target arrow), `ruin_probability_vs_c.png` (log-scale curve with calibrated c_min annotated where it crosses the 0.1% budget; "below c_min" region shaded), `tail_coverage.png` (stacked bars at P50/P95/P99/P99.9 of fund exposure showing MM cover vs Fund cover — fund's share visibly grows with severity). Forces matplotlib Agg backend so renders are headless / CI-safe. 6 smoke tests verify each chart writes a non-trivial PNG (>10 KB) and `render_all` mkdir-p's the output dir. All charts sourced from the same calibration that produces `params.json` — deck and on-chain stay in sync.)_
-- [ ] **14.10 — Commit milestone** — `feat(quant): Monte Carlo solvency model + params.json + charts`.
-- [x] (2026-05-27) **14.11 — Audit fixes (GPT-5 + Gemini 2.5 reviews)** — external multi-LLM audit of the quant model surfaced 6 high-severity gaps; 9 fixed in-band. _(Fixes: (1) `n_runs` default bumped 1k → 50k — auditor proved at 1k the 0.1%-quantile is one observation and c_min swings 13.6% → 17.75% across sample sizes; (2) `CorrelatedCrashConfig.severe()` re-anchored to historical episodes (Terra/FTX/March 2020, 6 crashes/yr mean −40% — no more reverse-engineered docstring); (3) `calibrate_fund_target` switched VaR → CVaR (coherent + tail-aware); (4) `calibrate_fee_curve` targets **mean ≥ 0** not median (audit B1: median-solvent fund bleeds across periods); (5) circular `c_min ↔ fund_target` resolved via fixed-point bisection (replaces hand-picked 1% bootstrap); (6) `ruin_budget` renamed → `ruin_budget_per_horizon` + new `annualized_ruin_budget` field (audit A5: 0.1%/30d ≈ 1.21%/year); (7) `parameter_provenance` dict per field (calibrated/heuristic/deferred — no more mixing); (8) `positions.py` docstring fixed (was contradicting itself with "calibrated" + "placeholder"); (9) 8 hand-calculated `il.py` test fixtures from Uniswap §6.30 (audit C1: internal-consistency tests prove implementations match each other, not that any is correct). Schema bumped to `2.0.0`. `validate_calibration_stability` helper added — runs cross-seed and reports c_min / fund_target spread, surfaced in the CLI output and serialised into `params.json.stability_check`. **Deferred to mainnet (documented in `params.json.notes`):** portfolio-level multi-market calibration, empirical position mix from Uniswap subgraph, multi-period fund evolution, MM/LP behavioral models, multi-σ floor curve, depeg/oracle failure mechanisms. New v2.0.0 params: **c_min=7.25%, fund_target=$74,039 (CVaR), per_market_cap=700, per_mm_cap=140**. Cross-seed disclosure: c_min ±37bp, fund_target ±44% — honestly surfaced. 7 new tests; full quant suite now 122 passed.)_
+## P1 — Quant-first: single-asset cvAMM calibration **(gates everything)** — **NEW**
 
-## Stretch ⭐ Phase 15 — PARTIAL mode _(only if Phases 1–13 green AND Phase 14 done)_
+**Spine:** promote `quant/_scratch_cvamm_sim.py` → a committed `quant/src/inflexion_quant/cvamm.py`, wired to the **risk-neutral `gbm_paths(mu=0)`** engine and the **extracted vectorised kernel** from `calibrate.py`. Produce the **10 deliverables** that feed the **cvAMM block** of `params.json`. **No pricing primitive may be hardcoded** — this is the exact audit failure.
 
-- [ ] **15.1 — `InsuranceVault.sol`** — ERC-4626 with locked-vs-free tracking, withdrawal delay + redemption queue, `coverBadDebt/healthRatio/circuitBreakerLevel`.
-- [ ] **15.2 — Convex floor + leverage tax** — read `params.json`; smooth curves; evaluate `minPartialBps` dynamically on every fill.
-- [ ] **15.3 — Circuit breakers** — L0/L1/L2/L3 thresholds from health-ratio; L2 suspends new PARTIAL, L3 multisig-only.
-- [ ] **15.4 — `LiquidationManager.sol`** — Dutch-auction keeper reward (linear ramp), Chainlink Automation target.
-- [ ] **15.5 — MM first-loss stake** — `lockFirstLoss(mm, amount)` proportional to PARTIAL exposure.
+- [ ] **P1.1 — Promote the scratch sim** — move `_scratch_cvamm_sim.py` into `cvamm.py`; remove the scratch file; add the module to the package. **Done-when:** `cvamm.py` imports cleanly and a smoke test runs.
+- [ ] **P1.2 — Deliverable 1: FairPremium surface** — `fairRate = E_Q[min(IL,MaxIL)]/MaxIL` as an **S-curve in σ²·T** over the **9-marketId** geometry grid (ETH/USDC × 3 fee tiers × 3 durations 7/30/90d), pricing the **specific geometry** (width + distance-to-edge + T), never a band midpoint. **Done-when:** the surface reproduces the authoritative numbers within MC tolerance (±5%: 7d 69.5% / 30d 84.8% / 90d 91.3%; ±10%: 44.9 / 70.8 / 82.9; ±20%: 18.2 / 47.3 / 67.4) and the **MaxIL = pure geometry, duration-independent** decomposition (1.27 / 2.56 / 5.23 / 13.76% of V0; arithmetic ±50% = 18.0%) is asserted.
+- [ ] **P1.3 — Deliverable 2: sigma_ref estimator** — add an **EWMA realized-vol helper** to `prices.py`: `sigma_ref = max(sigma_short, sigma_long, floor)` on log-returns. **MANDATORY caveat (documented):** _never price off raw realized sigma — it understates risk right before a regime change; the `max(...)` is the conservative guard._ **Done-when:** the helper + the caveat are in the new doc; short/long windows + floor are params.
+- [ ] **P1.4 — Deliverable 3: baseLoad** — motivated by the **lone-writer CVaR95 vs diversified-pool** gap (overcharge gap 9–73 pts; per-contract CVaR collapses 100% → 78.7% as N: 1 → 100 — the cvAMM's reason to exist). **Done-when:** the diversification CVaR-collapse curve is reproduced and `baseLoad` is derived from it.
+- [ ] **P1.5 — Deliverables 4 + 5: the two skews** — `util_skew(locked/(locked+free))` (rises toward full commitment; wires into the withdrawal-delay/locked-free defense) and `dispersion_skew` (rises as outstanding coverage **clusters** in one width/moneyness/duration corner — the honest single-pair analogue of concentration). **Both calibrated on a SINGLE-ASSET book** — neither inherits the dead cross-asset `k ≈ 1.0`. **Done-when:** both curve shapes are produced as params; the single-asset note is documented.
+- [ ] **P1.6 — Deliverable 6: maxLoadBps (the I10 clamp)** — size `maxLoadBps` such that `baseLoad + util_skew + dispersion_skew` is **clamped ≤ maxLoad** by construction. Applies to **both paths**, **upstream of settle**. **Done-when:** the clamp value is a param and the by-construction proof is documented.
+- [ ] **P1.7 — Deliverable 10: single-asset depositor disclosure numbers** — depositor **loss distribution** (re-using legacy `var_cvar` / `ruin_probability`). **Numbers are PLACEHOLDER pending this P1 quant** — the old multi-asset figures are materially optimistic for one pair. **Verbatim tone, never "stable/modest APY":** _"You earn the volatility risk premium in calm markets and absorb losses in crashes. In FULL the pool cannot become insolvent and cannot be run, but YOUR CAPITAL IS NOT GUARANTEED."_
+- [ ] **P1.8 — Deliverables 7 + 8 + 9 (ROADMAP-sized, not launch-blocking):** safe **routable idle fraction** (idle/free USDC only, instantly-redeemable wrappers, hard cap, never 100% — **the "Aave for locked collateral" idea is BLOCKED; encode only the compliant form**); **pool-hedge fraction** (reuse legacy `stress.py` crash sims); **senior/junior tranche cut** (reuse legacy `portfolio.py` fund-pays distribution). **Done-when:** each has a sizing method + a param slot in the new doc, tagged ROADMAP.
+- [ ] **P1.9 — cvAMM params schema (scaffolded this pivot)** — fill in `quant/params.cvamm.schema.json` (already created with TODO placeholders this pivot) with the calibrated cvAMM block: fairRate S-curve params, sigma windows + floor, baseLoad, maxLoadBps, util_skew curve, dispersion_skew curve, diversification target N, routable-idle fraction, pool-hedge fraction, tranche cut. **Do NOT edit `quant/params.json` or `params.py` this turn.** Plan a future **minor** schema bump when code lands.
+- [ ] **P1.10 — Move PARTIAL stack to legacy** — `git mv` `portfolio.py` / `stress.py` / `calibrate.py` / `deck_charts.py` (and their tests) → `quant/legacy/` + `quant/legacy/tests/`; fix import paths; keep CI green. **Done-when:** the PARTIAL suite still runs from `legacy/` and the cvAMM suite runs from the main package.
+- [ ] **P1.11 — New cvAMM tests + deck charts** — tests: fairRate surface reproduces the authoritative numbers within MC tolerance; **I10 holds by construction** (`premium ≤ FairPremium·(1+maxLoad)`). Charts: FairPremium S-curve in σ²·T (3 prices per width), the overcharge-gap / diversification-collapse, the depositor loss distribution.
+- [ ] **P1.12 — Commit milestone (machinery)** — `feat(quant): cvAMM single-asset FairPremium surface + skews + sigma_ref + schema doc; PARTIAL stack → legacy`.
+- [ ] **P1.13 — HEAVY single-asset calibration RUN (separate long execution)** — run the **full methodology** (`quant/SPEC.md`): real-measure **fat-tailed / jump-diffusion** + **stochastic-vol / GARCH clustering** + **tail-dependent crash correlation → 1** simulators; a **2020–2025 historical backtest** (incl. March-2020, LUNA, FTX; documented data source + labelled fallback); a **demand / adverse-selection model** (confirm geometry-specific pricing defends the must-quote pool); and an **adversarial self-audit** (heavier tails, higher crash correlation, worse adverse selection, stale-σ regime jump). **Produce the FINAL calibrated numbers** — `baseLoad`-by-regime, the two skew curves, `maxLoadBps`, productive-collateral / pool-hedge / tranche-cut sizes, and the **REAL single-asset depositor disclosure** (APY, P(losing month), 1-in-100 loss, worst month) — filling every `TODO_PLACEHOLDER` in `quant/params.cvamm.schema.json`. **Verify the FULL no-bad-debt invariant on EVERY simulated + historical path** (flag any violation loudly). **Safety targets:** P(losing month) ≲ 15%, 1-in-100 monthly loss ≲ 10% of capital, long-run mean APY clearly positive under fat-tails + crash-correlation, negligible >50% drawdown over 3y in FULL. **If a target is infeasible without an unmarketable load, SAY SO and propose a structural change** (per-corner exposure cap, deeper pool hedge, tranche re-cut) — never loosen the target. _This is the long run the P1.1–P1.11 structure sets up; it can be a separate long Opus run._
+- [ ] **P1.14 — Commit final params** — `feat(quant): heavy single-asset calibration run — final cvAMM params + real depositor disclosure numbers`.
+
+**Gates / tests:** fairRate surface matches authoritative numbers (MC tolerance); I10-by-construction test; `params.json`/`params.py` **byte-unchanged** (the existing roundtrip test must still pass). **Settle / MaxIL / I1–I9 untouched.**
+
+## P2 — On-chain FairValueOracle (Stylus) + sigma-EWMA VolOracle — **NEW**
+
+**Spine:** publish `FairPremium = fairRate · MaxIL` **ON-CHAIN** (Pillar 1), mirroring the existing **Stylus ≡ Solidity ≡ Python** discipline. The vol oracle is **required this build** and is **solvency-load-bearing for the I10 cap + depositor solvency — NOT for the FULL structural no-bad-debt invariant** (which stays oracle-independent).
+
+- [ ] **P2.1 — `VolOracle.sol` (sigma-EWMA)** — `sigma_ref = max(sigma_short, sigma_long, floor)`, EWMA of log-returns from Chainlink ticks (reads OracleManager's feeds). **NEVER raw realized sigma** (mandatory caveat). **Do NOT chase on-chain implied vol** (Deribit holds >90% of ETH options off-chain); **Deribit DVOL = optional published enrichment only, never depended on.** Short/long params + floor from `params.json` (cvAMM block).
+- [ ] **P2.2 — `FairValueOracle` (EXACT closed form)** — implement `FairPremium = E_Q[min(IL,MaxIL)]` as the **exact finite `Φ`-sum** over the piecewise v3 payoff (constant / linear-in-`P` / `√P` arms, split by the two cap-crossings), for the **specific geometry** (`Pa, Pb, L` from `positions(tokenId)` via TickMath), reading `σ_ref` from VolOracle. **NOT a lookup table; NOT the straddle-theta / Lipton continuum** (both are approximations of the capped payoff). Lipton-Lucic-Sepp 2025 / Singh et al. AFT 2025 are **theory anchors, cited not re-derived — not the pricer.** **No `fairRate` coefficients** (`σ_ref` is the only input). _Verify-first gate (**DONE this pivot**): closed form ≡ `il.py` quadrature ≡ MC to ~5e-11 across the domain (`quant/_scratch_fairvalue_closedform_check.py`); re-confirm in-repo before wiring._ **Done-when:** the on-chain pricer matches the Python closed form to machine precision AND a **Stylus-vs-Solidity gas+accuracy benchmark** is recorded — if Solidity, its `Φ` approximation (Abramowitz-Stegun etc.) error must stay below a stated tolerance or the "exact" property is lost; ship the cheaper impl that meets the bar, keep the other as the cross-check oracle.
+- [ ] **P2.3 — Equivalence + CI cross-check** — on-chain `fairRate` ≡ the Python closed form **exactly** (machine precision, not just MC tolerance) on the 9-marketId grid on local Nitro, mirroring the Stylus≡Solidity≡Python discipline; the Python reference (closed form + `il.py` MC) stays as a CI equivalence test. Record the Stylus-vs-Solidity gas + max-error-per-path benchmark and the chosen implementation.
+- [ ] **P2.4 — Unit + fork tests** — VolOracle EWMA against synthetic + real Chainlink tick series (floor + max(...) branches both exercised); FairValueOracle against the cvamm surface; regime-change caveat test (stale σ does not under-price below floor).
+- [ ] **P2.5 — Commit milestone** — `feat(contracts): FairValueOracle (Stylus) + sigma-EWMA VolOracle with Python MC cross-check`.
+
+**Gates / tests:** Stylus≡Python fairRate cross-check; VolOracle `max(...)`+floor branches; **the FULL no-bad-debt guarantee must remain provably independent of these oracles.** **Settle / MaxIL / I1–I9 untouched.**
+
+## P3 — ConvexityVault + capped on-chain Path A + I10 + Path-B schema **(headline build)** — **NEW**
+
+**Spine:** the cvAMM centrepiece (Pillar 2). Build **Path A first** (the always-on liquidity headline); keep **Path B present** but do **not** seed a fake book. **`createSwap` becomes a router to the cheaper of {pool price, best MM quote}.**
+
+- [ ] **P3.1 — `ConvexityVault.sol` (ERC-4626 USDC)** — pooled passive underwriter, **one vault per pair, 9 marketIds inside** (capital **fungible** across the 9). Tracks `locked` / `free` (for `util_skew`) and outstanding-coverage clustering (for `dispersion_skew`). **Withdrawal cooldown + locked/free accounting ⇒ cannot be run.** Exposes inventory state to `createSwap` (Path A pricing) and lock/release to `settle`. Depositor disclosure: **CAPITAL NOT GUARANTEED.** All skew/load primitives from `params.json` — **hardcoding is the exact audit failure.**
+- [ ] **P3.2 — EIP-1271 vault-signer wiring** — replace `ECDSA.recover` in createSwap's Path-B verification with OZ `SignatureChecker.isValidSignatureNow` so contract signers (incl. the ConvexityVault) validate — the vault **owns collateral directly; no keeper can drain pooled capital.** **PRE-AUTHORIZED EIP-712/EIP-1271 change — stated explicitly.** No new external dependency (OZ SignatureChecker already vendored).
+- [ ] **P3.3 — Path A in `createSwap` (signature-free, on-chain)** — read `FairValueOracle.fairPremium(marketId, maxIL)` + ConvexityVault inventory; compute `premium = FairPremium·(1 + baseLoad + util_skew + dispersion_skew)`, **clamped to `FairPremium·(1 + maxLoadBps)` [I10, by construction]**; lock collateral from the **pooled** ConvexityVault (lock MaxIL from free USDC in FULL). **No keeper, no signed quote on this path.** Untouched: ownerOf, positions() read, Pa/Pb via TickMath, in-range gate, computeMaxIL, entry snapshot, V0, dust floors, SwapRecord write, CEI.
+- [ ] **P3.4 — Path-B quote-schema change** — replace `premiumRateOfMaxIL` with **`loadBps`** in `SignedQuote`; bump `SIGNED_QUOTE_TYPEHASH` string + `hashQuote` encoding (**PRE-AUTHORIZED**, stated explicitly). The contract now **derives premium from the on-chain FairPremium** and requires `loadBps ≤ maxLoadBps` (**I10 on Path B**). **KEEP the Fork-2 defenses** (validUntil, priceBandBps, bitmap nonces, oracle-anchored band, I9) — firm quotes + oracle-band only, **no last-look.**
+- [ ] **P3.5 — Routing** — `createSwap` routes the LP to the **cheaper of {pool price, best MM quote}**. Record path + load actually charged on `SwapRecord`; on Path A set `mm = address(convexityVault)`. **Do NOT seed a fake MM book** — a single real MM plugs in to demo competition.
+- [ ] **P3.6 — Vault dispatch + premium distribution branch** — `settle` releases collateral against **whichever vault holds it** (ConvexityVault on A, UnderwriterVault on B). Premium distribution branches: Path A routes the underwriter share to ConvexityVault (accrues to ERC-4626 depositors) + treasury cut; Path B keeps the MM/treasury split. Splits stay governance/quant-sourced — no new hardcodes.
+- [ ] **P3.7 — `MarketConfig` extension** — each marketId resolves a FairValueOracle/VolOracle reference + a `cvAMM-enabled` flag. The 9 ETH/USDC markets register as today; **no change to the hashing scheme** (`keccak(token0,token1,fee,durationSeconds)`) or in-range rules.
+- [ ] **P3.8 — I10 invariant test** — `premium ≤ FairPremium·(1 + maxLoadBps)` holds for **both paths** under fuzz (by-construction clamp). **Plus** a Path-A mainnet-fork test (real NPM + Chainlink + FairValueOracle + ConvexityVault, full createSwap→settle). **Re-confirm I1–I9 still green** (they are untouched, but the suite must prove it).
+- [ ] **P3.9 — Slither + manual review** on the new contracts (ConvexityVault, FairValueOracle, VolOracle) + the modified `createSwap`. Triage table in `docs/SECURITY.md`.
+- [ ] **P3.10 — Deploy the full set to Arbitrum Sepolia** _(absorbs old Task 5.14)_ — `forge script script/Deploy.s.sol` deploying OracleManager + VolOracle + FairValueOracle + ILVault + UnderwriterVault + **ConvexityVault** + InflexionCore. Record in `deployments/arbitrum-sepolia.json`; wire `apps/web` + `packages/sdk`.
+- [ ] **P3.11 — Commit milestone** — `feat(core): cvAMM ConvexityVault + Path-A on-chain capped pricing + I10 + Path-B loadBps schema (EIP-1271)`.
+
+**Gates / tests:** **I10 by construction (both paths)**; routing picks the cheaper price; Path-A fork test green; **I1–I9 re-verified UNTOUCHED**; no hardcoded primitive (all from `params.json`); no last-look on Path B; EIP-712/EIP-1271 changes stated explicitly.
+
+## P4 — Engine / SDK / Subgraph / API + Frontend (/protect, /earn) — **MODIFY** (existing Phases 6–10, cvAMM-first)
+
+**Spine:** Path A is **signature-free on-chain** (no relayer needed). The off-chain engine is a **Path-B-only optional rail, scaled to ONE real MM.** The frontend leads with the cvAMM.
+
+### P4.a — Off-chain engine (Path B only, thin) — **MODIFY** _(was Phase 6)_
+
+- [ ] **P4.a.1 — Skeleton + EIP-712 helpers + WS intake + `/quote` + append-only log** _(old 6.1–6.3, 6.5, 6.7, 6.9)_ — scaled to one MM; `signQuote/verifyQuote` shared package; quotes now carry `loadBps`; `/quote` returns the signed payload + the **on-chain-derived** premium. **Path A needs no relayer.**
+- [ ] **~~6.4 — Best-per-band index~~** — **DONE-BUT-NOW-OBSOLETE** (multi-MM RFQ-book machinery; **never built**; deprioritized — a single real MM demos Path B).
+- [ ] **~~6.6 — Quote drop policy~~** — **DONE-BUT-NOW-OBSOLETE** (same; never built).
+- [ ] **~~6.8 — Multi-bot seed~~** — **DONE-BUT-NOW-OBSOLETE** (same; never built — do NOT seed a fake book).
+- [ ] **P4.a.2 — Commit milestone** — `feat(engine): thin Path-B relayer (single MM) + loadBps quote API`.
+
+### P4.b — `@inflexion/sdk` — **MODIFY** _(was Phase 7)_
+
+- [ ] **P4.b.1 — Bindings + LP surface** — viem bindings (auto-gen from ABIs); `previewSwap` now reads the **on-chain FairPremium** and surfaces best-of {pool, MM}; `createSwap` (approve NFT + USDC); `claimFees`; `getActiveSwaps`; auto-refetch on band revert (Path B, Fork 2).
+- [ ] **P4.b.2 — cvAMM depositor surface** — `deposit/withdraw` shares, NAV, `locked`/`free`, skew state, withdrawal-queue status.
+- [ ] **P4.b.3 — Convexity-aware READ-ONLY risk/hedge helpers** — `bookGamma`, `bookVega`, `replicationStrip`, `suggestGammaHedge` (mirroring the existing informational `bookDelta` / `suggestDeltaHedge`). **`executeOnPanoptic` = ROADMAP only** (Panoptic hedge is **approximate** perpetual-vs-fixed-maturity gamma and **EXPLICITLY NOT relied on for solvency**).
+- [ ] **P4.b.4 — Data surface** — rename `getLPStructuralIV` → convexity-premium / clearing-load (F-#12); `getRiskAppetiteIndex`, `getConvexityDepth`.
+- [ ] **P4.b.5 — Examples + pack + commit** — `lp-basic.ts`, `depositor.ts`, `mm-bot.ts` (Path B), `data-consumer.ts`. `feat(sdk): cvAMM LP + depositor + convexity-aware hedge surfaces`.
+
+### P4.c — Subgraph + REST API — **MODIFY** _(was Phases 8–9)_
+
+- [ ] **P4.c.1 — Subgraph** — index **FairValueOracle** publications, **ConvexityVault** deposits/withdrawals/NAV/locked-free/skew, **Path-A swaps**, and the **I10 load actually charged**. Surface-1 back-computation reframes to **observed clearing load over a transparent sigma_ref** (replacing the back-solved-IV framing).
+- [ ] **P4.c.2 — REST API** — `iv → cpi` rename; add a **FairValue/clearing-load** endpoint and a **cvAMM vault-health/NAV/skew/utilization** endpoint. OpenAPI at `/docs`; deploy public URL.
+- [ ] **P4.c.3 — Commit milestone** — `feat(subgraph+api): cvAMM vault + FairValue/clearing-load surfaces`.
+
+### P4.d — Frontend (`apps/web`) — **MODIFY** _(was Phase 10)_
+
+- [ ] **P4.d.1 — Three-doors landing** — **LP (buyer) / cvAMM depositor (passive underwriter) / MM (active, Path B).** Trust band: **two separate, never-merged claims** — (1) LPs are always paid (no bad debt, FULL, code-enforced I1, with the qualifying clause); (2) **depositors can lose principal in a crash — capital NOT guaranteed.**
+- [ ] **P4.d.2 — `/protect` LP flow** — auto-detect v3 NFTs; position cards; duration picker (7/30/90d; demo: seconds); show the **ON-CHAIN published FairPremium** and **best-of {pool, MM}** routing rendered as **"fair $X · you pay $Y · load +Z%"**; **payoff diagram surfacing P(cap) + fairRate** (covered region up to MaxIL, uncovered beyond range, in-range-convexity-hedge label); `[Advanced ▸]` reveals fairRate, σ_ref, raw MaxIL, oracle source; confirm → approve → on-chain; auto-refetch on band revert (Path B).
+- [ ] **P4.d.3 — `/earn` cvAMM depositor page (LAUNCH door, was Phase-2 `/vault`)** — deposit USDC → shares; **live APY**; **utilization gauge** (locked/(locked+free)); **dispersion gauge** (coverage clustering); **withdrawal queue / cooldown**; **verbatim risk modal** (the single-asset disclosure — never "stable/modest APY"; CAPITAL NOT GUARANTEED).
+- [ ] **P4.d.4 — `/dashboard` LP** — active-swap cards (δ, IL-to-date, fees-vs-premium, expiry countdown, Claim Fees); settled history.
+- [ ] **P4.d.5 — `/underwrite` MM cockpit — OPTIONAL / thin stub** — Path B present, **not seeded.** Deposit/withdraw; quoting panel (loadBps, capacity, validity, priceBand); convexity-aware Greeks (read-only). A single real MM uses it to demo competition.
+- [ ] **P4.d.6 — `/markets` — data surfaces** — Surface-1 relabeled **convexity-premium / clearing-load over σ_ref** (NOT "IV"); risk-appetite gauge; convexity-supply depth. "Free public data — API →".
+- [ ] **P4.d.7 — Demo ticker + settlement animation + mobile** — live oracle so the audience watches IL accrue; "LP made whole · pool/MM paid residual · NFT returned" with tx links.
+- [ ] **P4.d.8 — Commit milestone** — `feat(web): three doors (/protect /earn /underwrite) + FairPremium + routing + risk disclosure`.
+
+## P5 — Spec finalization + roadmap-item retag — **NEW**
+
+**Spine:** apply every spec edit the pivot requires and tidy the roadmap. **Docs-only; no code.**
+
+- [ ] **P5.1 — Spec MODIFY edits** — §0 exec summary (lead with on-chain FairValue + cvAMM; not-Bancor sentence); §1 decisions table (hybrid Path A/B; FairValueOracle; vol oracle; default FULL/leverage-1; I10); §2 scope (P1–P5 spine; launch = ONE ETH/USDC pool, 9 marketIds, FULL only; out-of-scope list); **§3.2 MaxIL magnitudes corrected** to il.py geometry (1.27/2.56/5.23/13.76%; arithmetic ±50%=18.0%; drop the "to be regenerated" caveat); §3.3 pricing (3 layers, on-chain FairPremium, theory anchors); §3.4 ratio bands (delete the geometry-asymmetry rationale + F-#9 caveat — geometry is **public**; ratioBps survives only as an optional Path-B filter); §4 (lead with Path A; retitle §4.3–§4.6 "Path B — MM signed quotes (parallel, optional)"; loadBps + EIP-1271 notes); §5 (Path-A createSwap branch + I10 in PHASE 1/2; **fix §5.1 `sqrtP0X96` drift** per Task 5.12); §6 (add §6.5 VolOracle with the regime-change caveat + not-implied-vol/DVOL-optional notes; FULL guarantee independent of it); §7 (add §7.3 ConvexityVault; reaffirm §7.2 idle-only yield + **flag Aave-locked as BLOCKED pending owner override**); §8 (retitle "leverage dial — FULL launch / PARTIAL roadmap"; new single-asset disclosure); §9 (cvAMM single-asset deliverables + new schema doc reference; old PARTIAL outputs → legacy); §10 (the two load-bearing reasons MMs matter — **export short-gamma out of the system** + **forward-vol correction**; pool = floor-of-liquidity + ceiling-of-price); §11 (convexity-aware read-only SDK + cvAMM depositor surface; Panoptic ROADMAP/not-for-solvency); §12 (Surface-1 reframe to clearing-load over σ_ref); **§13 (+I10; add FairValueOracle/VolOracle/ConvexityVault to the architecture; fix the ILMath "~10× cheaper" claim to the measured ~5.3× more-expensive-cached reality)**; §14 (three doors); §15 (cvAMM always-on + ONE real MM, no fake book); §16 (lead with on-chain FairValue + cvAMM; honest Stylus number; honesty slide folds the Inefficiency Ledger + not-Bancor + capital-not-guaranteed; Q&A adds cold-start→cvAMM); §17 (re-point to this P1–P5 structure or a pointer to ROADMAP.md); §18 (append BTC/multi-pair, cross-asset skew, PARTIAL dial, senior/junior tranches, productive collateral, pool hedge, Panoptic exec); §19 (add the single-asset open quant questions).
+- [ ] **P5.2 — Spec NEW sections** — §3.0 **Three Pillars** (on-chain FairValue / cvAMM / MM competition rail, with anchors); **Two skews** (util_skew + dispersion_skew, single-asset calibration, I10 clamp, params provenance); **Inefficiency Ledger** (1 risk-merely-moved RESOLVED/void; 2 rebalancing latency ACCEPTED; 3 depositor viability THE central challenge; 4 backward-looking σ deliberately left as **MM alpha**); **Senior/Junior tranching + pool-level partial hedge** (CONCEPT, ROADMAP; honest "no vol seller is safe" framing); **Single-asset depositor disclosure** (verbatim block + the two-separate-claims statement); reference the **cvAMM params schema doc** (`quant/params.cvamm.schema.json`).
+- [ ] **P5.3 — Invariant I10 in §13** — `premium ≤ FairPremium·(1+maxLoadBps)`, enforced **by construction** (`baseLoad + util_skew + dispersion_skew ≤ maxLoad` clamp), both paths, **UPSTREAM of settle — I1–I9 untouched.** Keep I1–I9 verbatim.
+- [ ] **P5.4 — Retag deprioritized items + bump footer** — confirm 6.4/6.6/6.8 retagged DONE-BUT-NOW-OBSOLETE (never built); confirm PARTIAL quant moved to `quant/legacy/`; bump the spec version footer (substantive change).
+- [ ] **P5.5 — Commit milestone** — `docs(spec): cvAMM hybrid finalization — three pillars, FairValue, I10, two skews, inefficiency ledger, §3.2 fix`.
+
+**Gates:** every `settle` / MaxIL / I1–I9 passage stays **verbatim**; every CLAUDE.md hard-rule flag is **encoded, never silently broken** (see Risk register).
+
+---
+
+## Stretch ⭐ Phase 15 — PARTIAL leverage dial + viability levers _(only if P1–P5 green AND P1 quant done)_ — **MODIFY**
+
+> **Reframed:** PARTIAL is a **leverage dial on the ONE ConvexityVault** (collateral < MaxIL + buffer), **not a separate `InsuranceVault` product** — the cvAMM **is** the ERC-4626 pool. FULL = collateral 100% of MaxIL = no bad debt (launch default, leverage 1). All safety-stack constants stay **from `params.json`** (no hardcoding — the audit failure). Still gated behind quant.
+
+- [ ] **15.1 — PARTIAL on ConvexityVault** — collateral < MaxIL + buffer; locked-vs-free already tracked; `coverShortfall/healthRatio/circuitBreakerLevel`. _(Replaces the old standalone `InsuranceVault.sol` — that is partly OBSOLETE; the pool already IS the ERC-4626.)_
+- [ ] **15.2 — Convex floor + leverage tax** — read `params.json`; smooth curves; evaluate `minPartialBps` on every fill.
+- [ ] **15.3 — Circuit breakers** — L0/L1/L2/L3 from health-ratio; L2 suspends new PARTIAL, L3 multisig-only.
+- [ ] **15.4 — `LiquidationManager.sol`** — Dutch-auction keeper reward; Chainlink Automation target.
+- [ ] **15.5 — MM first-loss stake** — proportional to PARTIAL exposure.
 - [ ] **15.6 — Per-market / per-MM exposure caps** — enforced at createSwap.
 - [ ] **15.7 — PARTIAL invariant tests** — fund solvency under simulated correlated crash; first-loss eaten before depositors; withdrawal-delay enforced.
-- [ ] **15.8 — `/vault` page** — deposit USDC → ifUSDC; APY (30d from subgraph); health-ratio gauge **prominent**; withdrawal queue; explicit risk-disclosure modal.
-- [ ] **15.9 — `/underwrite` PARTIAL controls** — first-loss stake; PARTIAL ratio slider; live `minPartialBps` floor display.
-- [ ] **15.10 — Commit milestone** — `feat: PARTIAL mode + Insurance Fund (stretch, audited params from quant)`.
+- [ ] **15.8 — Senior / Junior tranches** ⭐ (ROADMAP) — SENIOR (hedged, base yield + small load slice, low tail — "convexity savings account") / JUNIOR (unhedged, first loss, captures most of the load — high-APY vol tranche). Old PARTIAL quant sizes the cut point. _Honest framing: no engineering makes a single-pair vol seller low-risk._
+- [ ] **15.9 — Productive collateral (idle-only)** ⭐ (ROADMAP) — route **idle/free** vault USDC only to **instantly-redeemable** wrappers (sDAI / tokenized T-bills), **hard cap, never 100%**, keep nude USDC for worst-case simultaneous claims. **The "Aave for locked collateral" idea is EXPLICITLY BLOCKED** by CLAUDE.md + §7.2 F-#3 + the IYieldAdapter contract — encode **only** the compliant form; an owner override of CLAUDE.md is required to do otherwise.
+- [ ] **15.10 — Pool-level partial hedge** ⭐ (ROADMAP) — the pool buys back a fraction of aggregate tail convexity (long-option strip / long Panoptic). The only lever that changes the **nature** of the risk (halves the worst month) at the cost of APY. Quant finds the optimal hedge fraction.
+- [ ] **15.11 — Panoptic hedge execution** ⭐ (ROADMAP) — `executeOnPanoptic` (ERC-4626 CollateralTracker + `PanopticPool.mintOptions`). Hedge is **approximate** (perpetual vs fixed-maturity gamma) and **EXPLICITLY NOT relied on for solvency**. Read-only analytics only at launch (P4.b.3).
+- [ ] **15.12 — BTC/USDC + multi-pair + cross-asset concentration skew** ⭐ (ROADMAP) — only after ETH/USDC FULL works; cross-asset `k` re-enters here (the single-pair book deliberately drops the dead `k ≈ 1.0`).
+- [ ] **15.13 — Commit milestone** — `feat: PARTIAL leverage dial + viability levers (stretch, audited params from quant)`.
 
 ---
 
@@ -326,18 +329,21 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 ### Before any contract change
 
 - [ ] All existing invariant tests pass
-- [ ] If touching FULL settlement math → re-verify **I1–I9**
+- [ ] **If touching FULL settlement math → STOP.** `settle` / MaxIL / **I1–I9 are UNTOUCHED** by the pivot — every change is upstream of `settle`. I10 is enforced at `createSwap`, never in `settle`.
+- [ ] No pricing primitive hardcoded — all cvAMM/PARTIAL constants from `params.json` (the cvAMM block / its documented schema)
 - [ ] `forge fmt && forge test`
 - [ ] `slither packages/contracts` clean (or triaged)
 
 ### Definition of "done" — submission-ready
 
-- ✅ FULL/European end-to-end on Sepolia (real NFT, real Chainlink, settle works)
-- ✅ All 9 invariants pass under fuzz
-- ✅ Frontend `/protect → /dashboard → settle` runs in <2 min on stage
-- ✅ MM bots stream live quotes; LP gets best quote instantly
-- ✅ `/markets` shows 3 surfaces with real data
-- ✅ `docs.inflexion.xyz` audiences 1–5 deployed
+- ✅ cvAMM (Path A) quotes on-chain for all 9 ETH/USDC marketIds, FULL mode, end-to-end on Sepolia (real NFT, real Chainlink, real FairValueOracle + VolOracle + ConvexityVault, settle works)
+- ✅ On-chain published FairPremium visible on `/protect`; routing picks best-of {pool, MM}
+- ✅ All 9 invariants pass under fuzz **+ I10 by construction (both paths)**
+- ✅ `/protect → /dashboard → settle` runs in <2 min on stage
+- ✅ `/earn` cvAMM depositor page live with the verbatim capital-not-guaranteed disclosure
+- ✅ ONE real MM streams a Path-B quote that undercuts the pool → LP gets the cheaper price (no fake book)
+- ✅ `/markets` shows the 3 surfaces (Surface-1 = clearing-load over σ_ref, NOT "IV")
+- ✅ `docs.inflexion.xyz` audiences 1–5 deployed (cvAMM + anchors + I10 + disclosure)
 - ✅ Recorded fallback video uploaded
 - ✅ Deck rehearsed twice
 - ✅ HackQuest submission complete
@@ -346,12 +352,18 @@ The original spec §17 timeline assumed pre-buildathon prep was already done; it
 
 ## Risk register _(update if a risk materialises)_
 
-| Risk                                                           | Likelihood | Impact | Mitigation                                                                                                                   |
-| -------------------------------------------------------------- | ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| Stylus `ILMath` doesn't hit 10× gas claim                      | Medium     | Low    | Adjust pitch claim; still ship; Stylus is Arbitrum-native regardless                                                         |
-| Sepolia Chainlink missing a feed                               | Low        | Medium | Use mock oracle in tests; for the demo use a controlled OracleManager mode (§12.1)                                           |
-| Quant model not done in time                                   | Medium     | Medium | PARTIAL is stretch; FULL ships either way; quant is also a deck artifact even partial                                        |
-| Frontend bugs at demo                                          | Medium     | High   | Recorded fallback video; dry-run twice (§12.5)                                                                               |
-| Sepolia RPC flakes on stage                                    | Low        | High   | Pinned RPC, fallback video, local Nitro as backup                                                                            |
-| `priceBandBps` defaults cause too many band-reverts on Sepolia | Medium     | Low    | Default 100bps is tunable; loosen to 200bps if measured revert rate >5%                                                      |
-| LP demand thin in the live demo                                | High       | Low    | We seed both sides; the _pitch_ covers viability (§10) — this is correctly framed as a market-formation question for mentors |
+| Risk                                                                                 | Likelihood | Impact | Mitigation                                                                                                                                                          |
+| ------------------------------------------------------------------------------------ | ---------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A cvAMM/PARTIAL constant gets hardcoded** (the exact audit failure)                | Medium     | High   | All primitives come from `params.json` (cvAMM block) / its documented schema; P1 produces them; the contract-change checklist gates it; code-review for literals.   |
+| **The "Aave for locked collateral" idea gets encoded as the design**                 | Low        | High   | EXPLICITLY BLOCKED by CLAUDE.md + §7.2 F-#3 + the IYieldAdapter contract. Encode only the compliant idle-only form; an owner override of CLAUDE.md is required.     |
+| **No-bad-debt claim made without the qualifying clause**                             | Medium     | High   | Always qualify (capped payoff + solvent USDC + oracle/settlement liveness). FULL stays structural; the VolOracle is load-bearing for I10 + depositor solvency only. |
+| **A pivot change accidentally touches `settle` / MaxIL / I1–I9**                     | Low        | High   | Every change is upstream of `settle`; I10 is enforced at createSwap; the suite re-verifies I1–I9 green in P3.8; contract-change checklist has a STOP.               |
+| EIP-712 / EIP-1271 schema change made silently                                       | Low        | Medium | `loadBps` schema + EIP-1271 vault-signer are **pre-authorized** but must be **stated explicitly** in P3.4/P3.2 + spec §4. No last-look — firm quotes + band only.   |
+| Stale realized σ under-prices before a regime change (the biggest model risk)        | Medium     | High   | `sigma_ref = max(sigma_short, sigma_long, floor)`; **never raw realized σ**; mandatory caveat in spec §6.5 + the schema doc; known-event calendar (P1).             |
+| Depositor expects "safe/stable APY" then loses principal in a crash                  | Medium     | High   | Verbatim disclosure (`/earn` modal + spec); never "stable/modest APY"; two separate never-merged claims; placeholder numbers pending P1 single-asset quant.         |
+| Old multi-asset PARTIAL figures (c_min=7.25%, $74k) leak into the cvAMM pitch        | Medium     | Medium | They are **materially optimistic for one pair**; the multi-asset stack moves to `quant/legacy/`; cvAMM numbers are single-asset placeholders pending P1.            |
+| Closed pocket of ETH short-gamma (no hedged MMs to export risk)                      | Medium     | Medium | Path B is load-bearing: hedged MMs export short-gamma **out** of the system; forward-vol MMs correct the pool's backward-looking bias. Keep Path B present.         |
+| Stylus `ILMath` "~10× cheaper" claim is wrong (measured ~5.3× MORE expensive cached) | Resolved   | Low    | Honest number in `docs/MATH.md` §7; fix spec §13/§16 in P5; Stylus is Arbitrum-native regardless. FairValueOracle (P2) is a larger kernel that may amortise better. |
+| Sepolia Chainlink missing a feed / RPC flakes on stage                               | Low        | High   | Mock oracle in tests; controlled demo OracleManager mode (§12.1); pinned RPC; recorded fallback video; local Nitro backup.                                          |
+| Frontend bugs at demo                                                                | Medium     | High   | Recorded fallback video; dry-run twice.                                                                                                                             |
+| LP demand thin in the live demo                                                      | Low        | Low    | Path A always quotes (cold-start solved by the cvAMM); the pitch covers viability (§10) — correctly a market-formation question for mentors.                        |
