@@ -5,13 +5,21 @@ import { Test, Vm } from "forge-std/Test.sol";
 import { InflexionCore } from "../src/InflexionCore.sol";
 import { UnderwriterVault } from "../src/UnderwriterVault.sol";
 import { ILVault } from "../src/ILVault.sol";
+import { ConvexityVault } from "../src/ConvexityVault.sol";
+import { CvammPricing } from "../src/libraries/CvammPricing.sol";
+import { IConvexityVault } from "../src/interfaces/IConvexityVault.sol";
+import { IFairValueOracle } from "../src/interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
 
 import { MockERC20 } from "./mocks/MockERC20.sol";
 import { MockAggregator } from "./mocks/MockAggregator.sol";
 import { MockNonfungiblePositionManager } from "./mocks/MockNonfungiblePositionManager.sol";
 import { MockILMath } from "./mocks/MockILMath.sol";
+import { MockVolOracle } from "./mocks/MockVolOracle.sol";
+import { MockFairValueOracle } from "./mocks/MockFairValueOracle.sol";
 
 import { OracleManager } from "../src/OracleManager.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title  InflexionCore smoke tests (Tasks 5.1 – 5.9)
 /// @notice Covers EIP-712 signing, bitmap nonces, capacity tracking,
@@ -22,6 +30,17 @@ import { OracleManager } from "../src/OracleManager.sol";
 ///         architecture without depending on the real Q64.96 formulas.
 ///         Q64.96 sqrt-price inputs use placeholder values — the mock
 ///         ignores them.
+/// @notice Minimal EIP-1271 contract signer — accepts any digest (returns the
+///         magic value). Proves the §4.7 SignatureChecker path (P3.2).
+contract MockContractSigner {
+    function isValidSignature(
+        bytes32,
+        bytes calldata
+    ) external pure returns (bytes4) {
+        return 0x1626ba7e; // IERC1271.isValidSignature.selector
+    }
+}
+
 contract InflexionCoreTest is Test {
     // ─── Players
     // ─────────────────────────────────────────────────────────
@@ -43,6 +62,10 @@ contract InflexionCoreTest is Test {
     MockAggregator internal ethFeed;
     MockNonfungiblePositionManager internal pm;
     MockILMath internal ilMath;
+    // cvAMM wiring (P3.4: Path-B premium derives from the on-chain FairPremium)
+    ConvexityVault internal cVault;
+    MockVolOracle internal mvol;
+    MockFairValueOracle internal mfvo;
 
     // Deployed in setUp (the oracle-pinning fix reads decimals() on-chain at
     // registerMarket, so the market tokens must be real ERC-20 contracts).
@@ -125,6 +148,18 @@ contract InflexionCoreTest is Test {
         vm.prank(owner);
         core.registerMarket(cfg);
 
+        // cvAMM wiring — Path B now derives its premium from the on-chain
+        // FairPremium (P3.4). The mock FVO returns FairPremium = 0.75·MaxIL
+        // (geometry-independent, like MockILMath); with a quote `loadBps = 0`
+        // that reproduces the pre-P3.4 0.75·MaxIL, so legacy assertions hold.
+        mvol = new MockVolOracle(6e17);
+        mfvo = new MockFairValueOracle();
+        cVault = new ConvexityVault(IERC20(address(usdc)), 7 days, 2000);
+        vm.prank(owner);
+        core.setCvamm(IConvexityVault(address(cVault)), IFairValueOracle(address(mfvo)), IVolOracle(address(mvol)));
+        vm.prank(owner);
+        core.setLoadParams(_launchLoadParams());
+
         // Make the MM solvent in the vault
         usdc.mint(mmWallet.addr, USDC_BANKROLL);
         vm.prank(mmWallet.addr);
@@ -163,11 +198,31 @@ contract InflexionCoreTest is Test {
         sig = abi.encodePacked(r, s, v);
     }
 
+    /// @dev Launch cvAMM load-stack params (mirror of quant params.json cvAMM
+    ///      block). `maxLoadBps = 16000` is the I10 ceiling exercised by Path B.
+    function _launchLoadParams() internal pure returns (CvammPricing.LoadParams memory p) {
+        p = CvammPricing.LoadParams({
+            baseLoadCalmBps: 2000,
+            baseLoadNormalBps: 3000,
+            baseLoadStressedBps: 5000,
+            regimeCalmBelowWad: 6e17, // 0.60
+            regimeStressedAtWad: 1025e15, // 1.025
+            utilKneeWad: 45e16, // 0.45
+            utilSlopeWad: 6e17, // 0.60
+            utilPowerWad: 2e18, // 2.0
+            utilCapWad: 6e17, // 0.60
+            dispSlopeWad: 5e17, // 0.50
+            dispPowerWad: 15e17, // 1.5
+            dispCapWad: 5e17, // 0.50
+            maxLoadBps: 16_000 // I10 ceiling
+        });
+    }
+
     function _defaultQuote() internal view returns (InflexionCore.SignedQuote memory q) {
         q = InflexionCore.SignedQuote({
             mm: mmWallet.addr,
             marketId: MARKET_ID,
-            premiumRateOfMaxIL: 7500, // 75% of MaxIL
+            loadBps: 0, // P3.4: no load ⇒ premium == FairPremium (0.75·MaxIL via mock)
             minMaxILRatioBps: 0,
             maxMaxILRatioBps: 10_000,
             quotePrice: 3000e8, // matches the live ETH feed
@@ -203,7 +258,7 @@ contract InflexionCoreTest is Test {
     function test_recoverSigner_failsOnTampering() public view {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
-        q.premiumRateOfMaxIL = 9999; // tamper post-sign
+        q.loadBps = 9999; // tamper post-sign
         assertTrue(core.recoverSigner(q, sig) != mmWallet.addr);
     }
 
@@ -252,7 +307,8 @@ contract InflexionCoreTest is Test {
         vm.prank(lp);
         uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
 
-        // Premium = ceil(7500 * 100e6 / 10000) = 75e6 = $75
+        // P3.4: premium = ceil(FairPremium · (1 + loadBps)). Mock FairPremium =
+        // 0.75·MaxIL = 75e6; loadBps = 0 ⇒ premium = 75e6 = $75 (same as pre-P3.4).
         uint128 expectedPremium = 75e6;
 
         // Sanity: swap stored, NFT in custody, premium split
@@ -270,6 +326,47 @@ contract InflexionCoreTest is Test {
         assertEq(vault.locked(mmWallet.addr), 100e6);
     }
 
+    /// @notice P3.4: a positive `loadBps` adds a load over the on-chain FairPremium.
+    function test_createSwap_loadBps_addsLoadOverFairPremium() public {
+        uint256 tokenId = _mintLPNFT();
+        ilMath.setMaxIL(100e6);
+        InflexionCore.SignedQuote memory q = _defaultQuote();
+        q.loadBps = 1500; // +15% over FairPremium
+        bytes memory sig = _signQuote(q);
+        vm.prank(lp);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
+        // FairPremium = 0.75·100e6 = 75e6; premium = ceil(75e6·11500/10000) = 86.25e6
+        (,,,,,, uint128 premium,,,,,,,,) = _readSwap(swapId);
+        assertEq(premium, 86_250_000);
+    }
+
+    /// @notice P3.4 / I10 on Path B: a quote whose `loadBps` exceeds the protocol
+    ///         ceiling (`loadParams.maxLoadBps`) is rejected even with a valid sig.
+    function test_createSwap_rejectsLoadAboveMax() public {
+        uint256 tokenId = _mintLPNFT();
+        ilMath.setMaxIL(100e6);
+        InflexionCore.SignedQuote memory q = _defaultQuote();
+        q.loadBps = 16_001; // > maxLoadBps (16_000)
+        bytes memory sig = _signQuote(q);
+        vm.prank(lp);
+        vm.expectRevert(abi.encodeWithSelector(InflexionCore.LoadExceedsMax.selector, uint16(16_001), uint256(16_000)));
+        core.createSwap(q, sig, tokenId, type(uint256).max);
+    }
+
+    /// @notice P3.4: premium is additionally capped at MaxIL (never charge more
+    ///         than the max possible payout), even within the load ceiling.
+    function test_createSwap_premiumCappedAtMaxIL() public {
+        uint256 tokenId = _mintLPNFT();
+        ilMath.setMaxIL(100e6);
+        InflexionCore.SignedQuote memory q = _defaultQuote();
+        q.loadBps = 15_000; // FairPremium·2.5 = 187.5e6 > MaxIL ⇒ capped at MaxIL
+        bytes memory sig = _signQuote(q);
+        vm.prank(lp);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
+        (,,,,,, uint128 premium,,,,,,,,) = _readSwap(swapId);
+        assertEq(premium, 100e6);
+    }
+
     function test_createSwap_rejectsBadSignature() public {
         uint256 tokenId = _mintLPNFT();
         ilMath.setMaxIL(100e6);
@@ -278,6 +375,33 @@ contract InflexionCoreTest is Test {
         vm.prank(lp);
         vm.expectRevert();
         core.createSwap(q, badSig, tokenId, type(uint256).max);
+    }
+
+    /// @notice P3.2 / §4.7: an EIP-1271 contract signer is accepted via
+    ///         SignatureChecker (the signature bytes are validated by the
+    ///         signer contract, not ECDSA-recovered).
+    function test_createSwap_acceptsEIP1271ContractSigner() public {
+        MockContractSigner cs = new MockContractSigner();
+        address csAddr = address(cs);
+        // Fund + collateralise the contract signer in the UnderwriterVault.
+        usdc.mint(csAddr, USDC_BANKROLL);
+        vm.prank(csAddr);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.prank(csAddr);
+        vault.deposit(USDC_BANKROLL);
+
+        uint256 tokenId = _mintLPNFT();
+        ilMath.setMaxIL(100e6);
+        InflexionCore.SignedQuote memory q = _defaultQuote();
+        q.mm = csAddr; // contract signer
+        bytes memory sig = hex"deadbeef"; // arbitrary — the signer contract validates it
+
+        vm.prank(lp);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
+        (,, address storedMm,,,, uint128 storedPrem,,,,,,,,) = _readSwap(swapId);
+        assertEq(storedMm, csAddr, "EIP-1271 contract signer accepted");
+        assertEq(storedPrem, 75e6); // ceil(7500 * 100e6 / 10000)
+        assertEq(vault.locked(csAddr), 100e6);
     }
 
     function test_createSwap_rejectsUsedNonce() public {
