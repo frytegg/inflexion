@@ -44,8 +44,10 @@ contract InflexionCoreTest is Test {
     MockNonfungiblePositionManager internal pm;
     MockILMath internal ilMath;
 
-    address internal constant WETH = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
-    address internal constant USDC_TOKEN = address(0x1111111111111111111111111111111111111111);
+    // Deployed in setUp (the oracle-pinning fix reads decimals() on-chain at
+    // registerMarket, so the market tokens must be real ERC-20 contracts).
+    address internal WETH; // 18-dec MockERC20 (the volatile / oracle token)
+    address internal USDC_TOKEN; // 6-dec MockERC20 (the USD-stable token)
     uint24 internal constant FEE = 3000;
     uint32 internal constant DURATION = 30 days;
     bytes32 internal MARKET_ID;
@@ -71,6 +73,9 @@ contract InflexionCoreTest is Test {
         // Tokens
         vm.prank(owner);
         usdc = new MockERC20("USD Coin", "USDC", 6);
+        // Market tokens are real ERC-20s so registerMarket can read decimals() on-chain.
+        USDC_TOKEN = address(usdc);
+        WETH = address(new MockERC20("Wrapped Ether", "WETH", 18));
 
         // Oracle stack
         vm.prank(owner);
@@ -106,7 +111,15 @@ contract InflexionCoreTest is Test {
 
         // Register the test market (WETH/USDC pool simulated by the mock PM)
         InflexionCore.MarketConfig memory cfg = InflexionCore.MarketConfig({
-            token0: USDC_TOKEN, token1: WETH, fee: FEE, durationSeconds: DURATION, oracleToken: WETH, active: true
+            token0: USDC_TOKEN,
+            token1: WETH,
+            fee: FEE,
+            durationSeconds: DURATION,
+            oracleToken: WETH,
+            token0Decimals: 6,
+            token1Decimals: 18,
+            oracleDecimals: 8,
+            active: true
         });
         MARKET_ID = keccak256(abi.encodePacked(cfg.token0, cfg.token1, cfg.fee, cfg.durationSeconds));
         vm.prank(owner);
@@ -161,7 +174,7 @@ contract InflexionCoreTest is Test {
             priceBandBps: 100,
             model: uint8(InflexionCore.CollateralModel.FULL),
             partialRatioBps: 0,
-            maxNotionalV0: 10_000_000e6,
+            maxNotionalV0: type(uint128).max, // capacity not under test; V0 is large in this synthetic mock market
             validUntil: uint64(block.timestamp + 10),
             quoteId: bytes32(uint256(0xdead)),
             nonce: 1 // word 0, bit 1
@@ -237,7 +250,7 @@ contract InflexionCoreTest is Test {
         uint256 mmUsdcBefore = usdc.balanceOf(mmWallet.addr);
 
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
 
         // Premium = ceil(7500 * 100e6 / 10000) = 75e6 = $75
         uint128 expectedPremium = 75e6;
@@ -264,7 +277,7 @@ contract InflexionCoreTest is Test {
         bytes memory badSig = new bytes(65); // empty / zero sig
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, badSig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, badSig, tokenId, type(uint256).max);
     }
 
     function test_createSwap_rejectsUsedNonce() public {
@@ -281,7 +294,7 @@ contract InflexionCoreTest is Test {
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
         vm.expectRevert(abi.encodeWithSelector(InflexionCore.NonceAlreadyUsed.selector, mmWallet.addr, q.nonce));
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
     function test_createSwap_rejectsExpiredQuote() public {
@@ -292,7 +305,7 @@ contract InflexionCoreTest is Test {
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
     function test_createSwap_rejectsBandViolation() public {
@@ -303,7 +316,7 @@ contract InflexionCoreTest is Test {
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
     function test_createSwap_consumedNotional_tracked() public {
@@ -312,7 +325,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
         // consumedNotional[quoteId] should be > 0 after the swap
         assertGt(core.consumedNotional(q.quoteId), 0);
     }
@@ -329,7 +342,7 @@ contract InflexionCoreTest is Test {
                 InflexionCore.UnsupportedModel.selector, uint8(InflexionCore.CollateralModel.PARTIAL)
             )
         );
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
     // ─── settle happy path (Task 5.8)
@@ -341,7 +354,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
 
         // Warp past expiry
         vm.warp(block.timestamp + DURATION + 1);
@@ -357,7 +370,7 @@ contract InflexionCoreTest is Test {
         ilMath.setIL(30e6);
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PT);
+        core.settle(swapId, 2);
 
         // LP got $30 payout
         assertEq(usdc.balanceOf(lp) - lpUsdcBefore, 30e6);
@@ -375,7 +388,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
 
         vm.warp(block.timestamp + DURATION + 1);
         uint64 expiry = uint64(block.timestamp - 1);
@@ -387,7 +400,7 @@ contract InflexionCoreTest is Test {
         ilMath.setIL(500e6);
 
         uint256 lpUsdcBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PT);
+        core.settle(swapId, 2);
         assertEq(usdc.balanceOf(lp) - lpUsdcBefore, 100e6, "I1/I2: payout MUST cap at MaxIL");
     }
 
@@ -397,11 +410,128 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
 
         // Don't warp past expiry — settle should revert
         vm.expectRevert();
-        core.settle(swapId, 2, SQRT_PT);
+        core.settle(swapId, 2);
+    }
+
+    // ─── Oracle-pinning regression tests (settle/createSwap price bugs) ──
+
+    /// @notice REGRESSION: `settle` must feed the IL math the settlement price
+    ///         DERIVED ON-CHAIN from the Chainlink round-at-T — never a
+    ///         caller-supplied or entry price. (Pre-fix, settle computed the
+    ///         payout from a caller-supplied sqrtP_T and only emitted the
+    ///         oracle price, letting any settler set the payout in [0, MaxIL].)
+    function test_settle_usesOracleDerivedSettlementPrice() public {
+        uint256 tokenId = _mintLPNFT();
+        ilMath.setMaxIL(100e6);
+        InflexionCore.SignedQuote memory q = _defaultQuote();
+        bytes memory sig = _signQuote(q);
+        vm.prank(lp);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
+
+        vm.warp(block.timestamp + DURATION + 1);
+        uint64 expiry = uint64(block.timestamp - 1);
+        sequencer.setRound(2, 0, block.timestamp - oracle.GRACE_PERIOD() - 1, true);
+        // Settlement round-at-T at a DIFFERENT price than entry ($3,300 vs $3,000).
+        ethFeed.setRound(2, 3300e8, uint256(expiry) - 100, true);
+        ethFeed.setRound(3, 3300e8, uint256(expiry) + 100, true);
+        ilMath.setIL(30e6);
+
+        core.settle(swapId, 2);
+
+        // The price the contract forwarded to computeIL MUST equal the on-chain
+        // derivation of the $3,300 round-at-T price — and differ from the entry.
+        uint160 expectedSqrtPT = core.oracleDerivedSqrtPriceX96(MARKET_ID, 3300e8);
+        assertEq(
+            ilMath.lastILCallSqrtPT(), uint256(expectedSqrtPT), "settle must use the oracle-derived settlement price"
+        );
+        assertTrue(
+            expectedSqrtPT != core.oracleDerivedSqrtPriceX96(MARKET_ID, 3000e8),
+            "sanity: $3,300 and $3,000 derive to different sqrt prices"
+        );
+    }
+
+    /// @notice REGRESSION: the entry price P0 (which sets MaxIL / premium / V0)
+    ///         is derived ON-CHAIN from the oracle, not caller-supplied. A
+    ///         different oracle price ⇒ a different stored V0.
+    function test_createSwap_entryPriceDerivedFromOracle() public {
+        ilMath.setMaxIL(100e6);
+
+        uint256 t1 = _mintLPNFT();
+        InflexionCore.SignedQuote memory qa = _defaultQuote();
+        bytes memory sigA = _signQuote(qa);
+        vm.prank(lp);
+        uint256 idA = core.createSwap(qa, sigA, t1, type(uint256).max);
+        (,, uint128 v0a) = _idV0(idA);
+
+        // Move the live oracle to $3,300 and open an otherwise-identical swap.
+        ethFeed.setRound(1, 3300e8, block.timestamp - 50, true);
+        uint256 t2 = _mintLPNFT();
+        InflexionCore.SignedQuote memory qb = _defaultQuote();
+        qb.nonce = 2;
+        qb.quotePrice = 3300e8; // keep within band of the new live price
+        qb.quoteId = bytes32(uint256(0xbeef));
+        bytes memory sigB = _signQuote(qb);
+        vm.prank(lp);
+        uint256 idB = core.createSwap(qb, sigB, t2, type(uint256).max);
+        (,, uint128 v0b) = _idV0(idB);
+
+        // V0 is computed from the ON-CHAIN-derived entry price; if P0 were a
+        // caller knob this could be held constant. It isn't, so V0 tracks σ.
+        assertTrue(v0a != v0b, "entry price (hence V0) must track the oracle, not a caller arg");
+    }
+
+    /// @notice ABSOLUTE-correctness check of the oracle→sqrtP conversion (not
+    ///         just self-consistency): hand-computed targets for ETH = $3,000.
+    ///         A decimal/orientation bug would be off by many orders of magnitude.
+    function test_oracleDerivedSqrtPrice_knownValues() public {
+        // Case B (this market): token0=USDC(6), token1=WETH(18), oracle=WETH(8).
+        // poolPrice = token1_raw/token0_raw; sqrtPriceX96 ≈ 1.45e33.
+        uint256 sB = uint256(core.oracleDerivedSqrtPriceX96(MARKET_ID, 3000e8));
+        assertGt(sB, 14e32, "case B lower bound (~1.45e33)");
+        assertLt(sB, 15e32, "case B upper bound (~1.45e33)");
+
+        // Case A: canonical WETH(token0,18) / USDC(token1,6), oracle=WETH(8).
+        // This is the real WETH/USDC pool orientation; ETH=$3,000 ⇒ ≈ 4.34e24.
+        InflexionCore.MarketConfig memory cfgA = InflexionCore.MarketConfig({
+            token0: WETH,
+            token1: USDC_TOKEN,
+            fee: 500,
+            durationSeconds: DURATION,
+            oracleToken: WETH,
+            token0Decimals: 18,
+            token1Decimals: 6,
+            oracleDecimals: 8,
+            active: true
+        });
+        bytes32 idA = keccak256(abi.encodePacked(WETH, USDC_TOKEN, uint24(500), DURATION));
+        vm.prank(owner);
+        core.registerMarket(cfgA);
+        uint256 sA = uint256(core.oracleDerivedSqrtPriceX96(idA, 3000e8));
+        assertGt(sA, 42e23, "case A lower bound (~4.34e24)");
+        assertLt(sA, 45e23, "case A upper bound (~4.34e24)");
+
+        // A higher price must yield a higher sqrt price (monotonicity, case A).
+        assertGt(core.oracleDerivedSqrtPriceX96(idA, 4000e8), core.oracleDerivedSqrtPriceX96(idA, 3000e8));
+
+        // Unsupported orientation (oracle token in neither leg) is rejected.
+        InflexionCore.MarketConfig memory cfgBad = cfgA;
+        cfgBad.oracleToken = address(0xDEAD);
+        cfgBad.fee = 10_000;
+        vm.prank(owner);
+        vm.expectRevert();
+        core.registerMarket(cfgBad);
+    }
+
+    /// @dev Small reader returning (tokenId, mm, V0) so V0 assertions don't
+    ///      depend on the full 15-field SwapRecord tuple shape.
+    function _idV0(
+        uint256 swapId
+    ) internal view returns (uint256 tokenId, address mm, uint128 V0) {
+        (tokenId,, mm, V0,,,,,,,,,,,) = core.swaps(swapId);
     }
 
     // ─── settlePreview view (Task 5.9)
@@ -413,7 +543,7 @@ contract InflexionCoreTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote();
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
 
         // Preview at IL=$30 → payout=$30
         ilMath.setIL(30e6);

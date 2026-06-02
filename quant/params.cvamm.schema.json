@@ -1,18 +1,30 @@
 {
   "_README": [
     "PROPOSED cvAMM block schema for quant/params.json. DOCUMENTATION ONLY.",
-    "Do NOT add this block to params.json or params.py THIS TURN. params.json is",
-    "pydantic extra='forbid' at schema_version 2.0.0 and is byte-identical-roundtrip",
-    "tested; params.py is its pydantic model. Adding the block now would break CI.",
-    "In P1: (1) add a `CvammParams` pydantic model to params.py, (2) attach it under",
-    "params.json key `cvamm`, (3) bump schema_version MINOR (2.0.0 -> 2.1.0; a field",
-    "is added, old consumers tolerate it), (4) fill every TODO from the calibration run.",
-    "EVERY value below marked TODO_PLACEHOLDER is a placeholder, NOT a calibrated number.",
+    "Do NOT add this block to params.json or params.py until the contracts land.",
+    "params.json is pydantic extra='forbid' at schema_version 2.0.0 and is",
+    "byte-identical-roundtrip tested; params.py is its pydantic model. Adding the",
+    "block now would break CI. When the cvAMM contracts land (P3): (1) add a",
+    "`CvammParams` pydantic model to params.py, (2) attach it under params.json key",
+    "`cvamm`, (3) bump schema_version MINOR (2.0.0 -> 2.1.0; a field is added, old",
+    "consumers tolerate it), (4) copy the final values from this doc.",
+    "FORMS + machinery defaults are filled (P1.1-P1.11). Values marked",
+    "TODO_HEAVY_RUN are filled by the P1.13 heavy single-asset calibration run.",
     "No contract may hardcode any of these; all are read from params.json (CLAUDE.md inv. 6).",
-    "See quant/SPEC.md for the work order behind each field and quant/README.md for context."
+    "See quant/SPEC.md for the work order and quant/src/inflexion_quant/cvamm.py for the engine."
   ],
   "schema_version_target": "2.1.0",
   "schema_version_note": "minor bump over the frozen 2.0.0 — adds the `cvamm` key, does not remove/rename existing PARTIAL fields",
+  "engine_modules": {
+    "_doc": "Where each primitive is computed. The on-chain FairValueOracle/VolOracle/ConvexityVault mirror these; the contracts read the calibrated numbers from params.json.",
+    "fair_premium": "inflexion_quant.cvamm.fair_rate / fair_rate_vec (exact closed form)",
+    "sigma_ref": "inflexion_quant.prices.sigma_ref / ewma_volatility",
+    "base_load": "inflexion_quant.cvamm.diversification_collapse + base_load_from_envelope",
+    "skews": "inflexion_quant.cvamm.util_skew (UtilSkewParams) + dispersion_skew (DispersionSkewParams, coverage_concentration)",
+    "max_load_bps": "inflexion_quant.cvamm.clamp_load + size_max_load_bps",
+    "depositor_disclosure": "inflexion_quant.depositor.disclosure",
+    "roadmap_sizing": "inflexion_quant.roadmap.routable_idle_fraction / pool_hedge_frontier / tranche_cut"
+  },
   "cvamm": {
     "_doc": "All primitives the on-chain FairValueOracle + ConvexityVault (cvAMM) read. Single-asset ETH/USDC launch, FULL mode.",
 
@@ -31,18 +43,19 @@
       "coefficients": "none — the closed form has NO calibrated coefficients; the only stochastic input is sigma_ref (deliverable 2)",
       "calibration_sweep_dims": {
         "_doc": "domain over which the LOAD/SKEW deliverables (3-6) are calibrated by CALLING the exact closed form — NOT a grid the on-chain pricer stores",
-        "width_frac": "e.g. [0.05, 0.10, 0.20, 0.50]",
-        "distance_to_edge_frac": "e.g. [0.0, 0.25, 0.5, 0.75, 1.0] (position of P0 within [Pa,Pb])",
+        "width_frac": [0.05, 0.1, 0.2, 0.5],
+        "distance_to_edge_frac": [0.0, 0.25, 0.5, 0.75, 1.0],
         "T_days": [7, 30, 90],
-        "sigma": "e.g. [0.30, 0.45, 0.60, 0.90, 1.50]"
+        "sigma": [0.3, 0.45, 0.6, 0.9, 1.5]
       },
       "verification": {
-        "_doc": "VERIFIED this pivot: closed form == il.py quadrature == MC to ~5e-11 across width x sigma x T (quant/_scratch_fairvalue_closedform_check.py). Re-confirm in-repo before wiring on-chain.",
+        "_doc": "Closed form == il.py quadrature == MC. VERIFIED this pivot to ~5e-11 (quant/_scratch_fairvalue_closedform_check.py); re-confirmed in cvamm.verify_closed_form + tests/test_cvamm.py::test_closed_form_equals_il_py_to_machine_precision and the vectorised engine cross-checked vs scalar (test_fair_rate_vec_equals_scalar).",
         "max_abs_err_vs_il_py": 5.1e-11,
-        "theory_anchors_not_the_pricer": "Singh et al. AFT 2025 (LVR == theta of ATM straddle) + Lipton-Lucic-Sepp 2025 (static replication by a vanilla strip) explain WHY the claim is priceable/hedgeable; they are anchors, cited not re-derived, NOT the on-chain pricer (the exact Phi-sum is)."
+        "reconfirmed_in": "inflexion_quant.cvamm.verify_closed_form",
+        "theory_anchors_not_the_pricer": "Milionis-Moallemi-Roughgarden 2022 (LVR closed form proportional to instantaneous variance) + Lipton-Lucic-Sepp 2025 (static replication by a vanilla strip) explain WHY the claim is priceable/hedgeable; they are anchors, cited not re-derived, NOT the on-chain pricer (the exact Phi-sum is)."
       },
       "_reference_points_sigma60": {
-        "_doc": "il.py ground truth; the on-chain pricer uses the position's real tick-derived (Pa,Pb), so the +/-width convention is a reference-table convention only",
+        "_doc": "il.py ground truth, reproduced by cvamm.fair_rate; the on-chain pricer uses the position's real tick-derived (Pa,Pb), so the +/-width convention is a reference-table convention only",
         "geometric_halfwidth": {
           "w5": { "d7": 0.695, "d30": 0.848, "d90": 0.913 },
           "w10": { "d7": 0.449, "d30": 0.708, "d90": 0.829 },
@@ -53,81 +66,132 @@
           "w5_d30": 0.8453,
           "w20_d30": 0.4312,
           "w35_d90": 0.4053
-        }
+        },
+        "maxil_over_v0_geometric": { "w5": 0.0127, "w10": 0.0256, "w20": 0.0523, "w50": 0.1376 }
       }
     },
 
     "sigma_ref": {
       "_doc": "Deliverable 2. sigma_ref = max(sigma_short, sigma_long, floor), EWMA of log-returns from Chainlink ticks. NEVER price off raw realized sigma. Deribit DVOL = optional enrichment only, never depended on.",
-      "short_halflife_seconds": "TODO_PLACEHOLDER: e.g. 86400 (1d)",
-      "long_halflife_seconds": "TODO_PLACEHOLDER: e.g. 2592000 (30d)",
-      "floor": "TODO_PLACEHOLDER: annualized sigma floor, e.g. 0.40",
       "estimator": "ewma_log_returns_max_short_long_floor",
-      "conservative_caveat": "max(...) is mandatory: realized vol understates risk before a regime change"
+      "estimator_impl": "inflexion_quant.prices.sigma_ref (annualised EWMA; halflife in samples on-chain becomes seconds on Chainlink tick timestamps)",
+      "short_halflife_seconds": 86400,
+      "long_halflife_seconds": 2592000,
+      "floor": 0.5,
+      "_calibration": "HEAVY RUN: floor=0.50 is the calibrated conservative guard — it sits ABOVE the observed calm ETH regime vol (~0.45), so the pool overcharges calm months and is net-conservative to depositors (the adversarial audit measured all-months realised payout/premium = 0.654). short/long halflives (1d/30d, tick-frequency) are sound on-chain defaults; refine against live Chainlink ticks on Sepolia (P2/P4). The heavy-run monthly proxy used 1mo/6mo EWMA halflives. A LAGGING sigma_ref underprices coverage written at a regime onset (payout/premium = 1.14 at stress onset) — that residual is the vol-risk-premium baseLoad must carry, NOT a no-bad-debt risk.",
+      "conservative_caveat": "max(...) is MANDATORY: realized vol understates risk before a regime change. Load-bearing for the I10 cap + depositor solvency, NOT for the FULL no-bad-debt invariant (I1), which is structural and oracle-independent."
     },
 
     "base_load_by_regime": {
-      "_doc": "Deliverable 3. baseLoad = vol-risk-premium, keyed by sigma_ref regime band. Sized inside the lone-writer-CVaR (~91-100% MaxIL) vs diversified-N-CVaR (~78.7% at N=100) envelope.",
-      "regime_bands_sigma": "TODO_PLACEHOLDER: e.g. {calm: <0.45, normal: 0.45-0.90, stressed: >0.90}",
+      "_doc": "Deliverable 3. baseLoad = vol-risk-premium, keyed by sigma_ref regime band. Sized inside the lone-writer-CVaR vs diversified-pool-CVaR envelope by base_load_from_envelope.",
+      "derivation": "inflexion_quant.cvamm.diversification_collapse -> base_load_from_envelope(capital_fraction)",
+      "envelope_machinery": {
+        "_doc": "reproduced by the machinery (sigma=60%, +/-10%, 30d): the room baseLoad lives in",
+        "fair_rate_pct": 70.8,
+        "lone_writer_cvar95_pct": "~100 (overcharge gap a lone MM must charge)",
+        "diversified_cvar95_N100_pct_rho0": 78.5,
+        "diversified_cvar95_N100_pct_rho1_synchronized": "~100 (NO diversification when the single-pair book is synchronized — the crash-correlation tail)"
+      },
+      "regime_bands_sigma": {
+        "calm_below": 0.6,
+        "normal_below": 1.025,
+        "stressed_at_or_above": 1.025
+      },
       "base_load_bps": {
-        "calm": "TODO_PLACEHOLDER",
-        "normal": "TODO_PLACEHOLDER",
-        "stressed": "TODO_PLACEHOLDER"
-      }
+        "calm": 2000,
+        "normal": 3000,
+        "stressed": 5000
+      },
+      "_calibration": "HEAVY RUN: baseLoad is the vol-risk-premium, sized inside the [fair, lone-writer-CVaR ~100%] marketability envelope (stressed price (1+0.50)*wfair(1.30)=1.5*0.568=0.85 <= MaxIL, so it is marketable). It gives strongly positive long-run growth (gross 3y CAGR median ~122% at u=0.40, model-illustrative/gross-of-competition). It does NOT by itself meet P(losing month)<=0.15 or 1-in-100<=0.10 — those are intrinsic to single-asset vol-selling and require the structural levers (utilization cap + roadmap pool-hedge / senior tranche). Honest, not loosened."
     },
 
     "util_skew": {
       "_doc": "Deliverable 4. util_skew(u), u = locked/(locked+free). Rises near full commitment; wires into the withdrawal-delay/locked-free defense. Single-asset (NOT the dead cross-asset k~1.0).",
       "argument": "locked_over_locked_plus_free",
-      "form": "TODO_PLACEHOLDER: e.g. monotone convex (knee + slope), or piecewise-linear",
-      "params": "TODO_PLACEHOLDER"
+      "form": "min(cap, slope * (max(0, u - knee) / (1 - knee)) ^ power)  (monotone convex, flat below knee)",
+      "impl": "inflexion_quant.cvamm.util_skew / UtilSkewParams",
+      "params": { "knee": 0.45, "slope": 0.6, "power": 2.0, "cap": 0.6 },
+      "_calibration": "HEAVY RUN: utilization is the DOMINANT DRAWDOWN lever (NOT a tail-feasibility lever — 1-in-100 loss scales ~linearly in u and never clears 10% at a marketable load). At base loads: u=0.40 -> P(3y DD>50%)=2.7%, median maxDD 25%; u=0.60 -> 18.0%, 36%. The curve is set to bite from u=0.45 (reaching +0.6 load at full commitment) to keep the steady-state utilization disciplined (~<=0.5) and the drawdown bounded; this is the same locked/free accounting that powers the run-defense."
     },
 
     "dispersion_skew": {
       "_doc": "Deliverable 5. Rises as outstanding coverage clusters in one width/moneyness/duration corner — the single-pair analogue of concentration. The cross-asset k-skew degenerates to 1.0 on one pair; do NOT reuse it.",
-      "concentration_metric": "TODO_PLACEHOLDER: e.g. Herfindahl index over coverage histogram across (width x moneyness x duration)",
-      "form": "TODO_PLACEHOLDER: monotone in concentration",
-      "params": "TODO_PLACEHOLDER"
+      "concentration_metric": "normalised Herfindahl-Hirschman index over the MaxIL-weighted coverage histogram across (width x moneyness x duration); 0 = dispersed, 1 = one corner",
+      "concentration_impl": "inflexion_quant.cvamm.coverage_concentration",
+      "form": "min(cap, slope * h ^ power)  (monotone in concentration h)",
+      "impl": "inflexion_quant.cvamm.dispersion_skew / DispersionSkewParams",
+      "params": { "slope": 0.5, "power": 1.5, "cap": 0.5 },
+      "_calibration": "HEAVY RUN: the crash-correlation result (a synchronized single-pair book gets NO diversification, per-contract CVaR stays ~100% at rho=1) confirms a concentrated book is genuinely riskier — a cluster at one width/moneyness/duration all hits MaxIL together. The curve charges up to +0.5 load at full concentration; a well-dispersed book ~0. Re-fit against an empirical on-chain coverage histogram once live (P4)."
     },
 
     "max_load_bps": {
-      "_doc": "Deliverable 6. Invariant I10 cap: premium <= FairPremium*(1+maxLoadBps). baseLoad + util_skew + dispersion_skew clamped to this BY CONSTRUCTION. Applies to BOTH paths (Path B: quote loadBps <= maxLoadBps). UPSTREAM of settle; does NOT touch settle/MaxIL/I1-I9.",
-      "by_width_x_duration": {
-        "_doc": "keyed to the 9-marketId grid; tight/short tolerates a different cap than wide/long",
-        "w5": { "d7": "TODO_PLACEHOLDER", "d30": "TODO_PLACEHOLDER", "d90": "TODO_PLACEHOLDER" },
-        "w10": { "d7": "TODO_PLACEHOLDER", "d30": "TODO_PLACEHOLDER", "d90": "TODO_PLACEHOLDER" },
-        "w20": { "d7": "TODO_PLACEHOLDER", "d30": "TODO_PLACEHOLDER", "d90": "TODO_PLACEHOLDER" }
+      "_doc": "Deliverable 6. Invariant I10 cap: premium <= FairPremium*(1+maxLoadBps). baseLoad + util_skew + dispersion_skew clamped to this BY CONSTRUCTION (cvamm.clamp_load). Applies to BOTH paths (Path B: quote loadBps <= maxLoadBps). UPSTREAM of settle; does NOT touch settle/MaxIL/I1-I9.",
+      "derivation": "HEAVY RUN: the principled I10 ceiling is premium <= MaxIL — you never charge more than the maximum possible payout. Since premium = FairPremium*(1+load) = fairRate*MaxIL*(1+load), that means maxLoad = 1/fairRate - 1, naturally width/duration/sigma-conditional. ON-CHAIN PREFERRED FORM: evaluate maxLoadBps = round((1/fairRate(sigma_ref) - 1)*10000) live, clamped to [floor, load_stack_max=16000] — then premium <= MaxIL holds BY CONSTRUCTION. The static table below is that ceiling at sigma_ref=0.75 (normal regime), clamped at 16000.",
+      "on_chain_dynamic_form": "maxLoadBps = clamp(round((1/fairRate(sigma_ref) - 1)*10000), floor, 16000)",
+      "by_width_x_duration_at_sigma075": {
+        "_doc": "premium<=MaxIL ceiling at sigma_ref=0.75; tight/long cells get tiny load room (a near-certain payout cannot carry a risk premium beyond itself) — economically exact",
+        "w5": { "d7": 3282, "d30": 1375, "d90": 744 },
+        "w10": { "d7": 8502, "d30": 3082, "d90": 1578 },
+        "w20": { "d7": 16000, "d30": 7773, "d90": 3559 }
       }
     },
 
     "productive_collateral": {
       "_doc": "Deliverable 7. ROADMAP. COMPLIANT FORM ONLY (CLAUDE.md + spec 7.2 F-#3): idle/free USDC only, instantly-redeemable wrappers only, never utilization-gated, hard cap, never 100%, keep nude buffer. 'Aave for locked collateral' is BLOCKED pending owner override — NOT encoded.",
-      "max_idle_routable_frac": "TODO_PLACEHOLDER: e.g. 0.50 (of IDLE/FREE USDC only; locked never routed)",
+      "impl": "inflexion_quant.roadmap.routable_idle_fraction",
+      "max_idle_routable_frac": 0.7,
       "venue_whitelist": ["sDAI", "tokenized_tbills"],
       "venue_blocklist_reason": "Aave/Compound and any utilization-gated venue are BLOCKED for ALL vault USDC (locked AND idle) per CLAUDE.md",
-      "nude_buffer_frac": "TODO_PLACEHOLDER: e.g. 0.20 (nude USDC kept for worst-case simultaneous claims)",
+      "nude_buffer_frac": 0.3,
+      "_calibration": "of IDLE/FREE USDC only; locked collateral is NEVER routed. nude_buffer 0.30 = 1.5x a 0.20 p99 instant-demand (new-lock + withdrawal-queue within the wrapper redemption window); routable 0.70 = 1 - buffer, NEVER 100%. Roadmap.",
       "status": "roadmap"
     },
 
     "pool_hedge_fraction": {
       "_doc": "Deliverable 8. ROADMAP. Fraction of aggregate tail convexity bought back (long option strip / long Panoptic). Changes the NATURE of the risk (halves worst month) at APY cost. Approximate (perpetual vs fixed-maturity gamma); NOT relied on for solvency.",
-      "fraction": "TODO_PLACEHOLDER: e.g. 0.30 (optimal on the APY-vs-tail frontier)",
+      "impl": "inflexion_quant.roadmap.pool_hedge_frontier",
+      "fraction": 0.6,
+      "_calibration": "HEAVY RUN (u=0.40, base loads): hedge fraction h offsets the realised payout tail at ~1.15x fair cost. h=0.50 -> 1-in-100 -11.3%, worst -14.7%, P(DD>50%) 0.03%; h=0.75 -> 1-in-100 -7.0%, worst -8.6%, P(DD>50%) 0%. CAGR barely moves (122.5%->122.3%). h~0.60 brings 1-in-100 to ~-10% (target). CAVEAT: this TIGHTENS the 1-in-100 / CVaR / drawdown; its worst-month protection is exposed to basis risk + stressed hedge cost (degrades only beyond ~2x cost). It is approximate (perpetual vs fixed-maturity gamma) and is NEVER a solvency mechanism — solvency comes only from the MaxIL cap (I1).",
       "status": "roadmap"
     },
 
     "tranche_cut": {
       "_doc": "Deliverable 9. ROADMAP. Senior (hedged, base yield, low tail) / Junior (unhedged, first loss, high APY) cut point. No engineering makes a single-pair vol seller low-risk; tranching lets each depositor pick risk dose.",
-      "senior_fraction": "TODO_PLACEHOLDER: e.g. 0.60 (senior share of pool capital)",
+      "impl": "inflexion_quant.roadmap.tranche_cut",
+      "senior_fraction": 0.6,
       "junior_first_loss": true,
+      "_calibration": "HEAVY RUN (u=0.40): senior_fraction=0.60 -> senior P(loss)=0.000%, worst=0.0%, gross 3y CAGR median ~197%; junior CAGR median ~32%, worst month -67% (a fillable LEVERED first-loss vol tranche). CRITICAL JOINT CONDITION: the senior P(loss)=0 guarantee holds only while utilization u <= 1 - senior_fraction (= 0.40 here); above that the senior tranche starts taking loss (P(loss) 0.39%/1.34%/4.08% at u=0.7/0.8/1.0). Size the junior buffer jf=1-sf off the WORST realised monthly loss with margin AND enforce the utilization cap jointly. The senior tranche is the marketable 'convexity savings account'; the junior is the explicit high-APY vol tranche and the structure requires a junior counterparty.",
       "status": "roadmap"
     },
 
     "disclosure": {
-      "_doc": "Deliverable 10. REAL single-asset ETH depositor numbers. PLACEHOLDERS pending P1 single-asset calibration — the old multi-asset figures are materially optimistic for one pair. Verbatim tone mandatory; never 'stable/modest APY'.",
-      "apy": "TODO_PLACEHOLDER: long-run mean APY (single-asset, fat tails + crash correlation)",
-      "p_losing_month": "TODO_PLACEHOLDER: target <~0.15",
-      "loss_1in100": "TODO_PLACEHOLDER: 1-in-100 monthly loss as frac of capital, target <~0.10",
-      "worst_month": "TODO_PLACEHOLDER: worst-month drawdown",
+      "_doc": "Deliverable 10. REAL single-asset ETH depositor numbers. PLACEHOLDERS pending P1.13 single-asset calibration — the old multi-asset figures are materially optimistic for one pair. Verbatim tone mandatory; never 'stable/modest APY'.",
+      "impl": "inflexion_quant.depositor.disclosure (GBM machinery) + inflexion_quant.heavy (real-measure, authoritative)",
+      "_basis": "HEAVY RUN, real-measure (fat-tailed Student-t + Markov vol-regime clustering + Poisson deep crashes + lagging sigma_ref), warm-up-trimmed steady state, baseLoad calm/normal/stressed = 0.20/0.30/0.50, single ETH/USDC pool, FULL, UNHEDGED + UNTRANCHED (launch). Numbers verified no-bad-debt path-by-path. APY is GROSS of demand/competition/fees and model-illustrative — present the RISK panel as the robust part, and lead with the geometric 3y CAGR, never the arithmetic mean.",
+      "growth_3y_cagr_gross": {
+        "_doc": "geometric, gross-of-competition; the honest growth figure (NOT an arithmetic mean). Competition + demand compress this materially in practice.",
+        "disciplined_u040": { "median": 1.22, "p10": 0.5, "p90": 2.47, "p_3y_nav_below_1": 0.0029 },
+        "fully_deployed_u060": {
+          "median": 2.09,
+          "p10": 0.72,
+          "p90": 4.91,
+          "p_3y_nav_below_1": 0.0047
+        }
+      },
+      "risk_panel": {
+        "_doc": "the robust downside; these FAIL the SPEC aspirational targets unhedged/untranched — which is WHY the structural levers exist. Disciplined u=0.40 launch operating point.",
+        "p_losing_month": 0.265,
+        "loss_1in100_month": 0.201,
+        "worst_month": 0.268,
+        "p_3y_drawdown_gt_50pct_u040": 0.027,
+        "p_3y_drawdown_gt_50pct_u060": 0.18,
+        "no_bad_debt": true
+      },
+      "safety_target_verdict": "INFEASIBLE for the unhedged/untranched single-pair pool at any MARKETABLE load (binding: 1-in-100<=0.10 and P(losing month)<=0.15 — intrinsic to single-asset vol-selling). Targets are MET only via the roadmap structural levers: pool-hedge h~0.60 brings 1-in-100 to ~10%; the SENIOR tranche (sf<=0.60 with u<=0.40) achieves P(loss)=0. The SPEC targets were NOT loosened — the structural change is the honest answer.",
+      "residual_risks_disclosed": [
+        "Net conservatism: sigma_ref floor 0.50 > calm ETH vol ~0.45 overcharges calm months (payout/premium=0.654 all-months) — do NOT mistake this netting for a safety buffer against a tighter book.",
+        "Book mix (positions.py) under-represents tight/JIT LPs, so tail payout may be UNDER-stated — a residual upside risk in the risk numbers, not in the price model."
+      ],
       "disclosure_text": "You earn the volatility risk premium in calm markets and absorb losses in crashes. In FULL the pool cannot become insolvent and cannot be run, but YOUR CAPITAL IS NOT GUARANTEED.",
       "two_separate_claims": [
         "(1) LPs are always paid — no bad debt, FULL, code-enforced (I1).",
@@ -138,15 +202,16 @@
     "parameter_provenance": {
       "_doc": "mirror the existing params.json provenance map for the cvAMM block; every field must be calibrated/derived, never guessed",
       "fair_premium_surface": "exact closed form (Phi-sum), verified vs il.py to ~5e-11 — NO calibration needed (sigma_ref is the only input)",
-      "sigma_ref": "TODO: calibrated (EWMA windows + floor from historical backtest)",
-      "base_load_by_regime": "TODO: calibrated (lone-writer vs diversified CVaR envelope)",
-      "util_skew": "TODO: calibrated",
-      "dispersion_skew": "TODO: calibrated",
-      "max_load_bps": "TODO: calibrated",
-      "productive_collateral": "TODO: roadmap",
-      "pool_hedge_fraction": "TODO: roadmap",
-      "tranche_cut": "TODO: roadmap",
-      "disclosure": "TODO: calibrated (single-asset depositor loss distribution)"
+      "sigma_ref": "CALIBRATED (heavy run): floor 0.50 conservative-vs-calm; 1d/30d tick halflives (refine on Sepolia)",
+      "base_load_by_regime": "CALIBRATED (heavy run): 20/30/50 bps-hundreds inside the lone-writer/diversified CVaR envelope, marketable, positive long-run growth",
+      "util_skew": "CALIBRATED (heavy run): knee 0.45 / slope 0.6 / power 2 / cap 0.6 — the drawdown lever (u-discipline)",
+      "dispersion_skew": "CALIBRATED (heavy run): slope 0.5 / power 1.5 / cap 0.5; re-fit vs empirical book histogram when live",
+      "max_load_bps": "CALIBRATED (heavy run): premium<=MaxIL ceiling (1/fairRate-1), width/duration/sigma-conditional; dynamic on-chain form preferred",
+      "productive_collateral": "CALIBRATED (heavy run): idle-routable 0.70 / nude 0.30; roadmap; compliant-only",
+      "pool_hedge_fraction": "CALIBRATED (heavy run): h~0.60 brings 1-in-100 to ~10%; roadmap; tail-tightening NOT solvency",
+      "tranche_cut": "CALIBRATED (heavy run): senior_fraction 0.60 (P(loss)=0 jointly with u<=0.40); roadmap",
+      "disclosure": "CALIBRATED (heavy run): real-measure single-asset depositor loss distribution; gross 3y CAGR + risk panel + INFEASIBLE-unhedged verdict",
+      "adversarial_audit": "6-agent workflow GO verdict: no-bad-debt structural (max_payout_frac=1.0 on widened grid); infeasibility robust under stress; no model bugs; net-conservative to depositors; corrections (geometric CAGR, F3 scoping, tranche/hedge caveats) APPLIED"
     }
   }
 }

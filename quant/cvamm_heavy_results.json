@@ -1,0 +1,83 @@
+{
+  "base_load_by_regime": [0.2, 0.3, 0.5],
+  "disclosure": {
+    "disciplined_u040": {
+      "cagr_median": 1.2245294247790215,
+      "cagr_p10": 0.503548884836107,
+      "cagr_p90": 2.472285794841662,
+      "p_multiyr_nav_below_1": 0.00295,
+      "p_losing_period": 0.2649611111111111,
+      "loss_1in100": 0.2005703706182107,
+      "worst_period": 0.26751717006256104,
+      "p_drawdown_gt_50pct": 0.027125,
+      "median_max_drawdown": 0.24654754500101822,
+      "no_bad_debt": true
+    },
+    "fully_deployed_u060": {
+      "cagr_median": 2.087416527298301,
+      "cagr_p10": 0.7237862176977502,
+      "cagr_p90": 4.91084624684636,
+      "p_multiyr_nav_below_1": 0.00475,
+      "p_losing_period": 0.2649611111111111,
+      "loss_1in100": 0.30085555592731605,
+      "worst_period": 0.4012757550938415,
+      "p_drawdown_gt_50pct": 0.1803,
+      "median_max_drawdown": 0.36109739696251714,
+      "no_bad_debt": true
+    }
+  },
+  "pool_hedge_frontier_u040": {
+    "h0": {
+      "loss_1in100": 0.2005703706182107,
+      "worst_month": 0.26751717006256104,
+      "p_dd_gt50": 0.027125
+    },
+    "h25": {
+      "loss_1in100": 0.15694387702638726,
+      "worst_month": 0.20715397660965,
+      "p_dd_gt50": 0.00495
+    },
+    "h50": {
+      "loss_1in100": 0.11331738343456375,
+      "worst_month": 0.1467907831567389,
+      "p_dd_gt50": 0.000325
+    },
+    "h60": {
+      "loss_1in100": 0.09586678599783437,
+      "worst_month": 0.12264550577557451,
+      "p_dd_gt50": 5e-5
+    },
+    "h75": {
+      "loss_1in100": 0.06969088984274026,
+      "worst_month": 0.08642758970382786,
+      "p_dd_gt50": 0.0
+    }
+  },
+  "fair_hedge_cost_monthly": 0.022664692392101563,
+  "tranche_u040": {
+    "sf50": {
+      "senior_p_loss": 0.0,
+      "senior_worst": 0.0,
+      "junior_worst": 0.5350343401251221
+    },
+    "sf60": {
+      "senior_p_loss": 0.0,
+      "senior_worst": 0.0,
+      "junior_worst": 0.6687929251564025
+    },
+    "sf70": {
+      "senior_p_loss": 0.0,
+      "senior_worst": 0.0,
+      "junior_worst": 0.8917239002085366
+    }
+  },
+  "idle_routable_frac": 0.7,
+  "nude_buffer_frac": 0.30000000000000004,
+  "safety_targets": {
+    "p_losing_month_max": 0.15,
+    "loss_1in100_max": 0.1,
+    "p_drawdown_gt_50pct_max": 0.02,
+    "apy_positive": true
+  },
+  "verdict": "INFEASIBLE unhedged/untranched at any marketable load (binding: 1-in-100 and P(losing month); intrinsic to single-asset vol-selling). MET only via roadmap levers: pool-hedge h~0.60 -> 1-in-100 ~10%; senior tranche sf<=0.60 with u<=0.40 -> P(loss)=0. Targets NOT loosened."
+}
