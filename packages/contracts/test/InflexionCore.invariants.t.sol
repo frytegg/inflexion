@@ -53,8 +53,10 @@ contract InflexionCoreInvariantsTest is Test {
     MockNonfungiblePositionManager internal pm;
     MockILMath internal ilMath;
 
-    address internal constant WETH = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
-    address internal constant USDC_TOKEN = address(0x1111111111111111111111111111111111111111);
+    // Deployed in setUp (the oracle-pinning fix reads decimals() on-chain at
+    // registerMarket, so the market tokens must be real ERC-20 contracts).
+    address internal WETH; // 18-dec MockERC20 (the volatile / oracle token)
+    address internal USDC_TOKEN; // 6-dec MockERC20 (the USD-stable token)
     uint24 internal constant FEE = 3000;
     uint32 internal constant DURATION = 30 days;
     bytes32 internal MARKET_ID;
@@ -74,6 +76,9 @@ contract InflexionCoreInvariantsTest is Test {
 
         vm.prank(owner);
         usdc = new MockERC20("USD Coin", "USDC", 6);
+        // Market tokens are real ERC-20s so registerMarket can read decimals() on-chain.
+        USDC_TOKEN = address(usdc);
+        WETH = address(new MockERC20("Wrapped Ether", "WETH", 18));
 
         vm.prank(owner);
         sequencer = new MockAggregator(0, "L2 Sequencer");
@@ -103,7 +108,15 @@ contract InflexionCoreInvariantsTest is Test {
         ilVault.setCore(address(core));
 
         InflexionCore.MarketConfig memory cfg = InflexionCore.MarketConfig({
-            token0: USDC_TOKEN, token1: WETH, fee: FEE, durationSeconds: DURATION, oracleToken: WETH, active: true
+            token0: USDC_TOKEN,
+            token1: WETH,
+            fee: FEE,
+            durationSeconds: DURATION,
+            oracleToken: WETH,
+            token0Decimals: 6,
+            token1Decimals: 18,
+            oracleDecimals: 8,
+            active: true
         });
         MARKET_ID = keccak256(abi.encodePacked(cfg.token0, cfg.token1, cfg.fee, cfg.durationSeconds));
         vm.prank(owner);
@@ -152,7 +165,7 @@ contract InflexionCoreInvariantsTest is Test {
             priceBandBps: 100,
             model: uint8(InflexionCore.CollateralModel.FULL),
             partialRatioBps: 0,
-            maxNotionalV0: 10_000_000e6,
+            maxNotionalV0: type(uint128).max, // capacity not under test; V0 is large in this synthetic mock market
             validUntil: uint64(block.timestamp + 10),
             quoteId: bytes32(uint256(0xdead)),
             nonce: nonce
@@ -168,7 +181,7 @@ contract InflexionCoreInvariantsTest is Test {
         InflexionCore.SignedQuote memory q = _defaultQuote(nonce);
         bytes memory sig = _signQuote(q);
         vm.prank(lp);
-        swapId = core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
     function _warpAndSeedSettlementRound(
@@ -202,7 +215,7 @@ contract InflexionCoreInvariantsTest is Test {
         ilMath.setIL(rIL);
 
         uint256 lpBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PT);
+        core.settle(swapId, 2);
         uint256 paid = usdc.balanceOf(lp) - lpBefore;
 
         // I1: payout ≤ maxIL (== collateral)
@@ -238,7 +251,7 @@ contract InflexionCoreInvariantsTest is Test {
 
         _warpAndSeedSettlementRound(expiry);
         uint256 lpBefore = usdc.balanceOf(lp);
-        core.settle(swapId, 2, SQRT_PT);
+        core.settle(swapId, 2);
         uint256 paid = usdc.balanceOf(lp) - lpBefore;
 
         // STORED-L branch: IL = POSITION_LIQUIDITY = 1e10. Cap at maxIL
@@ -269,7 +282,7 @@ contract InflexionCoreInvariantsTest is Test {
         assertEq(pm.liquidity(tokenId), uint128(POSITION_LIQUIDITY) + inflateBy);
 
         _warpAndSeedSettlementRound(expiry);
-        core.settle(swapId, 2, SQRT_PT);
+        core.settle(swapId, 2);
 
         // I6: the L the contract forwarded to computeIL == stored.
         assertTrue(ilMath.lastILCallSeen(), "settle never invoked computeIL");
@@ -298,7 +311,7 @@ contract InflexionCoreInvariantsTest is Test {
 
         vm.prank(lp);
         vm.expectRevert();
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
     function testFuzz_I9_priceBandWithinBandAccepts(
@@ -315,7 +328,7 @@ contract InflexionCoreInvariantsTest is Test {
         bytes memory sig = _signQuote(q);
 
         vm.prank(lp);
-        core.createSwap(q, sig, tokenId, type(uint256).max, SQRT_P0);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 }
 

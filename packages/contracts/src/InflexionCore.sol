@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
@@ -89,6 +90,10 @@ contract InflexionCore is EIP712, Ownable {
 
     uint256 private constant _BPS = 10_000;
 
+    /// @notice 2^192 — the squared Q64.96 scale, used by the oracle→sqrtP
+    ///         conversion (`_oracleSqrtPriceX96`).
+    uint256 private constant _Q192 = 1 << 192;
+
     // ─── Enums
     // ────────────────────────────────────────────────────────────
 
@@ -147,7 +152,10 @@ contract InflexionCore is EIP712, Ownable {
         address token1;
         uint24 fee; // pool fee tier (e.g. 500, 3000, 10000)
         uint32 durationSeconds; // swap duration
-        address oracleToken; // token whose USD price is used for the band check
+        address oracleToken; // token whose USD price prices entry/settlement + the band check
+        uint8 token0Decimals; // ERC-20 decimals of token0 (oracle→sqrtP conversion)
+        uint8 token1Decimals; // ERC-20 decimals of token1
+        uint8 oracleDecimals; // Chainlink feed decimals for oracleToken (e.g. 8)
         bool active;
     }
 
@@ -246,6 +254,10 @@ contract InflexionCore is EIP712, Ownable {
     error SwapNotActive(uint256 swapId, Status status);
     error NotYetExpired(uint64 expiry, uint256 nowTs);
     error ZeroAddress();
+    error UnsupportedOracleOrientation(address oracleToken, address token0, address token1);
+    error UnsupportedDecimals();
+    error OracleSqrtOutOfRange(uint256 sq);
+    error MarketPriceConfigImmutable(bytes32 marketId);
 
     // ─── Constructor
     // ──────────────────────────────────────────────────────
@@ -281,8 +293,32 @@ contract InflexionCore is EIP712, Ownable {
     function registerMarket(
         MarketConfig calldata cfg
     ) external onlyOwner {
+        // The oracle prices ONE of the pair's tokens in USD; the other token is
+        // the USD-stable numéraire (Phase-1: USDC — spec §19, USD-quoted pairs
+        // only). Reject any pair where the oracle token isn't one of the two.
+        if (cfg.oracleToken != cfg.token0 && cfg.oracleToken != cfg.token1) {
+            revert UnsupportedOracleOrientation(cfg.oracleToken, cfg.token0, cfg.token1);
+        }
         bytes32 id = keccak256(abi.encodePacked(cfg.token0, cfg.token1, cfg.fee, cfg.durationSeconds));
-        markets[id] = cfg;
+
+        // Price-config immutability: the oracle orientation is fixed once set, so
+        // re-registering a market can NEVER re-price an already-active swap (settle
+        // re-reads markets[id]). Only `active` (+ identical orientation) may change.
+        // (Decimals are read on-chain below, so they cannot drift across re-registers.)
+        address prevToken0 = markets[id].token0;
+        if (prevToken0 != address(0) && markets[id].oracleToken != cfg.oracleToken) {
+            revert MarketPriceConfigImmutable(id);
+        }
+
+        // Decimals are read ON-CHAIN, never trusted from owner calldata — a single
+        // wrong digit would silently mis-scale every entry/settlement price ~10x
+        // (the oracle→sqrtP conversion exponents are decimal-driven, §_oracleSqrtPriceX96).
+        MarketConfig memory m = cfg;
+        m.token0Decimals = IERC20Metadata(cfg.token0).decimals();
+        m.token1Decimals = IERC20Metadata(cfg.token1).decimals();
+        m.oracleDecimals = oracle.feedDecimals(cfg.oracleToken);
+        markets[id] = m;
+
         emit MarketRegistered(id, cfg.token0, cfg.token1, cfg.fee, cfg.durationSeconds, cfg.oracleToken);
     }
 
@@ -410,6 +446,17 @@ contract InflexionCore is EIP712, Ownable {
         payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
     }
 
+    /// @notice The Q64.96 sqrt price the protocol derives on-chain from a given
+    ///         oracle price for a market. Exposed so the SDK can reproduce the
+    ///         exact entry/settlement price the contract will use (createSwap /
+    ///         settle do NOT accept a caller-supplied price — they call this).
+    function oracleDerivedSqrtPriceX96(
+        bytes32 marketId,
+        uint256 oraclePrice
+    ) external view returns (uint160) {
+        return _oracleSqrtPriceX96(markets[marketId], oraclePrice);
+    }
+
     // ─── createSwap (Task 5.7)
     // ───────────────────────────────────────────
 
@@ -418,17 +465,18 @@ contract InflexionCore is EIP712, Ownable {
     /// @param  signature    EIP-712 signature of `quote` by `quote.mm`.
     /// @param  tokenId      LP's Uniswap v3 position NFT.
     /// @param  maxPremium   LP slippage guard (in USDC).
-    /// @param  sqrtP0X96    Entry sqrt price (off-chain SDK reads pool slot0).
     /// @return swapId       Newly-assigned swap identifier.
     /// @dev    `sqrtPaX96` / `sqrtPbX96` are derived on-chain from the
-    ///         position's `tickLower` / `tickUpper` via TickMath — the LP
-    ///         cannot lie about the position's range geometry.
+    ///         position's `tickLower` / `tickUpper` via TickMath, and the entry
+    ///         price `sqrtP0X96` is derived on-chain from the Chainlink oracle
+    ///         (`_oracleSqrtPriceX96`) — NEVER caller-supplied. The LP can lie
+    ///         about neither the range geometry nor the entry price (which
+    ///         otherwise sets MaxIL / premium / V0).
     function createSwap(
         SignedQuote calldata quote,
         bytes calldata signature,
         uint256 tokenId,
-        uint256 maxPremium,
-        uint160 sqrtP0X96
+        uint256 maxPremium
     ) external returns (uint256 swapId) {
         // ───── PHASE 1 — READ (no state change)
         // ──────────────────────────
@@ -454,6 +502,13 @@ contract InflexionCore is EIP712, Ownable {
         // the position's geometry.
         uint160 sqrtPaX96 = TickMath.getSqrtRatioAtTick(tickLower);
         uint160 sqrtPbX96 = TickMath.getSqrtRatioAtTick(tickUpper);
+
+        // Entry price P0 is pinned to the Chainlink oracle ON-CHAIN (spec §5.2),
+        // NOT caller-supplied — so the LP cannot pick a favourable entry price to
+        // game MaxIL / premium / V0. `livePrice` is reused for the Fork-2 band
+        // check in PHASE 2 (same oracle read).
+        uint256 livePrice = oracle.getPrice(cfg.oracleToken);
+        uint160 sqrtP0X96 = _oracleSqrtPriceX96(cfg, livePrice);
 
         // In-range check: Pa ≤ P0 ≤ Pb (F-#2 / spec §5.2 PHASE 1)
         if (sqrtP0X96 < sqrtPaX96 || sqrtP0X96 > sqrtPbX96) {
@@ -508,8 +563,8 @@ contract InflexionCore is EIP712, Ownable {
         if (quote.priceBandBps < PRICE_BAND_MIN_BPS || quote.priceBandBps > PRICE_BAND_MAX_BPS) {
             revert PriceBandOutOfProtocolRange(quote.priceBandBps);
         }
-        // Oracle-anchored band check (Fork 2 / §4.3.3 / invariant I9)
-        uint256 livePrice = oracle.getPrice(cfg.oracleToken);
+        // Oracle-anchored band check (Fork 2 / §4.3.3 / invariant I9).
+        // Reuses `livePrice` fetched in PHASE 1 (the same read that pins P0).
         uint256 bandDevBps = oracle.absBps(int256(livePrice), int256(uint256(quote.quotePrice)));
         if (bandDevBps > quote.priceBandBps) {
             revert PriceOutOfBand(livePrice, quote.quotePrice, quote.priceBandBps);
@@ -577,14 +632,16 @@ contract InflexionCore is EIP712, Ownable {
     /// @param  hintRoundId   Chainlink round id whose `updatedAt` brackets
     ///                       `swap.expiry` (off-chain keeper supplies this;
     ///                       OracleManager verifies — spec §6.1).
-    /// @param  sqrtPTX96     Settlement sqrt price derived from Chainlink
-    ///                       price by the caller (off-chain SDK).
     /// @dev    `sqrtPaX96` / `sqrtPbX96` are re-derived on-chain from the
-    ///         position's immutable ticks (TickMath), same as createSwap.
+    ///         position's immutable ticks (TickMath), and the settlement price
+    ///         `sqrtPTX96` is derived on-chain from the Chainlink round-at-T
+    ///         price (`_oracleSqrtPriceX96`) — NEVER caller-supplied. This pins
+    ///         settlement to the manipulation-resistant Chainlink price (spec
+    ///         §6.1) so the payout reflects the TRUE settlement price
+    ///         (invariants I2 / I4), not a value chosen by whoever calls settle.
     function settle(
         uint256 swapId,
-        uint80 hintRoundId,
-        uint160 sqrtPTX96
+        uint80 hintRoundId
     ) external {
         SwapRecord storage s = swaps[swapId];
         if (s.status != Status.ACTIVE) revert SwapNotActive(swapId, s.status);
@@ -601,6 +658,11 @@ contract InflexionCore is EIP712, Ownable {
         //    staleness, lone-spike (unless backstop), wrong-round (spec §6.1).
         MarketConfig memory cfg = _marketForSwap(s);
         (uint256 settlementPrice,) = oracle.getSettlementPrice(cfg.oracleToken, s.expiry, hintRoundId);
+
+        // Settlement price is pinned to the Chainlink round-at-T ON-CHAIN
+        // (spec §6.1) — NOT caller-supplied. This is what makes the payout
+        // reflect the true price (I2/I4) instead of a settler-chosen one.
+        uint160 sqrtPTX96 = _oracleSqrtPriceX96(cfg, settlementPrice);
 
         (uint160 sqrtPaX96, uint160 sqrtPbX96) = _sqrtBoundsFor(s.tokenId);
 
@@ -681,5 +743,45 @@ contract InflexionCore is EIP712, Ownable {
         uint256 amt1 = Math.mulDiv(uint256(liquidity), uint256(sqrtP0X96) - uint256(sqrtPaX96), 1 << 96);
         amount0 = uint128(amt0);
         amount1 = uint128(amt1);
+    }
+
+    /// @dev Convert an oracle price (USD per `oracleToken`, scaled to
+    ///      `oracleDecimals`) into the pool's Q64.96 sqrt price. This pins both
+    ///      the entry price `P0` (createSwap) and the settlement price `P_T`
+    ///      (settle) to Chainlink ON-CHAIN — closing the trust hole where a
+    ///      caller-supplied sqrt price could set MaxIL/premium (entry) or the
+    ///      payout anywhere in `[0, MaxIL]` (settle).
+    ///
+    ///      The NON-oracle token is assumed a USD-stable numéraire (Phase-1:
+    ///      USDC — spec §19 ships USD-quoted pairs only; a USDC depeg is a
+    ///      disclosed shared risk). Pool price (Uniswap convention) is
+    ///      `token1_raw / token0_raw`, so `sqrtPriceX96^2 = poolPrice_raw·2^192`.
+    ///        - oracleToken == token0 (volatile = token0):
+    ///            poolPrice_raw = oraclePrice · 10^(t1dec − t0dec − oracleDec)
+    ///        - oracleToken == token1 (volatile = token1):
+    ///            poolPrice_raw = 10^(oracleDec + t1dec − t0dec) / oraclePrice
+    ///      `Math.mulDiv` carries the 512-bit intermediate; `Math.sqrt` is the
+    ///      floor integer sqrt. Reverts if the result doesn't fit a `uint160`.
+    function _oracleSqrtPriceX96(
+        MarketConfig memory cfg,
+        uint256 oraclePrice
+    ) internal pure returns (uint160) {
+        if (oraclePrice == 0) revert OracleSqrtOutOfRange(0);
+        uint256 inner;
+        if (cfg.oracleToken == cfg.token0) {
+            // inner = oraclePrice · 2^192 / 10^(t0dec + oracleDec − t1dec)
+            uint256 d = uint256(cfg.token0Decimals) + uint256(cfg.oracleDecimals);
+            if (d < uint256(cfg.token1Decimals)) revert UnsupportedDecimals();
+            inner = Math.mulDiv(oraclePrice, _Q192, 10 ** (d - uint256(cfg.token1Decimals)));
+        } else {
+            // oracleToken == token1 (registerMarket guarantees one of the two).
+            // inner = 10^(oracleDec + t1dec − t0dec) · 2^192 / oraclePrice
+            uint256 e = uint256(cfg.oracleDecimals) + uint256(cfg.token1Decimals);
+            if (e < uint256(cfg.token0Decimals)) revert UnsupportedDecimals();
+            inner = Math.mulDiv(10 ** (e - uint256(cfg.token0Decimals)), _Q192, oraclePrice);
+        }
+        uint256 sq = Math.sqrt(inner);
+        if (sq == 0 || sq > type(uint160).max) revert OracleSqrtOutOfRange(sq);
+        return uint160(sq);
     }
 }

@@ -138,6 +138,42 @@ Empirically measured (`quant/notebooks/03_path_to_il.ipynb`):
 Spec placeholders should be updated. Tracked in
 [`docs/MATH.md`](./MATH.md) §3.
 
+### 3.4 Oracle-pinned pricing — entry `P0` and settlement `P_T` (vNEXT fix)
+
+A review found that `createSwap` and `settle` accepted a **caller-supplied** sqrt
+price. `settle` computed the payout from the caller's `sqrtP_T` (the validated
+Chainlink price was only emitted), so any permissionless settler could set the
+payout anywhere in `[0, MaxIL]`; `createSwap` took the entry `sqrtP0` bounded only
+to `[Pa, Pb]`, letting an LP pick the entry that sets MaxIL / premium / V0. Both
+prices are now **derived on-chain** from Chainlink via `_oracleSqrtPriceX96`
+(decimal- and orientation-aware; `MarketConfig` decimals are read on-chain at
+`registerMarket`, never trusted from calldata; the oracle orientation is immutable
+across re-registration). This restores invariants **I2 / I4** and the Fork-1
+oracle pinning, and aligns the code to spec §5.2/§5.4 (which already specified
+`P0 = oracle.getPrice`). Accepted residuals, by design:
+
+- **In-range is now defined at the ORACLE price, not the pool's `slot0`.** The
+  `Pa ≤ P0 ≤ Pb` gate compares the Chainlink-derived `P0`. When oracle and pool
+  spot diverge (normal basis, thin pool, transient dislocation), a position that
+  is in-range by pool-truth but out-of-range by the oracle is rejected (and vice
+  versa). Intentional and consistent with settlement (also oracle-pinned); not a
+  fund-loss vector.
+- **Bounded entry-timing freedom.** `P0` is the latest Chainlink round at the
+  LP's chosen block, clamped to within `priceBandBps` of the MM-signed
+  `quotePrice` over a 5–15 s validity window, so an LP can prefer a marginally
+  favourable round — bounded by the MM's chosen band, blunted by premium scaling
+  with MaxIL. This is the intended firm-quote + oracle-band design (I9), not a drain.
+- **Phase-boundary liveness.** `getSettlementPrice` reads neighbour rounds
+  tolerantly (`_tryRound`): across a Chainlink `phaseId` boundary (where
+  `roundId ± 1` is not the real neighbour) a missing next round degrades to the
+  liveness backstop (accept the pinned round past `LIVENESS_WINDOW`) rather than a
+  permanent fund-lock (invariant **I8**). It never lets a settler choose the price
+  — the round-at-T is uniquely bracketed below by `updatedAt ≤ expiry`.
+
+Roadmap hardening (not blocking): decimals are validated on-chain today; for any
+future **non-USD-quoted** pair the USD-stable = \$1 numéraire assumption (spec §19)
+must be revisited before listing.
+
 ---
 
 ## 4. External audit summary

@@ -200,4 +200,51 @@ contract OracleManagerTest is Test {
         (uint256 price,) = oracle.getSettlementPrice(WETH, expiry, 3);
         assertEq(price, uint256(spike));
     }
+
+    // ─── feedDecimals (oracle-pinning fix: on-chain decimals validation) ─────
+
+    function test_feedDecimals_returnsFeedScale() public view {
+        assertEq(oracle.feedDecimals(WETH), 8);
+    }
+
+    function test_feedDecimals_revertsUnsetFeed() public {
+        vm.expectRevert(abi.encodeWithSelector(OracleManager.PriceFeedUnset.selector, address(0xdead)));
+        oracle.feedDecimals(address(0xdead));
+    }
+
+    // ─── Chainlink phaseId-boundary liveness (neighbour read is tolerant) ────
+
+    /// @notice The round at T exists but `hint+1` is unqueryable — as happens
+    ///         across a Chainlink aggregator phase change, where the next real
+    ///         round is NOT `hint+1`. Pre-fix this hard-reverts (permanent fund
+    ///         lock); post-fix the liveness backstop accepts the pinned round
+    ///         once past `LIVENESS_WINDOW` (invariant I8).
+    function test_settle_phaseBoundary_backstopAcceptsWithoutNextRound() public {
+        MockAggregator boundaryFeed = new MockAggregator(8, "ETH/USD next-phase");
+        oracle.setPriceFeed(WETH, address(boundaryFeed), oracle.LIVENESS_WINDOW() + 10_000);
+
+        uint64 expiry = uint64(block.timestamp - oracle.LIVENESS_WINDOW() - 1000);
+        // Round-at-T (hint=11) set; hint+1 (round 12) deliberately UNSET → reverts.
+        boundaryFeed.setRound(10, 3000e8, uint256(expiry) - 1100, false);
+        boundaryFeed.setRound(11, 3000e8, uint256(expiry) - 100, true);
+
+        vm.expectEmit(true, true, false, true, address(oracle));
+        emit IOracleManager.LivenessBackstopTriggered(WETH, expiry, 11, 3000e8);
+        (uint256 price,) = oracle.getSettlementPrice(WETH, expiry, 11);
+        assertEq(price, 3000e8);
+    }
+
+    /// @notice Same missing next round, but BEFORE the backstop window → defer
+    ///         (revert), retryable. Never a permanent lock, never a chosen price.
+    function test_settle_missingNextRound_defersBeforeBackstop() public {
+        MockAggregator boundaryFeed = new MockAggregator(8, "ETH/USD next-phase");
+        oracle.setPriceFeed(WETH, address(boundaryFeed), STALENESS);
+
+        uint64 expiry = uint64(block.timestamp - 1000); // recent: backstop not reached
+        boundaryFeed.setRound(11, 3000e8, uint256(expiry) - 100, true);
+        // hint+1 (round 12) unset.
+
+        vm.expectRevert(); // WrongRound (defer until a next round / backstop)
+        oracle.getSettlementPrice(WETH, expiry, 11);
+    }
 }

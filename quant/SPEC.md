@@ -51,7 +51,7 @@ FairPremium·(1 + maxLoadBps)`) is additive and enforced by construction.
   `Φ`. So `FairPremium` is a finite **`Φ`-sum** (≈6–10 terms, Black–Scholes
   class) — **no coefficients to fit, no grid to store, no MC at runtime** —
   evaluated live from `(Pa, Pb, L, σ_ref, T)`. The straddle-theta /
-  static-replication results (Singh et al. AFT 2025; Lipton–Lucic–Sepp 2025;
+  static-replication results (Milionis–Moallemi–Roughgarden 2022; Lipton–Lucic–Sepp 2025;
   **cite, do not re-derive**) are the **theory anchors** for _why_ the claim is
   priceable/hedgeable — **NOT** the pricer, and **NOT** approximations to ship.
 - **VERIFIED (this pivot):** the closed form ≡ `il.py` (quadrature ≡ MC) to

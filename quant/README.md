@@ -25,8 +25,9 @@ feed the on-chain pricing stack. Three pillars (see `../spec.md` §3.0):
    carries **all** vol/time dependence. Theory anchors (cite, do not
    re-derive): Lipton–Lucic–Sepp 2025 (the IL-protection claim is statically
    replicable by a strip of vanilla options ⇒ priceable/hedgeable) and
-   Singh et al. AFT 2025 (LVR ≡ theta of the ATM straddle ⇒ closed-form
-   anchor for the straddle-theta cross-check).
+   Milionis–Moallemi–Roughgarden 2022 (LVR — the AMM's adverse-selection cost —
+   has a closed form ∝ instantaneous variance, i.e. the theta of the replicating
+   short option ⇒ a closed-form anchor for short-gamma cost).
 2. **The cvAMM (centrepiece, Path A).** A pooled passive underwriter
    (`ConvexityVault`, ERC-4626 over USDC) that quotes algorithmically on-chain
    off `FairPremium` with inventory skews and is contractually capped at
