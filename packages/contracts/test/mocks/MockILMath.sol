@@ -30,6 +30,11 @@ contract MockILMath is IILMath {
     uint128 public lastILCallLiquidity;
     bool public lastILCallSeen;
 
+    /// @notice Records the sqrt price (`sqrtP_T`) passed to the most-recent
+    ///         `computeIL` call. Used to prove `settle` feeds the
+    ///         ORACLE-derived settlement price, not a caller-supplied one.
+    uint256 public lastILCallSqrtPT;
+
     function setMaxIL(
         uint256 v
     ) external {
@@ -58,7 +63,7 @@ contract MockILMath is IILMath {
     }
 
     function computeIL(
-        uint256,
+        uint256 sqrtPTX96,
         uint256,
         uint256,
         uint128 liquidity,
@@ -66,6 +71,7 @@ contract MockILMath is IILMath {
         uint256
     ) external returns (uint256) {
         lastILCallLiquidity = liquidity;
+        lastILCallSqrtPT = sqrtPTX96;
         lastILCallSeen = true;
         if (echoLiquidityIL) return uint256(liquidity);
         return scriptedIL;

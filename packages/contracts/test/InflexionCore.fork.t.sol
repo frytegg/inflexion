@@ -101,7 +101,15 @@ contract InflexionCoreForkTest is Test {
         // We pick WETH as the oracle token: ETH/USD Chainlink quotes USD
         // per WETH at 8 decimals — same as `quotePrice` in the signed quote.
         InflexionCore.MarketConfig memory cfg = InflexionCore.MarketConfig({
-            token0: WETH, token1: USDC, fee: FEE_500, durationSeconds: DURATION, oracleToken: WETH, active: true
+            token0: WETH,
+            token1: USDC,
+            fee: FEE_500,
+            durationSeconds: DURATION,
+            oracleToken: WETH,
+            token0Decimals: 18,
+            token1Decimals: 6,
+            oracleDecimals: 8,
+            active: true
         });
         core.registerMarket(cfg);
 
@@ -133,14 +141,13 @@ contract InflexionCoreForkTest is Test {
         // ── 1. Read the pool. Pick a tick range bracketing the current tick.
         address pool = IV3Factory(V3_FACTORY).getPool(WETH, USDC, FEE_500);
         require(pool != address(0), "WETH/USDC 500 pool absent at N1");
-        (uint160 sqrtP0, int24 tickCurrent,,,,,) = IV3Pool(pool).slot0();
+        (, int24 tickCurrent,,,,,) = IV3Pool(pool).slot0();
 
         // ±20 tick-spacings of 10 each = ±200 raw ticks (~±2% range).
         // tickSpacing rounding: snap current tick down to a multiple of 10.
         int24 base = (tickCurrent / 10) * 10;
         int24 tickLower = base - 200;
         int24 tickUpper = base + 200;
-        emit log_named_uint("pool sqrtP0X96", uint256(sqrtP0));
         emit log_named_int("tickCurrent", tickCurrent);
         emit log_named_int("tickLower", tickLower);
         emit log_named_int("tickUpper", tickUpper);
@@ -193,9 +200,10 @@ contract InflexionCoreForkTest is Test {
         });
         bytes memory sig = _signQuote(quote);
 
-        // ── 4. createSwap. Use the pool's current sqrtPrice as P0.
+        // ── 4. createSwap. Entry price P0 is derived ON-CHAIN from Chainlink
+        //       (no caller-supplied sqrt price).
         vm.prank(lp);
-        uint256 swapId = core.createSwap(quote, sig, tokenId, 100_000e6, sqrtP0);
+        uint256 swapId = core.createSwap(quote, sig, tokenId, 100_000e6);
         emit log_named_uint("swapId", swapId);
 
         // Pull the stored swap. Tuple decomposition skips the fields we
@@ -256,11 +264,9 @@ contract InflexionCoreForkTest is Test {
         require(hint > 0, "no bracketing Chainlink round at HEAD");
         emit log_named_uint("hint round", uint256(hint));
 
-        (uint160 sqrtPT,,,,,,) = IV3Pool(pool).slot0();
-        emit log_named_uint("settle sqrtPT_X96", uint256(sqrtPT));
-
-        // settle is callable by anyone.
-        core.settle(swapId, hint, sqrtPT);
+        // settle is callable by anyone. Settlement price P_T is derived
+        // ON-CHAIN from the Chainlink round-at-T (no caller-supplied price).
+        core.settle(swapId, hint);
 
         // ── 8. Asserts after settle.
         assertEq(IERC721(NPM).ownerOf(tokenId), lp, "NFT not returned to LP");

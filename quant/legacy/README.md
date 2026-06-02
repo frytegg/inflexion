@@ -1,12 +1,20 @@
 # Legacy — the PARTIAL study (preserved, not deleted)
 
-> **This is an index, not a move.** This turn is documentation-only. The
-> PARTIAL-specific modules still live at `quant/src/inflexion_quant/` and their
-> outputs in `quant/params.json`. The **physical move** of the `.py` files into
-> `quant/legacy/` (with their tests) is a **P1 refactor task** — do **not** move
-> or delete any `.py` file now. This README records which modules and which
-> serialized outputs are **legacy-PARTIAL** vs **cvAMM-launch**, and what each
+> **Move completed (P1).** The PARTIAL-specific modules now live in the
+> **`inflexion_quant.legacy`** subpackage (physically
+> `quant/src/inflexion_quant/legacy/`), with their tests at `quant/tests/legacy/`.
+> They were placed as a subpackage — rather than a bare top-level `quant/legacy/`
+> dir — so the launch package can import the reused tail-risk helpers cleanly and
+> the editable/wheel install picks them up with no extra packaging. This file
+> (kept at `quant/legacy/README.md`) is the human-facing index of which modules
+> and serialized outputs are **legacy-PARTIAL** vs **cvAMM-launch**, and what each
 > preserved output is reused for.
+>
+> **Compatibility shims.** Thin re-export shims remain at
+> `inflexion_quant.calibrate` and `inflexion_quant.stress` so the **frozen**
+> `params.py` (`from inflexion_quant.calibrate import ...`) and `test_params.py`
+> keep importing byte-for-byte. New code imports from `inflexion_quant.legacy.*`
+> directly.
 
 ## Why these are legacy
 
@@ -62,9 +70,13 @@ the PARTIAL roadmap and are reused for tranche/hedge sizing as noted.
 ## Tests
 
 The PARTIAL tests (`test_portfolio.py`, `test_stress.py`, `test_calibrate.py`,
-`test_deck_charts.py`) move **with** their modules into `quant/legacy/tests/`
-in P1 (update import paths) so the PARTIAL suite still runs and CI stays green.
-`test_params.py`, `test_il.py`, `test_positions.py`, `test_prices.py` stay where
-they are (those modules stay at `src/`). New cvAMM tests are added in P1
-(fairRate surface reproduces the authoritative numbers within MC tolerance;
-I10 cap `premium ≤ FairPremium·(1 + maxLoad)` holds by construction).
+`test_deck_charts.py`) moved **with** their modules into `quant/tests/legacy/`
+(import paths updated to `inflexion_quant.legacy.*`) so the PARTIAL suite still
+runs and CI stays green. `test_params.py`, `test_il.py`, `test_positions.py`,
+`test_prices.py` stayed where they are (those modules stay at `src/`). New cvAMM
+tests landed in P1: `test_cvamm.py` (fairRate surface reproduces the
+authoritative numbers within MC tolerance + the closed form ≡ il.py to machine
+precision; I10 cap `premium ≤ FairPremium·(1 + maxLoad)` holds by construction),
+`test_sigma_ref.py`, `test_depositor.py`, `test_roadmap.py`, `test_cvamm_charts.py`.
+The `calibrate._vectorised_payouts_and_maxils` kernel was extracted into
+`cvamm.batch_payouts_and_maxils` (the surface engine no longer imports legacy).

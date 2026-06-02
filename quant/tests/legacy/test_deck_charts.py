@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from inflexion_quant.deck_charts import (
+from inflexion_quant.legacy.deck_charts import (
     DECK_STYLE,
     DeckInputs,
     prepare_inputs,
