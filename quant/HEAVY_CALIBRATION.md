@@ -16,7 +16,7 @@ P&L:
 - **Volatility clustering** — a 3-state Markov vol regime (calm 0.45 / normal
   0.75 / stressed 1.30 annualised) with persistence 0.82.
 - **Tail-dependent crash correlation → 1** — a single ETH pair: every outstanding
-  position settles against the *same* move, plus Poisson deep-crash months
+  position settles against the _same_ move, plus Poisson deep-crash months
   (~0.8/yr, mean −45%) hitting the whole locked book together.
 - **Stale-σ regime risk** — premium priced at a **lagging** `σ_ref` EWMA, so
   coverage written at a stressed-regime onset is underpriced exactly as it would
@@ -56,10 +56,10 @@ Real-measure, warm-up-trimmed steady state, baseLoad calm/normal/stressed =
 20%/30%/50%, **gross of demand/competition/fees** (lead with the geometric 3y
 CAGR, never the arithmetic mean):
 
-| Operating point | 3y CAGR (med / p10 / p90) | P(3y NAV<1) | P(losing month) | 1-in-100 month | worst month | P(3y DD>50%) | no-bad-debt |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Disciplined `u=0.40` | 122% / 50% / 247% | 0.3% | 26.5% | −20.1% | −26.8% | 2.7% | ✓ |
-| Fully-deployed `u=0.60` | 209% / 72% / 491% | 0.5% | 26.5% | −30.1% | −40.1% | 18.0% | ✓ |
+| Operating point         | 3y CAGR (med / p10 / p90) | P(3y NAV<1) | P(losing month) | 1-in-100 month | worst month | P(3y DD>50%) | no-bad-debt |
+| ----------------------- | ------------------------- | ----------- | --------------- | -------------- | ----------- | ------------ | ----------- |
+| Disciplined `u=0.40`    | 122% / 50% / 247%         | 0.3%        | 26.5%           | −20.1%         | −26.8%      | 2.7%         | ✓           |
+| Fully-deployed `u=0.60` | 209% / 72% / 491%         | 0.5%        | 26.5%           | −30.1%         | −40.1%      | 18.0%        | ✓           |
 
 The attractive gross CAGR sits on an **unsafe** single-pair risk profile — which
 is precisely the motivation for the structural levers. **Verbatim tone
@@ -70,10 +70,10 @@ always paid (no bad debt, FULL, I1); (2) depositors can lose principal.
 
 ## The structural levers (the proposed change)
 
-| Lever | Effect (u=0.40, base loads) | Status |
-| --- | --- | --- |
-| **Utilization cap** (`util_skew`, knee 0.45) | the **drawdown** lever (not tail-feasibility): u=0.40 → P(DD>50%)=2.7% vs u=0.60 → 18% | launch |
-| **Pool hedge** (deliverable 8), h≈0.60 | 1-in-100 → ~−10% (target), worst → ~−12%, P(DD>50%) → ~0%; CAGR barely moves. **Tail-tightening, NOT solvency** (basis risk; approximate gamma) | roadmap |
+| Lever                                                | Effect (u=0.40, base loads)                                                                                                                                                          | Status  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| **Utilization cap** (`util_skew`, knee 0.45)         | the **drawdown** lever (not tail-feasibility): u=0.40 → P(DD>50%)=2.7% vs u=0.60 → 18%                                                                                               | launch  |
+| **Pool hedge** (deliverable 8), h≈0.60               | 1-in-100 → ~−10% (target), worst → ~−12%, P(DD>50%) → ~0%; CAGR barely moves. **Tail-tightening, NOT solvency** (basis risk; approximate gamma)                                      | roadmap |
 | **Senior/junior tranche** (deliverable 9), `sf=0.60` | **senior P(loss)=0, worst=0%**, CAGR ~197% — the marketable "convexity savings account". Junior is the explicit high-APY vol tranche (worst −67%). Holds **jointly with `u ≤ 1−sf`** | roadmap |
 
 The honest answer to "is the depositor product safe?": **the unhedged pool is

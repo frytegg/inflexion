@@ -77,7 +77,7 @@
       "estimator_impl": "inflexion_quant.prices.sigma_ref (annualised EWMA; halflife in samples on-chain becomes seconds on Chainlink tick timestamps)",
       "short_halflife_seconds": 86400,
       "long_halflife_seconds": 2592000,
-      "floor": 0.50,
+      "floor": 0.5,
       "_calibration": "HEAVY RUN: floor=0.50 is the calibrated conservative guard — it sits ABOVE the observed calm ETH regime vol (~0.45), so the pool overcharges calm months and is net-conservative to depositors (the adversarial audit measured all-months realised payout/premium = 0.654). short/long halflives (1d/30d, tick-frequency) are sound on-chain defaults; refine against live Chainlink ticks on Sepolia (P2/P4). The heavy-run monthly proxy used 1mo/6mo EWMA halflives. A LAGGING sigma_ref underprices coverage written at a regime onset (payout/premium = 1.14 at stress onset) — that residual is the vol-risk-premium baseLoad must carry, NOT a no-bad-debt risk.",
       "conservative_caveat": "max(...) is MANDATORY: realized vol understates risk before a regime change. Load-bearing for the I10 cap + depositor solvency, NOT for the FULL no-bad-debt invariant (I1), which is structural and oracle-independent."
     },
@@ -92,7 +92,11 @@
         "diversified_cvar95_N100_pct_rho0": 78.5,
         "diversified_cvar95_N100_pct_rho1_synchronized": "~100 (NO diversification when the single-pair book is synchronized — the crash-correlation tail)"
       },
-      "regime_bands_sigma": { "calm_below": 0.60, "normal_below": 1.025, "stressed_at_or_above": 1.025 },
+      "regime_bands_sigma": {
+        "calm_below": 0.6,
+        "normal_below": 1.025,
+        "stressed_at_or_above": 1.025
+      },
       "base_load_bps": {
         "calm": 2000,
         "normal": 3000,
@@ -135,10 +139,10 @@
     "productive_collateral": {
       "_doc": "Deliverable 7. ROADMAP. COMPLIANT FORM ONLY (CLAUDE.md + spec 7.2 F-#3): idle/free USDC only, instantly-redeemable wrappers only, never utilization-gated, hard cap, never 100%, keep nude buffer. 'Aave for locked collateral' is BLOCKED pending owner override — NOT encoded.",
       "impl": "inflexion_quant.roadmap.routable_idle_fraction",
-      "max_idle_routable_frac": 0.70,
+      "max_idle_routable_frac": 0.7,
       "venue_whitelist": ["sDAI", "tokenized_tbills"],
       "venue_blocklist_reason": "Aave/Compound and any utilization-gated venue are BLOCKED for ALL vault USDC (locked AND idle) per CLAUDE.md",
-      "nude_buffer_frac": 0.30,
+      "nude_buffer_frac": 0.3,
       "_calibration": "of IDLE/FREE USDC only; locked collateral is NEVER routed. nude_buffer 0.30 = 1.5x a 0.20 p99 instant-demand (new-lock + withdrawal-queue within the wrapper redemption window); routable 0.70 = 1 - buffer, NEVER 100%. Roadmap.",
       "status": "roadmap"
     },
@@ -146,7 +150,7 @@
     "pool_hedge_fraction": {
       "_doc": "Deliverable 8. ROADMAP. Fraction of aggregate tail convexity bought back (long option strip / long Panoptic). Changes the NATURE of the risk (halves worst month) at APY cost. Approximate (perpetual vs fixed-maturity gamma); NOT relied on for solvency.",
       "impl": "inflexion_quant.roadmap.pool_hedge_frontier",
-      "fraction": 0.60,
+      "fraction": 0.6,
       "_calibration": "HEAVY RUN (u=0.40, base loads): hedge fraction h offsets the realised payout tail at ~1.15x fair cost. h=0.50 -> 1-in-100 -11.3%, worst -14.7%, P(DD>50%) 0.03%; h=0.75 -> 1-in-100 -7.0%, worst -8.6%, P(DD>50%) 0%. CAGR barely moves (122.5%->122.3%). h~0.60 brings 1-in-100 to ~-10% (target). CAVEAT: this TIGHTENS the 1-in-100 / CVaR / drawdown; its worst-month protection is exposed to basis risk + stressed hedge cost (degrades only beyond ~2x cost). It is approximate (perpetual vs fixed-maturity gamma) and is NEVER a solvency mechanism — solvency comes only from the MaxIL cap (I1).",
       "status": "roadmap"
     },
@@ -154,7 +158,7 @@
     "tranche_cut": {
       "_doc": "Deliverable 9. ROADMAP. Senior (hedged, base yield, low tail) / Junior (unhedged, first loss, high APY) cut point. No engineering makes a single-pair vol seller low-risk; tranching lets each depositor pick risk dose.",
       "impl": "inflexion_quant.roadmap.tranche_cut",
-      "senior_fraction": 0.60,
+      "senior_fraction": 0.6,
       "junior_first_loss": true,
       "_calibration": "HEAVY RUN (u=0.40): senior_fraction=0.60 -> senior P(loss)=0.000%, worst=0.0%, gross 3y CAGR median ~197%; junior CAGR median ~32%, worst month -67% (a fillable LEVERED first-loss vol tranche). CRITICAL JOINT CONDITION: the senior P(loss)=0 guarantee holds only while utilization u <= 1 - senior_fraction (= 0.40 here); above that the senior tranche starts taking loss (P(loss) 0.39%/1.34%/4.08% at u=0.7/0.8/1.0). Size the junior buffer jf=1-sf off the WORST realised monthly loss with margin AND enforce the utilization cap jointly. The senior tranche is the marketable 'convexity savings account'; the junior is the explicit high-APY vol tranche and the structure requires a junior counterparty.",
       "status": "roadmap"
@@ -166,8 +170,13 @@
       "_basis": "HEAVY RUN, real-measure (fat-tailed Student-t + Markov vol-regime clustering + Poisson deep crashes + lagging sigma_ref), warm-up-trimmed steady state, baseLoad calm/normal/stressed = 0.20/0.30/0.50, single ETH/USDC pool, FULL, UNHEDGED + UNTRANCHED (launch). Numbers verified no-bad-debt path-by-path. APY is GROSS of demand/competition/fees and model-illustrative — present the RISK panel as the robust part, and lead with the geometric 3y CAGR, never the arithmetic mean.",
       "growth_3y_cagr_gross": {
         "_doc": "geometric, gross-of-competition; the honest growth figure (NOT an arithmetic mean). Competition + demand compress this materially in practice.",
-        "disciplined_u040": { "median": 1.22, "p10": 0.50, "p90": 2.47, "p_3y_nav_below_1": 0.0029 },
-        "fully_deployed_u060": { "median": 2.09, "p10": 0.72, "p90": 4.91, "p_3y_nav_below_1": 0.0047 }
+        "disciplined_u040": { "median": 1.22, "p10": 0.5, "p90": 2.47, "p_3y_nav_below_1": 0.0029 },
+        "fully_deployed_u060": {
+          "median": 2.09,
+          "p10": 0.72,
+          "p90": 4.91,
+          "p_3y_nav_below_1": 0.0047
+        }
       },
       "risk_panel": {
         "_doc": "the robust downside; these FAIL the SPEC aspirational targets unhedged/untranched — which is WHY the structural levers exist. Disciplined u=0.40 launch operating point.",
