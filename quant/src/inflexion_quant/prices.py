@@ -64,10 +64,10 @@ class KouParams:
     the *down* exponential have a fatter tail than the up one.
     """
 
-    lam: float = 50.0      # jumps per year (Poisson intensity)
-    p_up: float = 0.4      # P(jump is up | jump occurs)
-    eta_up: float = 25.0   # rate of positive jumps  (1/eta_up = mean up size)
-    eta_down: float = 15.0 # rate of negative jumps  (fatter tail by default)
+    lam: float = 50.0  # jumps per year (Poisson intensity)
+    p_up: float = 0.4  # P(jump is up | jump occurs)
+    eta_up: float = 25.0  # rate of positive jumps  (1/eta_up = mean up size)
+    eta_down: float = 15.0  # rate of negative jumps  (fatter tail by default)
 
 
 def kou_jump_paths(
@@ -110,8 +110,8 @@ def kou_jump_paths(
         # Inverse-CDF Exp(rate): both branches give correctly-signed sizes
         sizes = np.where(
             up_or_down,
-            -np.log1p(-u) / kou.eta_up,    # positive
-            np.log1p(-u) / kou.eta_down,   # negative
+            -np.log1p(-u) / kou.eta_up,  # positive
+            np.log1p(-u) / kou.eta_down,  # negative
         )
         flat_counts = n_jumps.ravel()
         cell_of_jump = np.repeat(np.arange(flat_counts.size), flat_counts)
@@ -182,17 +182,17 @@ class CommonFactor:
     survive.
     """
 
-    sigma: float = 0.40        # annualised vol of the common factor
-    crash_lam: float = 2.0     # crashes per year (Poisson intensity)
-    crash_mu: float = -0.10    # mean log-jump (negative ⇒ crash)
+    sigma: float = 0.40  # annualised vol of the common factor
+    crash_lam: float = 2.0  # crashes per year (Poisson intensity)
+    crash_mu: float = -0.10  # mean log-jump (negative ⇒ crash)
     crash_sigma: float = 0.05  # std of log-jump size
 
 
 def common_factor_paths(
-    S0: np.ndarray,         # (n_assets,)
-    mu: np.ndarray,         # (n_assets,)
-    sigma_idio: np.ndarray, # (n_assets,) — idiosyncratic vol
-    beta: np.ndarray,       # (n_assets,) — loading on common factor
+    S0: np.ndarray,  # (n_assets,)
+    mu: np.ndarray,  # (n_assets,)
+    sigma_idio: np.ndarray,  # (n_assets,) — idiosyncratic vol
+    beta: np.ndarray,  # (n_assets,) — loading on common factor
     cf: CommonFactor,
     T: float,
     n_steps: int,
@@ -250,3 +250,79 @@ def common_factor_paths(
     out[:, :, 0] = S0[None, :]
     out[:, :, 1:] = S0[None, :, None] * np.exp(log_path)
     return out
+
+
+# ─── σ_ref — conservative EWMA realized vol (cvAMM deliverable 2) ─────────────
+#
+# The on-chain VolOracle's reference vol, consumed by the FairValueOracle. The
+# Python helper mirrors the on-chain σ-EWMA estimator (which works on Chainlink
+# tick timestamps in *seconds*; here we work on a return series with an explicit
+# samples-per-year so the two stay equivalent). See ``quant/SPEC.md`` deliverable
+# 2 and spec §6.5.
+
+
+def ewma_volatility(
+    log_returns: np.ndarray,
+    halflife_samples: float,
+    samples_per_year: float = 365.0,
+    *,
+    demean: bool = False,
+) -> float:
+    """Annualised EWMA realized volatility of a log-return series.
+
+    Exponentially-weighted variance with weights ``λ^(age)``, ``λ = 0.5^(1/H)``
+    (weight halves every ``halflife_samples`` steps), normalised over the window,
+    then annualised by ``√samples_per_year``::
+
+        var = Σ_i w_i · (r_i − r̄)² / Σ_i w_i        # r̄ = 0 unless demean
+        σ   = √(var · samples_per_year)
+
+    The most recent return carries the largest weight. ``demean`` defaults to
+    ``False`` (RiskMetrics convention: short-horizon log-return mean ≈ 0; raw r²
+    is the risk estimate).
+    """
+    r = np.asarray(log_returns, dtype=float).ravel()
+    n = r.size
+    if n == 0:
+        raise ValueError("log_returns must be non-empty")
+    if halflife_samples <= 0:
+        raise ValueError("halflife_samples must be > 0")
+    lam = 0.5 ** (1.0 / halflife_samples)
+    # age 0 = most recent sample (largest weight)
+    age = np.arange(n - 1, -1, -1, dtype=float)
+    w = lam**age
+    w_sum = w.sum()
+    if demean:
+        mean = float((w * r).sum() / w_sum)
+        r = r - mean
+    var = float((w * r * r).sum() / w_sum)
+    return float(np.sqrt(max(var, 0.0) * samples_per_year))
+
+
+def sigma_ref(
+    log_returns: np.ndarray,
+    *,
+    short_halflife_samples: float,
+    long_halflife_samples: float,
+    floor: float,
+    samples_per_year: float = 365.0,
+    demean: bool = False,
+) -> dict[str, float]:
+    """``σ_ref = max(σ_short, σ_long, floor)`` — the conservative reference vol.
+
+    **MANDATORY CAVEAT — never price off raw realized σ.** A single fast EWMA
+    *understates* risk right before a regime change (realized vol lags the jump),
+    so a writer pricing off it would be badly underpriced exactly when it matters
+    most. Taking the ``max`` of a short and a long window *and* a hard ``floor``
+    is the conservative guardrail. It is **load-bearing for the I10 cap and
+    depositor solvency** — but **not** for the FULL no-bad-debt invariant (I1),
+    which is structural and oracle-independent (spec §6.5, ``quant/SPEC.md`` §2).
+
+    Returns ``{sigma_ref, sigma_short, sigma_long, floor, binding}`` where
+    ``binding`` names which term won (audit-grade provenance for the disclosure).
+    """
+    s_short = ewma_volatility(log_returns, short_halflife_samples, samples_per_year, demean=demean)
+    s_long = ewma_volatility(log_returns, long_halflife_samples, samples_per_year, demean=demean)
+    terms = {"sigma_short": s_short, "sigma_long": s_long, "floor": float(floor)}
+    binding = max(terms, key=terms.get)
+    return {"sigma_ref": float(terms[binding]), "binding": binding, **terms}

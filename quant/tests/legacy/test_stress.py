@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from inflexion_quant.portfolio import WaterfallConfig
-from inflexion_quant.stress import (
+from inflexion_quant.legacy.portfolio import WaterfallConfig
+from inflexion_quant.legacy.stress import (
     CorrelatedCrashConfig,
     VolRegimeShiftConfig,
     correlated_crash,

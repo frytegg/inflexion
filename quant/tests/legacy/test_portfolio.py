@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from inflexion_quant.portfolio import (
+from inflexion_quant.legacy.portfolio import (
     WaterfallConfig,
     aggregate,
     default_fee_curve,
