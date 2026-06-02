@@ -141,6 +141,9 @@ def batch_payouts_and_maxils(
     V_lp = np.where(P_T < Pa, V_lp_below, np.where(P_T > Pb, V_lp_above, V_lp_inrange))
     IL = np.maximum(0.0, V_hold - V_lp)
     payout = np.minimum(IL, max_il)
+    # Defense-in-depth: a degenerate range (Pa==Pb ⇒ MaxIL==0) would yield a 0/0
+    # payout fraction downstream; pin payout to 0 there (no coverage, no nan).
+    payout = np.where(max_il > 0.0, payout, 0.0)
     return payout, max_il
 
 
