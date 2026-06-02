@@ -8,6 +8,7 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IILMath } from "./interfaces/IILMath.sol";
@@ -604,9 +605,14 @@ contract InflexionCore is EIP712, Ownable {
         // V0 = a0·P0_token1_per_token0 + a1, with P0 = sqrtP0² / 2^192.
         uint256 V0 = _amount0InToken1(a0, sqrtP0X96) + a1;
 
-        // Verify MM signature
-        address signer = recoverSigner(quote, signature);
-        if (signer != quote.mm) revert InvalidSignature(signer, quote.mm);
+        // Verify MM signature — EIP-712 ECDSA *or* EIP-1271 contract signer
+        // (§4.7, pre-authorized). `SignatureChecker` recovers ECDSA for EOAs and
+        // calls `isValidSignature` for contract signers (incl. a vault-signer);
+        // EOA-signed quotes still validate identically, so this is non-breaking.
+        bytes32 digest = _hashTypedDataV4(hashQuote(quote));
+        if (!SignatureChecker.isValidSignatureNow(quote.mm, digest, signature)) {
+            revert InvalidSignature(address(0), quote.mm);
+        }
 
         // Premium = ceilDiv(rate · maxIL, 10_000) — round UP (F-#8)
         uint256 premium = Math.ceilDiv(uint256(quote.premiumRateOfMaxIL) * maxIL, _BPS);
