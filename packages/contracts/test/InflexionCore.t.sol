@@ -445,7 +445,9 @@ contract InflexionCoreTest is Test {
         // The price the contract forwarded to computeIL MUST equal the on-chain
         // derivation of the $3,300 round-at-T price — and differ from the entry.
         uint160 expectedSqrtPT = core.oracleDerivedSqrtPriceX96(MARKET_ID, 3300e8);
-        assertEq(ilMath.lastILCallSqrtPT(), uint256(expectedSqrtPT), "settle must use the oracle-derived settlement price");
+        assertEq(
+            ilMath.lastILCallSqrtPT(), uint256(expectedSqrtPT), "settle must use the oracle-derived settlement price"
+        );
         assertTrue(
             expectedSqrtPT != core.oracleDerivedSqrtPriceX96(MARKET_ID, 3000e8),
             "sanity: $3,300 and $3,000 derive to different sqrt prices"
