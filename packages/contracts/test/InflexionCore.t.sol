@@ -22,6 +22,17 @@ import { OracleManager } from "../src/OracleManager.sol";
 ///         architecture without depending on the real Q64.96 formulas.
 ///         Q64.96 sqrt-price inputs use placeholder values — the mock
 ///         ignores them.
+/// @notice Minimal EIP-1271 contract signer — accepts any digest (returns the
+///         magic value). Proves the §4.7 SignatureChecker path (P3.2).
+contract MockContractSigner {
+    function isValidSignature(
+        bytes32,
+        bytes calldata
+    ) external pure returns (bytes4) {
+        return 0x1626ba7e; // IERC1271.isValidSignature.selector
+    }
+}
+
 contract InflexionCoreTest is Test {
     // ─── Players
     // ─────────────────────────────────────────────────────────
@@ -278,6 +289,33 @@ contract InflexionCoreTest is Test {
         vm.prank(lp);
         vm.expectRevert();
         core.createSwap(q, badSig, tokenId, type(uint256).max);
+    }
+
+    /// @notice P3.2 / §4.7: an EIP-1271 contract signer is accepted via
+    ///         SignatureChecker (the signature bytes are validated by the
+    ///         signer contract, not ECDSA-recovered).
+    function test_createSwap_acceptsEIP1271ContractSigner() public {
+        MockContractSigner cs = new MockContractSigner();
+        address csAddr = address(cs);
+        // Fund + collateralise the contract signer in the UnderwriterVault.
+        usdc.mint(csAddr, USDC_BANKROLL);
+        vm.prank(csAddr);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.prank(csAddr);
+        vault.deposit(USDC_BANKROLL);
+
+        uint256 tokenId = _mintLPNFT();
+        ilMath.setMaxIL(100e6);
+        InflexionCore.SignedQuote memory q = _defaultQuote();
+        q.mm = csAddr; // contract signer
+        bytes memory sig = hex"deadbeef"; // arbitrary — the signer contract validates it
+
+        vm.prank(lp);
+        uint256 swapId = core.createSwap(q, sig, tokenId, type(uint256).max);
+        (,, address storedMm,,,, uint128 storedPrem,,,,,,,,) = _readSwap(swapId);
+        assertEq(storedMm, csAddr, "EIP-1271 contract signer accepted");
+        assertEq(storedPrem, 75e6); // ceil(7500 * 100e6 / 10000)
+        assertEq(vault.locked(csAddr), 100e6);
     }
 
     function test_createSwap_rejectsUsedNonce() public {
