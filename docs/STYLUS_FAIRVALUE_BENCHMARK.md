@@ -18,11 +18,11 @@ the normal CDF `Φ`, done with **Abramowitz–Stegun 7.1.26** (`Gaussian.sol`,
 erf abs error ~1.5e-7). Because `fairRate = E_Q[min(IL,MaxIL)] / MaxIL` divides by
 `MaxIL`, the Φ error is **amplified by ~1/MaxIL**:
 
-| width | 1/MaxIL amplification | Solidity (A&S) abs error on fairRate | economic premium error |
-| ----- | --------------------- | ------------------------------------ | ---------------------- |
-| ±10%  | ~70×                  | ~1.1e-5                              | ~$0.01 on $1,280 MaxIL |
-| ±5%   | ~4000×                | ~6.4e-4                             | ~$0.4                  |
-| ±2% (0.05% fee tier) | ~8700×       | ~1.3e-3                             | ~$0.3 (small MaxIL)    |
+| width                | 1/MaxIL amplification | Solidity (A&S) abs error on fairRate | economic premium error |
+| -------------------- | --------------------- | ------------------------------------ | ---------------------- |
+| ±10%                 | ~70×                  | ~1.1e-5                              | ~$0.01 on $1,280 MaxIL |
+| ±5%                  | ~4000×                | ~6.4e-4                              | ~$0.4                  |
+| ±2% (0.05% fee tier) | ~8700×                | ~1.3e-3                              | ~$0.3 (small MaxIL)    |
 
 Economically negligible everywhere, but **not machine-precision** — so the
 "exact closed form" property is only fully realized with a higher-precision `Φ`.
@@ -45,10 +45,10 @@ That higher-precision erf is the crux of this benchmark.
    - Solidity baseline (this repo): exact Φ-sum + A&S erf. (Local Solidity gas:
      ~66k/`fairRate` call — confirm on the fork; refine with a dedicated gas test.)
    - Rust/Stylus: exact Φ-sum + high-precision erf.
-   ILMath precedent (Task 2.12): Stylus ~25.5k cached vs Sol ~4.8k — Stylus was
-   _more_ expensive for that tiny kernel. FairValueOracle is a **much larger
-   kernel** (lnWad/expWad/erf × ~8 terms), so the amortization may flip — **that
-   is the open question this benchmark answers.** Carry the honest number.
+     ILMath precedent (Task 2.12): Stylus ~25.5k cached vs Sol ~4.8k — Stylus was
+     _more_ expensive for that tiny kernel. FairValueOracle is a **much larger
+     kernel** (lnWad/expWad/erf × ~8 terms), so the amortization may flip — **that
+     is the open question this benchmark answers.** Carry the honest number.
 4. **Decide which ships** (the cheaper impl that meets the precision bar) and
    **keep the other as the CI cross-check oracle** (the Stylus≡Solidity≡Python
    discipline). If Solidity ships, either (a) accept the A&S stated tolerance
