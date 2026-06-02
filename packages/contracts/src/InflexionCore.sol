@@ -12,9 +12,13 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IILMath } from "./interfaces/IILMath.sol";
 import { IOracleManager } from "./interfaces/IOracleManager.sol";
+import { IFairValueOracle } from "./interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "./interfaces/IVolOracle.sol";
+import { IConvexityVault } from "./interfaces/IConvexityVault.sol";
 import { UnderwriterVault } from "./UnderwriterVault.sol";
 import { ILVault } from "./ILVault.sol";
 import { TickMath } from "./libraries/TickMath.sol";
+import { CvammPricing } from "./libraries/CvammPricing.sol";
 
 /// @notice Slim local subset of Uniswap v3 NonfungiblePositionManager that
 ///         we read (`positions`) during `createSwap`. v3-periphery's full
@@ -206,6 +210,25 @@ contract InflexionCore is EIP712, Ownable {
     /// @notice Treasury for protocol fees (1% of premium in FULL).
     address public treasury;
 
+    // ─── cvAMM (Path A) wiring — set once post-deploy, then frozen ─────────
+    //
+    // Added via a setter (NOT the constructor) so the existing Path-B deploy /
+    // tests are untouched. Path A is the signature-free pooled rail; settle
+    // infers the vault from `swap.mm == address(convexityVault)` (no SwapRecord
+    // struct change). All load primitives come from `loadParams` (params.json
+    // cvAMM block) — hardcoding is the audit failure.
+    IConvexityVault public convexityVault;
+    IFairValueOracle public fairValueOracle;
+    IVolOracle public volOracle;
+    bool public cvammFrozen;
+
+    /// @notice The cvAMM load-stack params (baseLoad regimes, the two skews,
+    ///         maxLoadBps). Settable by owner from `quant/params.json`.
+    CvammPricing.LoadParams public loadParams;
+
+    /// @notice Per-market opt-in to the always-on Path-A pool.
+    mapping(bytes32 => bool) public cvammEnabled;
+
     // ─── Events
     // ───────────────────────────────────────────────────────────
 
@@ -230,6 +253,10 @@ contract InflexionCore is EIP712, Ownable {
         uint128 premium
     );
     event SwapSettled(uint256 indexed swapId, uint256 realisedIL, uint128 payout, uint256 settlementPrice);
+    event CvammConfigured(address convexityVault, address fairValueOracle, address volOracle);
+    event CvammFrozen();
+    event CvammEnabledSet(bytes32 indexed marketId, bool enabled);
+    event LoadParamsSet();
 
     // ─── Errors
     // ───────────────────────────────────────────────────────────
@@ -258,6 +285,9 @@ contract InflexionCore is EIP712, Ownable {
     error UnsupportedDecimals();
     error OracleSqrtOutOfRange(uint256 sq);
     error MarketPriceConfigImmutable(bytes32 marketId);
+    error CvammNotConfigured();
+    error CvammAlreadyFrozen();
+    error MarketNotCvammEnabled(bytes32 marketId);
 
     // ─── Constructor
     // ──────────────────────────────────────────────────────
@@ -335,6 +365,52 @@ contract InflexionCore is EIP712, Ownable {
         if (_treasury == address(0)) revert ZeroAddress();
         treasury = _treasury;
         emit TreasurySet(_treasury);
+    }
+
+    // ─── cvAMM (Path A) admin
+    // ─────────────────────────────────────────────
+
+    /// @notice Wire the cvAMM (Path A) contracts. Callable until `freezeCvamm`.
+    function setCvamm(
+        IConvexityVault _convexityVault,
+        IFairValueOracle _fairValueOracle,
+        IVolOracle _volOracle
+    ) external onlyOwner {
+        if (cvammFrozen) revert CvammAlreadyFrozen();
+        if (
+            address(_convexityVault) == address(0) || address(_fairValueOracle) == address(0)
+                || address(_volOracle) == address(0)
+        ) {
+            revert ZeroAddress();
+        }
+        convexityVault = _convexityVault;
+        fairValueOracle = _fairValueOracle;
+        volOracle = _volOracle;
+        emit CvammConfigured(address(_convexityVault), address(_fairValueOracle), address(_volOracle));
+    }
+
+    /// @notice Freeze the cvAMM wiring (one-way), like `UnderwriterVault.freezeCore`.
+    function freezeCvamm() external onlyOwner {
+        if (address(convexityVault) == address(0)) revert CvammNotConfigured();
+        cvammFrozen = true;
+        emit CvammFrozen();
+    }
+
+    /// @notice Set the cvAMM load-stack params (from `quant/params.json`).
+    function setLoadParams(
+        CvammPricing.LoadParams calldata p
+    ) external onlyOwner {
+        loadParams = p;
+        emit LoadParamsSet();
+    }
+
+    /// @notice Opt a market into the always-on Path-A pool.
+    function setCvammEnabled(
+        bytes32 marketId,
+        bool enabled
+    ) external onlyOwner {
+        cvammEnabled[marketId] = enabled;
+        emit CvammEnabledSet(marketId, enabled);
     }
 
     // ─── Nonces (Task 5.2 + 5.3, spec §4.3.2 / F-#7)
@@ -620,6 +696,125 @@ contract InflexionCore is EIP712, Ownable {
         emit SwapCreated(swapId, msg.sender, quote.mm, tokenId, uint128(V0), uint128(maxIL), uint128(premium));
     }
 
+    // ─── createSwapPathA — cvAMM, signature-free (P3.3, spec §4.0/§5.2) ────
+
+    /// @notice Open a swap against the always-on cvAMM pool (Path A). No signed
+    ///         quote, no keeper, no validity clock — the contract reads the
+    ///         on-chain published `FairPremium` and the pool's inventory, applies
+    ///         the I10-clamped load stack, and locks pooled collateral.
+    /// @param  marketId    Selects the duration (`keccak(token0,token1,fee,dur)`).
+    /// @param  tokenId     LP's Uniswap v3 position NFT.
+    /// @param  maxPremium  LP slippage guard (USDC).
+    /// @dev    Mirrors `createSwap`'s on-chain geometry/price discipline
+    ///         (ownerOf, positions, Pa/Pb via TickMath, oracle-pinned P0,
+    ///         in-range gate, computeMaxIL, entry snapshot, V0, CEI). Pricing is
+    ///         `premium = FairPremium·(1 + clamp(baseLoad+util_skew+dispersion,
+    ///         maxLoad))` (I10 by construction), additionally capped at MaxIL
+    ///         (never charge more than the max possible payout). On Path A
+    ///         `mm = address(convexityVault)`, which `settle` uses to dispatch.
+    function createSwapPathA(
+        bytes32 marketId,
+        uint256 tokenId,
+        uint256 maxPremium
+    ) external returns (uint256 swapId) {
+        if (address(convexityVault) == address(0)) revert CvammNotConfigured();
+
+        // ───── PHASE 1 — READ
+        MarketConfig memory cfg = markets[marketId];
+        if (!cfg.active) revert MarketNotRegistered(marketId);
+        if (!cvammEnabled[marketId]) revert MarketNotCvammEnabled(marketId);
+
+        address actualOwner = IERC721(nonfungiblePositionManager).ownerOf(tokenId);
+        if (actualOwner != msg.sender) revert NotPositionOwner(actualOwner, msg.sender);
+
+        (,, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity,,,,) =
+            INonfungiblePositionManagerView(nonfungiblePositionManager).positions(tokenId);
+        bytes32 derivedMarketId = keccak256(abi.encodePacked(token0, token1, fee, cfg.durationSeconds));
+        if (derivedMarketId != marketId) revert MarketMismatch(marketId, derivedMarketId);
+
+        uint160 sqrtPaX96 = TickMath.getSqrtRatioAtTick(tickLower);
+        uint160 sqrtPbX96 = TickMath.getSqrtRatioAtTick(tickUpper);
+        uint160 sqrtP0X96 = _oracleSqrtPriceX96(cfg, oracle.getPrice(cfg.oracleToken));
+        if (sqrtP0X96 < sqrtPaX96 || sqrtP0X96 > sqrtPbX96) {
+            revert PositionOutOfRange(tickLower, 0, tickUpper);
+        }
+
+        uint256 maxIL = ilMath.computeMaxIL(uint256(sqrtP0X96), uint256(sqrtPaX96), uint256(sqrtPbX96), liquidity);
+        (uint128 a0, uint128 a1) = _entryAmounts(sqrtP0X96, sqrtPaX96, sqrtPbX96, liquidity);
+        uint256 V0 = _amount0InToken1(a0, sqrtP0X96) + a1;
+
+        // Path-A pricing: on-chain FairPremium + I10-clamped load stack.
+        uint256 premium = _pathAPremium(cfg, sqrtP0X96, sqrtPaX96, sqrtPbX96, maxIL);
+
+        // ───── PHASE 2 — CHECKS
+        if (V0 < MIN_POSITION_V0) revert DustPosition(uint128(V0));
+        if (premium < MIN_PREMIUM) revert DustPremium(uint128(premium));
+        if (premium > maxPremium) revert PremiumExceedsSlippage(uint128(premium), maxPremium);
+
+        // ───── PHASE 3 — EFFECTS
+        convexityVault.lockCollateral(marketId, maxIL); // checks free + senior protection
+        swapId = nextSwapId++;
+        swaps[swapId] = SwapRecord({
+            tokenId: tokenId,
+            lp: msg.sender,
+            mm: address(convexityVault), // Path A — settle dispatches on this
+            V0: uint128(V0),
+            maxIL: uint128(maxIL),
+            collateral: uint128(maxIL), // FULL
+            premium: uint128(premium),
+            model: uint8(CollateralModel.FULL),
+            settlement: uint8(SettlementStyle.EUROPEAN),
+            createdAt: uint64(block.timestamp),
+            expiry: uint64(block.timestamp + cfg.durationSeconds),
+            amount0Entry: a0,
+            amount1Entry: a1,
+            liquidity: liquidity, // I6
+            status: Status.ACTIVE
+        });
+
+        // ───── PHASE 4 — INTERACTIONS
+        usdc.safeTransferFrom(msg.sender, address(this), premium);
+        IERC721(nonfungiblePositionManager).safeTransferFrom(msg.sender, address(ilVault), tokenId, abi.encode(swapId));
+        // Premium split: pool (accrues to depositors) + 1% treasury.
+        uint256 poolCut = (premium * FULL_MM_BPS) / _BPS;
+        uint256 treasuryCut = premium - poolCut;
+        if (treasuryCut > 0) usdc.safeTransfer(treasury, treasuryCut);
+        if (poolCut > 0) {
+            usdc.forceApprove(address(convexityVault), poolCut);
+            convexityVault.accruePremium(poolCut);
+        }
+
+        emit SwapCreated(
+            swapId, msg.sender, address(convexityVault), tokenId, uint128(V0), uint128(maxIL), uint128(premium)
+        );
+    }
+
+    /// @dev Path-A premium: FairPremium (on-chain, σ_ref-driven) × (1 + I10 load).
+    ///      Pokes the VolOracle first (refresh σ_ref; no-op if too soon). Caps the
+    ///      premium at MaxIL — the max possible payout, an economic overcharge guard.
+    function _pathAPremium(
+        MarketConfig memory cfg,
+        uint160 sqrtP0X96,
+        uint160 sqrtPaX96,
+        uint160 sqrtPbX96,
+        uint256 maxIL
+    ) internal returns (uint256 premium) {
+        // a = Pa/P0 = (sqrtPa/sqrtP0)²;  b = Pb/P0 = (sqrtPb/sqrtP0)²  (WAD)
+        uint256 rA = Math.mulDiv(uint256(sqrtPaX96), 1e18, uint256(sqrtP0X96));
+        uint256 rB = Math.mulDiv(uint256(sqrtPbX96), 1e18, uint256(sqrtP0X96));
+        uint256 aWad = (rA * rA) / 1e18;
+        uint256 bWad = (rB * rB) / 1e18;
+
+        volOracle.poke(cfg.oracleToken); // refresh σ_ref (permissionless, no-op if too soon)
+        (uint256 fairPrem,, uint256 sigmaRef) =
+            fairValueOracle.fairPremium(cfg.oracleToken, aWad, bWad, cfg.durationSeconds, maxIL);
+
+        (,,, uint256 util, uint256 conc) = convexityVault.inventory();
+        uint256 load = CvammPricing.totalLoadWad(sigmaRef, util, conc, loadParams);
+        premium = CvammPricing.premiumFromLoad(fairPrem, load);
+        if (premium > maxIL) premium = maxIL; // never charge more than the max payout
+    }
+
     // ─── settle (Task 5.8, spec §5.4)
     // ────────────────────────────────────
 
@@ -674,8 +869,15 @@ contract InflexionCore is EIP712, Ownable {
         // 4. Cap (invariants I1 + I2): payout = min(IL, maxIL).
         uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
 
-        // 5. Vault settles: LP receives payout, MM keeps maxIL - payout.
-        underwriterVault.releaseAndDistribute(s.mm, s.lp, payout, s.collateral);
+        // 5. Vault settles: LP receives payout, the counterparty keeps
+        //    collateral - payout. Dispatch on the path: Path A's counterparty is
+        //    the pooled ConvexityVault (mm == convexityVault), Path B's is the MM.
+        //    The settle MATH above (steps 1-4, I1/I2/I6) is identical either way.
+        if (address(convexityVault) != address(0) && s.mm == address(convexityVault)) {
+            convexityVault.releaseAndDistribute(_marketIdForSwap(s), s.lp, payout, s.collateral);
+        } else {
+            underwriterVault.releaseAndDistribute(s.mm, s.lp, payout, s.collateral);
+        }
 
         // 6. NFT returns to LP.
         ilVault.returnNFT(swapId, s.lp);
@@ -714,6 +916,16 @@ contract InflexionCore is EIP712, Ownable {
         uint32 duration = uint32(s.expiry - s.createdAt);
         bytes32 marketId = keccak256(abi.encodePacked(token0, token1, fee, duration));
         return markets[marketId];
+    }
+
+    /// @dev The marketId for a swap (same derivation as `_marketForSwap`), used
+    ///      by `settle` to release Path-A collateral against the ConvexityVault.
+    function _marketIdForSwap(
+        SwapRecord storage s
+    ) internal view returns (bytes32) {
+        (,, address token0, address token1, uint24 fee,,,,,,,) =
+            INonfungiblePositionManagerView(nonfungiblePositionManager).positions(s.tokenId);
+        return keccak256(abi.encodePacked(token0, token1, fee, uint32(s.expiry - s.createdAt)));
     }
 
     /// @dev Convert `amount0` (token0 wei) to token1-wei equivalent at the
