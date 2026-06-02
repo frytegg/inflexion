@@ -126,7 +126,7 @@ contract InflexionCore is EIP712, Ownable {
     struct SignedQuote {
         address mm;
         bytes32 marketId; // keccak(token0, token1, fee, durationSeconds)
-        uint16 premiumRateOfMaxIL; // bps of MaxIL
+        uint16 loadBps; // P3.4: load (bps) over the on-chain FairPremium; I10-capped at loadParams.maxLoadBps
         uint16 minMaxILRatioBps; // ratio band lower bound
         uint16 maxMaxILRatioBps; // ratio band upper bound
         uint128 quotePrice; // oracle price the MM saw at signing
@@ -143,7 +143,7 @@ contract InflexionCore is EIP712, Ownable {
     ///      the recovered field). Computed via `keccak256` of the type
     ///      string with all fields in struct order.
     bytes32 public constant SIGNED_QUOTE_TYPEHASH = keccak256(
-        "SignedQuote(address mm,bytes32 marketId,uint16 premiumRateOfMaxIL,uint16 minMaxILRatioBps,uint16 maxMaxILRatioBps,uint128 quotePrice,uint16 priceBandBps,uint8 model,uint16 partialRatioBps,uint128 maxNotionalV0,uint64 validUntil,bytes32 quoteId,uint256 nonce)"
+        "SignedQuote(address mm,bytes32 marketId,uint16 loadBps,uint16 minMaxILRatioBps,uint16 maxMaxILRatioBps,uint128 quotePrice,uint16 priceBandBps,uint8 model,uint16 partialRatioBps,uint128 maxNotionalV0,uint64 validUntil,bytes32 quoteId,uint256 nonce)"
     );
 
     // ─── Market registry
@@ -289,6 +289,8 @@ contract InflexionCore is EIP712, Ownable {
     error CvammNotConfigured();
     error CvammAlreadyFrozen();
     error MarketNotCvammEnabled(bytes32 marketId);
+    /// @dev I10 on Path B: a signed quote's load cannot exceed the protocol ceiling.
+    error LoadExceedsMax(uint16 loadBps, uint256 maxLoadBps);
 
     // ─── Constructor
     // ──────────────────────────────────────────────────────
@@ -474,7 +476,7 @@ contract InflexionCore is EIP712, Ownable {
                 SIGNED_QUOTE_TYPEHASH,
                 q.mm,
                 q.marketId,
-                q.premiumRateOfMaxIL,
+                q.loadBps,
                 q.minMaxILRatioBps,
                 q.maxMaxILRatioBps,
                 q.quotePrice,
@@ -614,8 +616,19 @@ contract InflexionCore is EIP712, Ownable {
             revert InvalidSignature(address(0), quote.mm);
         }
 
-        // Premium = ceilDiv(rate · maxIL, 10_000) — round UP (F-#8)
-        uint256 premium = Math.ceilDiv(uint256(quote.premiumRateOfMaxIL) * maxIL, _BPS);
+        // Path-B premium (P3.4, spec v4.0): derive from the SAME on-chain
+        // FairPremium as Path A, then add the MM's signed load. The quote no
+        // longer sets the premium directly — it can only set a load over the
+        // protocol-published fair value, I10-capped at `loadParams.maxLoadBps`
+        // (Path-B analogue of Path A's clamp; both ⇒ premium ≤ FairPremium·(1+maxLoad)).
+        if (address(fairValueOracle) == address(0)) revert CvammNotConfigured();
+        if (uint256(quote.loadBps) > loadParams.maxLoadBps) {
+            revert LoadExceedsMax(quote.loadBps, loadParams.maxLoadBps);
+        }
+        (uint256 fairPrem,) = _fairPremium(cfg, sqrtP0X96, sqrtPaX96, sqrtPbX96, maxIL);
+        // premium = ceil(FairPremium · (1 + loadBps)) — round UP (F-#8)
+        uint256 premium = Math.ceilDiv(fairPrem * (_BPS + uint256(quote.loadBps)), _BPS);
+        if (premium > maxIL) premium = maxIL; // never charge more than the max payout
 
         // ───── PHASE 2 — CHECKS
         // ──────────────────────────────────────────
@@ -795,16 +808,17 @@ contract InflexionCore is EIP712, Ownable {
         );
     }
 
-    /// @dev Path-A premium: FairPremium (on-chain, σ_ref-driven) × (1 + I10 load).
-    ///      Pokes the VolOracle first (refresh σ_ref; no-op if too soon). Caps the
-    ///      premium at MaxIL — the max possible payout, an economic overcharge guard.
-    function _pathAPremium(
+    /// @dev On-chain FairPremium shared by both paths (spec v4.0): pokes the
+    ///      VolOracle (refresh σ_ref, no-op if too soon), converts the position
+    ///      geometry to a = Pa/P0 / b = Pb/P0, and reads the published FairPremium
+    ///      = fairRate·MaxIL. Returns σ_ref too so Path A can drive its load stack.
+    function _fairPremium(
         MarketConfig memory cfg,
         uint160 sqrtP0X96,
         uint160 sqrtPaX96,
         uint160 sqrtPbX96,
         uint256 maxIL
-    ) internal returns (uint256 premium) {
+    ) internal returns (uint256 fairPrem, uint256 sigmaRef) {
         // a = Pa/P0 = (sqrtPa/sqrtP0)²;  b = Pb/P0 = (sqrtPb/sqrtP0)²  (WAD)
         uint256 rA = Math.mulDiv(uint256(sqrtPaX96), 1e18, uint256(sqrtP0X96));
         uint256 rB = Math.mulDiv(uint256(sqrtPbX96), 1e18, uint256(sqrtP0X96));
@@ -812,8 +826,20 @@ contract InflexionCore is EIP712, Ownable {
         uint256 bWad = (rB * rB) / 1e18;
 
         volOracle.poke(cfg.oracleToken); // refresh σ_ref (permissionless, no-op if too soon)
-        (uint256 fairPrem,, uint256 sigmaRef) =
-            fairValueOracle.fairPremium(cfg.oracleToken, aWad, bWad, cfg.durationSeconds, maxIL);
+        (fairPrem,, sigmaRef) = fairValueOracle.fairPremium(cfg.oracleToken, aWad, bWad, cfg.durationSeconds, maxIL);
+    }
+
+    /// @dev Path-A premium: FairPremium (on-chain, σ_ref-driven) × (1 + I10 load).
+    ///      Caps the premium at MaxIL — the max possible payout, an economic
+    ///      overcharge guard.
+    function _pathAPremium(
+        MarketConfig memory cfg,
+        uint160 sqrtP0X96,
+        uint160 sqrtPaX96,
+        uint160 sqrtPbX96,
+        uint256 maxIL
+    ) internal returns (uint256 premium) {
+        (uint256 fairPrem, uint256 sigmaRef) = _fairPremium(cfg, sqrtP0X96, sqrtPaX96, sqrtPbX96, maxIL);
 
         (,,, uint256 util, uint256 conc) = convexityVault.inventory();
         uint256 load = CvammPricing.totalLoadWad(sigmaRef, util, conc, loadParams);

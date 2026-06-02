@@ -5,47 +5,7 @@ import { Test } from "forge-std/Test.sol";
 
 import { FairValueOracle } from "../src/FairValueOracle.sol";
 import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
-
-/// @notice Minimal IVolOracle stub — FairValueOracle only calls sigmaRef.
-contract MockVolOracle is IVolOracle {
-    uint256 public sigma;
-
-    constructor(
-        uint256 _sigma
-    ) {
-        sigma = _sigma;
-    }
-
-    function setSigma(
-        uint256 s
-    ) external {
-        sigma = s;
-    }
-
-    function sigmaRef(
-        address
-    ) external view returns (uint256) {
-        return sigma;
-    }
-
-    function poke(
-        address
-    ) external view returns (uint256) {
-        return sigma;
-    }
-
-    function sigmaComponents(
-        address
-    ) external view returns (uint256, uint256, uint256, uint8) {
-        return (sigma, sigma, sigma, 0);
-    }
-
-    function isInitialized(
-        address
-    ) external pure returns (bool) {
-        return true;
-    }
-}
+import { MockVolOracle } from "./mocks/MockVolOracle.sol";
 
 contract FairValueOracleTest is Test {
     FairValueOracle internal fvo;

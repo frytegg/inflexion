@@ -8,11 +8,19 @@ import { InflexionCore } from "../src/InflexionCore.sol";
 import { UnderwriterVault } from "../src/UnderwriterVault.sol";
 import { ILVault } from "../src/ILVault.sol";
 import { OracleManager } from "../src/OracleManager.sol";
+import { ConvexityVault } from "../src/ConvexityVault.sol";
+import { CvammPricing } from "../src/libraries/CvammPricing.sol";
+import { IConvexityVault } from "../src/interfaces/IConvexityVault.sol";
+import { IFairValueOracle } from "../src/interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
 
 import { MockERC20 } from "./mocks/MockERC20.sol";
 import { MockAggregator } from "./mocks/MockAggregator.sol";
 import { MockNonfungiblePositionManager } from "./mocks/MockNonfungiblePositionManager.sol";
 import { MockILMath } from "./mocks/MockILMath.sol";
+import { MockVolOracle } from "./mocks/MockVolOracle.sol";
+import { MockFairValueOracle } from "./mocks/MockFairValueOracle.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title  InflexionCore invariants (Task 5.10) — I1 / I2 / I6 / I9 property tests
 ///         + stateful Handler for I5.
@@ -52,6 +60,12 @@ contract InflexionCoreInvariantsTest is Test {
     MockAggregator internal ethFeed;
     MockNonfungiblePositionManager internal pm;
     MockILMath internal ilMath;
+    // cvAMM wiring (P3.4): Path-B premium derives from the on-chain FairPremium.
+    // Mock FairPremium = 0.75·MaxIL + quote loadBps = 0 ⇒ premium = 0.75·MaxIL,
+    // identical to the pre-P3.4 rate, so the I1/I2/I6/I9 properties are unaffected.
+    ConvexityVault internal cVault;
+    MockVolOracle internal mvol;
+    MockFairValueOracle internal mfvo;
 
     // Deployed in setUp (the oracle-pinning fix reads decimals() on-chain at
     // registerMarket, so the market tokens must be real ERC-20 contracts).
@@ -122,6 +136,15 @@ contract InflexionCoreInvariantsTest is Test {
         vm.prank(owner);
         core.registerMarket(cfg);
 
+        // cvAMM wiring — Path B now derives its premium from the FairPremium (P3.4).
+        mvol = new MockVolOracle(6e17);
+        mfvo = new MockFairValueOracle();
+        cVault = new ConvexityVault(IERC20(address(usdc)), 7 days, 2000);
+        vm.prank(owner);
+        core.setCvamm(IConvexityVault(address(cVault)), IFairValueOracle(address(mfvo)), IVolOracle(address(mvol)));
+        vm.prank(owner);
+        core.setLoadParams(_launchLoadParams());
+
         usdc.mint(mmWallet.addr, USDC_BANKROLL);
         vm.prank(mmWallet.addr);
         usdc.approve(address(vault), type(uint256).max);
@@ -152,13 +175,32 @@ contract InflexionCoreInvariantsTest is Test {
         sig = abi.encodePacked(r, s, v);
     }
 
+    /// @dev Launch cvAMM load-stack params (mirror of quant params.json cvAMM block).
+    function _launchLoadParams() internal pure returns (CvammPricing.LoadParams memory p) {
+        p = CvammPricing.LoadParams({
+            baseLoadCalmBps: 2000,
+            baseLoadNormalBps: 3000,
+            baseLoadStressedBps: 5000,
+            regimeCalmBelowWad: 6e17,
+            regimeStressedAtWad: 1025e15,
+            utilKneeWad: 45e16,
+            utilSlopeWad: 6e17,
+            utilPowerWad: 2e18,
+            utilCapWad: 6e17,
+            dispSlopeWad: 5e17,
+            dispPowerWad: 15e17,
+            dispCapWad: 5e17,
+            maxLoadBps: 16_000
+        });
+    }
+
     function _defaultQuote(
         uint256 nonce
     ) internal view returns (InflexionCore.SignedQuote memory q) {
         q = InflexionCore.SignedQuote({
             mm: mmWallet.addr,
             marketId: MARKET_ID,
-            premiumRateOfMaxIL: 7500,
+            loadBps: 0, // P3.4: premium == FairPremium (0.75·MaxIL via mock) — same as pre-P3.4 rate
             minMaxILRatioBps: 0,
             maxMaxILRatioBps: 10_000,
             quotePrice: 3000e8,
