@@ -11,6 +11,13 @@ import { UnderwriterVault } from "../src/UnderwriterVault.sol";
 import { ILVault } from "../src/ILVault.sol";
 import { OracleManager } from "../src/OracleManager.sol";
 import { ILMath } from "../src/ILMath.sol";
+import { ConvexityVault } from "../src/ConvexityVault.sol";
+import { CvammPricing } from "../src/libraries/CvammPricing.sol";
+import { IConvexityVault } from "../src/interfaces/IConvexityVault.sol";
+import { IFairValueOracle } from "../src/interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
+import { MockVolOracle } from "./mocks/MockVolOracle.sol";
+import { MockFairValueOracle } from "./mocks/MockFairValueOracle.sol";
 
 /// @title  Task 5.11 — InflexionCore end-to-end fork integration test
 /// @notice Real Arbitrum One: WETH, USDC, Uniswap v3 NPM + pool, ETH/USD
@@ -113,6 +120,34 @@ contract InflexionCoreForkTest is Test {
         });
         core.registerMarket(cfg);
 
+        // cvAMM wiring (P3.4): Path B derives its premium from the on-chain
+        // FairPremium. The REAL FairValueOracle over this short 1-hour, ±2%
+        // range with floor-σ yields a sub-$1 fair value (the exact Φ-sum is
+        // unit-tested in FairValueOracle.t.sol); using a settable mock here
+        // (FairPremium = 0.75·MaxIL) keeps the real NPM/Chainlink/ILMath
+        // createSwap→roll→settle lifecycle — this test's actual subject — intact.
+        MockVolOracle mvol = new MockVolOracle(6e17);
+        MockFairValueOracle mfvo = new MockFairValueOracle();
+        ConvexityVault cVault = new ConvexityVault(IERC20(USDC), 7 days, 2000);
+        core.setCvamm(IConvexityVault(address(cVault)), IFairValueOracle(address(mfvo)), IVolOracle(address(mvol)));
+        core.setLoadParams(
+            CvammPricing.LoadParams({
+                baseLoadCalmBps: 2000,
+                baseLoadNormalBps: 3000,
+                baseLoadStressedBps: 5000,
+                regimeCalmBelowWad: 6e17,
+                regimeStressedAtWad: 1025e15,
+                utilKneeWad: 45e16,
+                utilSlopeWad: 6e17,
+                utilPowerWad: 2e18,
+                utilCapWad: 6e17,
+                dispSlopeWad: 5e17,
+                dispPowerWad: 15e17,
+                dispCapWad: 5e17,
+                maxLoadBps: 16_000
+            })
+        );
+
         // Fund LP.
         deal(WETH, lp, 10 ether);
         deal(USDC, lp, 100_000e6);
@@ -186,7 +221,7 @@ contract InflexionCoreForkTest is Test {
         InflexionCore.SignedQuote memory quote = InflexionCore.SignedQuote({
             mm: mm.addr,
             marketId: marketId,
-            premiumRateOfMaxIL: 500, // 5% of MaxIL — safely above $1 floor
+            loadBps: 500, // P3.4: +5% load over the on-chain FairPremium
             minMaxILRatioBps: 1, // wide ratio band — any MaxIL/V0 ok
             maxMaxILRatioBps: 10_000,
             quotePrice: livePrice,
