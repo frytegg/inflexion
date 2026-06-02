@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from inflexion_quant.calibrate import (
+from inflexion_quant.il import compute_max_il, compute_payout
+from inflexion_quant.legacy.calibrate import (
     CalibrationResult,
     _ScenarioCache,
     _vectorised_payouts_and_maxils,
@@ -21,13 +22,12 @@ from inflexion_quant.calibrate import (
     heuristic_first_loss_fraction,
     heuristic_withdrawal_delay_seconds,
 )
-from inflexion_quant.il import compute_max_il, compute_payout
-from inflexion_quant.portfolio import WaterfallConfig, aggregate, waterfall
-from inflexion_quant.positions import PositionMix, sample_positions
-from inflexion_quant.stress import (
+from inflexion_quant.legacy.portfolio import WaterfallConfig, aggregate, waterfall
+from inflexion_quant.legacy.stress import (
     CorrelatedCrashConfig,
     correlated_crash_terminal_fn,
 )
+from inflexion_quant.positions import PositionMix, sample_positions
 
 
 # ─── CORRECTNESS: vectorised math must match the loop-based il.py ───────────

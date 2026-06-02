@@ -18,7 +18,7 @@ so deck and ``params.json`` are always in sync.
 
 CLI::
 
-    uv run python -m inflexion_quant.deck_charts \\
+    uv run python -m inflexion_quant.legacy.deck_charts \\
         [--output-dir apps/docs/static/quant] [--n-runs 1000] [--rng-seed 20260527]
 """
 
@@ -35,12 +35,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from inflexion_quant.calibrate import (
+from inflexion_quant.legacy.calibrate import (
     build_scenario_cache,
     calibrate_all,
     fund_pnl_from_cache,
 )
-from inflexion_quant.stress import (
+from inflexion_quant.legacy.stress import (
     CorrelatedCrashConfig,
     correlated_crash_terminal_fn,
     ruin_probability,
@@ -355,7 +355,7 @@ def _main() -> None:
     )
     parser.add_argument(
         "--output-dir", type=Path,
-        default=Path(__file__).resolve().parents[3] / "apps" / "docs" / "static" / "quant",
+        default=Path(__file__).resolve().parents[4] / "apps" / "docs" / "static" / "quant",
     )
     parser.add_argument("--n-runs", type=int, default=1000)
     parser.add_argument("--n-positions", type=int, default=200)
