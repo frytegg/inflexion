@@ -154,6 +154,15 @@ contract OracleManager is IOracleManager, Ownable {
         return uint256(answer);
     }
 
+    /// @inheritdoc IOracleManager
+    function feedDecimals(
+        address token
+    ) external view returns (uint8) {
+        AggregatorV2V3Interface f = priceFeed[token];
+        if (address(f) == address(0)) revert PriceFeedUnset(token);
+        return f.decimals();
+    }
+
     // ─── absBps pure helper (Task 3.5)
     // ───────────────────────────────────
 
@@ -235,16 +244,15 @@ contract OracleManager is IOracleManager, Ownable {
         AggregatorV2V3Interface f = priceFeed[token];
         if (address(f) == address(0)) revert PriceFeedUnset(token);
 
-        // 2. Round at expiry T (the pinned round)
+        // 2. Round at expiry T (the pinned round). `hintRoundId` itself MUST
+        //    exist — it is the round-at-T (getRoundData reverts if unset).
         (, int256 px,, uint256 updatedAt,) = f.getRoundData(hintRoundId);
-        (, int256 pxNext,, uint256 nextUpdatedAt,) = f.getRoundData(hintRoundId + 1);
-
-        // Caller-supplied hintRoundId MUST satisfy: updatedAt ≤ T < nextUpdatedAt
-        if (!(updatedAt <= uint256(expiry) && uint256(expiry) < nextUpdatedAt)) {
-            revert WrongRound(hintRoundId, updatedAt, nextUpdatedAt, expiry);
-        }
         if (px <= 0) revert PriceNotPositive(px);
-        if (pxNext <= 0) revert PriceNotPositive(pxNext);
+
+        // Lower bound of the bracket: the pinned round must be at/before T.
+        if (updatedAt > uint256(expiry)) {
+            revert WrongRound(hintRoundId, updatedAt, 0, expiry);
+        }
 
         // 2b. Staleness — the pinned round's updatedAt must not be too old
         uint256 maxAllowed = maxStaleness[token];
@@ -255,33 +263,47 @@ contract OracleManager is IOracleManager, Ownable {
             }
         }
 
-        // 3. Lone-spike sanity check — outlier vs BOTH neighbours
-        //    is a Chainlink glitch (real fast moves persist across rounds).
-        //    Backstop: past expiry + LIVENESS_WINDOW, accept px unconditionally
-        //    so funds can never lock indefinitely (invariant I8).
         bool backstop = block.timestamp >= uint256(expiry) + LIVENESS_WINDOW;
 
-        // hintRoundId − 1 may not exist for the very first round of a feed.
-        // We tolerate a missing prev round by treating it as "not lone-spike".
-        // For Chainlink feeds in production this never happens (every feed
-        // has a long history); we still guard against the degenerate case.
-        if (hintRoundId == 0) {
-            // Cannot compute prev neighbour — accept the round (with backstop
-            // tracking still emitted if applicable).
-        } else {
-            (, int256 pxPrev,,,) = f.getRoundData(hintRoundId - 1);
-            if (pxPrev > 0) {
-                uint256 prevBps = absBps(px, pxPrev);
-                uint256 nextBps = absBps(px, pxNext);
-                if (prevBps >= LONE_SPIKE_BPS && nextBps >= LONE_SPIKE_BPS) {
-                    if (!backstop) {
-                        emit LoneSpikeDeferred(token, expiry, hintRoundId, uint256(px), prevBps, nextBps);
-                        revert LoneSpikeDefer(hintRoundId, prevBps, nextBps);
+        // 3. Upper bound + lone-spike use the NEIGHBOUR rounds, read TOLERANTLY.
+        //    Across a Chainlink phaseId boundary (aggregator upgrade) the real
+        //    next/prev round is NOT hintRoundId±1 — the low-64 counter resets —
+        //    so a hard getRoundData(hint±1) reverts. That would permanently LOCK
+        //    any swap whose expiry brackets the boundary. Instead, when a
+        //    neighbour is unqueryable we fall back to the liveness backstop (I8):
+        //    accept the pinned round once past the window, else defer (retryable).
+        //    This never lets a settler pick a price — the pinned round is still
+        //    bracketed below by `updatedAt ≤ expiry`, and round-at-T is unique.
+        (bool haveNext, int256 pxNext, uint256 nextUpdatedAt) = _tryRound(f, hintRoundId + 1);
+
+        if (haveNext && pxNext > 0) {
+            // Upper bound: enforce the unique bracket  updatedAt[hint] ≤ T < nextUpdatedAt.
+            if (!(uint256(expiry) < nextUpdatedAt)) {
+                revert WrongRound(hintRoundId, updatedAt, nextUpdatedAt, expiry);
+            }
+            // Lone-spike sanity — outlier vs BOTH neighbours is a Chainlink glitch
+            // (real fast moves persist across rounds). Prev read tolerantly too.
+            if (hintRoundId != 0) {
+                (bool havePrev, int256 pxPrev,) = _tryRound(f, hintRoundId - 1);
+                if (havePrev && pxPrev > 0) {
+                    uint256 prevBps = absBps(px, pxPrev);
+                    uint256 nextBps = absBps(px, pxNext);
+                    if (prevBps >= LONE_SPIKE_BPS && nextBps >= LONE_SPIKE_BPS) {
+                        if (!backstop) {
+                            emit LoneSpikeDeferred(token, expiry, hintRoundId, uint256(px), prevBps, nextBps);
+                            revert LoneSpikeDefer(hintRoundId, prevBps, nextBps);
+                        }
+                        // Backstop fired — accept anyway, emit so monitoring sees it.
+                        emit LivenessBackstopTriggered(token, expiry, hintRoundId, uint256(px));
                     }
-                    // Backstop fired — accept anyway, emit so monitoring sees it.
-                    emit LivenessBackstopTriggered(token, expiry, hintRoundId, uint256(px));
                 }
             }
+        } else {
+            // Next round unqueryable (phase boundary / none yet): the upper bound
+            // cannot be confirmed, so accept the pinned round ONLY under the
+            // backstop — otherwise defer (retryable). No permanent lock (I8).
+            if (!backstop) revert WrongRound(hintRoundId, updatedAt, 0, expiry);
+            emit LivenessBackstopTriggered(token, expiry, hintRoundId, uint256(px));
         }
 
         // 4. Uniswap TWAP advisory — currently a no-op (see contract header).
@@ -290,5 +312,21 @@ contract OracleManager is IOracleManager, Ownable {
         twapAdvisory = false;
 
         return (uint256(px), twapAdvisory);
+    }
+
+    /// @dev Read a Chainlink round TOLERANTLY: returns `ok = false` (instead of
+    ///      reverting) when the round is unset or unqueryable — e.g. across a
+    ///      phaseId boundary where `roundId ± 1` is not the real neighbour. Lets
+    ///      `getSettlementPrice` degrade a missing neighbour to the liveness
+    ///      backstop rather than a permanent fund-lock.
+    function _tryRound(
+        AggregatorV2V3Interface f,
+        uint80 roundId
+    ) internal view returns (bool ok, int256 answer, uint256 updatedAt) {
+        try f.getRoundData(roundId) returns (uint80, int256 a, uint256, uint256 u, uint80) {
+            return (u != 0, a, u);
+        } catch {
+            return (false, 0, 0);
+        }
     }
 }

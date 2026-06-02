@@ -57,6 +57,14 @@ interface IOracleManager {
         address token
     ) external view returns (uint256 price);
 
+    /// @notice Decimals of `token`'s registered Chainlink price feed.
+    /// @dev    Lets consumers (InflexionCore.registerMarket) validate the feed
+    ///         scale ON-CHAIN instead of trusting owner-supplied decimals.
+    ///         Reverts if no feed is set for `token`.
+    function feedDecimals(
+        address token
+    ) external view returns (uint8);
+
     /// @notice Settlement price for `token` pinned to expiry `T` per spec §6.1.
     /// @dev    Caller supplies `hintRoundId` — the Chainlink round whose
     ///         `updatedAt ≤ T < nextUpdatedAt`. Off-chain matchmaker /
