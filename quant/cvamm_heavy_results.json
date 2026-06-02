@@ -1,9 +1,5 @@
 {
-  "base_load_by_regime": [
-    0.2,
-    0.3,
-    0.5
-  ],
+  "base_load_by_regime": [0.2, 0.3, 0.5],
   "disclosure": {
     "disciplined_u040": {
       "cagr_median": 1.2245294247790215,
@@ -49,7 +45,7 @@
     "h60": {
       "loss_1in100": 0.09586678599783437,
       "worst_month": 0.12264550577557451,
-      "p_dd_gt50": 5e-05
+      "p_dd_gt50": 5e-5
     },
     "h75": {
       "loss_1in100": 0.06969088984274026,
