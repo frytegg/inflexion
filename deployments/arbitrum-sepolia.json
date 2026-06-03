@@ -71,6 +71,36 @@
       "lpPositionTokenId": 3174,
       "marketId_fee500_7d": "0xd1aa1fadc568d6a86c186936ff1de1ec737c844b21b3eebcc2b0ba3080615ca3",
       "smokeTestSwapId": 1
+    },
+    "lifecycle": {
+      "_note": "Full create->settle lifecycle demo on a short (300s) fee-500 market (marketId 0xacbeedeed5a6daa8765c896ff3cf27645d6e85fba9f8c39ea15a732738fa3e7e), settled live (no time-warp). Reproduce setup with script/DemoLifecycle.s.sol; opens via cast (Stylus); settle via cast. All amounts in USD (dUSDC 6dec).",
+      "shortMarketId_fee500_300s": "0xacbeedeed5a6daa8765c896ff3cf27645d6e85fba9f8c39ea15a732738fa3e7e",
+      "marketMaker": "0xBc44f7A913221Cb2f56A59f8cBAa7Fb9Bcc50851",
+      "pathA_convexity": {
+        "_note": "Path-A (cvAMM pool) convexity hedge: premium is a small fraction of MaxIL.",
+        "swapId": 2,
+        "lpPositionTokenId": 3175,
+        "V0": "216622.54",
+        "maxIL": "1147.75",
+        "premium": "28.67",
+        "premiumPctOfMaxIL": "2.5%",
+        "settledRealisedIL": "1.83",
+        "settledPayout": "1.83"
+      },
+      "pathB_routing": {
+        "_note": "createSwapRouted picked the MM (Path B) because it strictly beat the cvAMM pool price; the MM's price was charged and the MM's OWN collateral was locked in UnderwriterVault.",
+        "swapId": 3,
+        "lpPositionTokenId": 3176,
+        "premiumA_cvamm": "23.18",
+        "premiumB_mm": "17.53",
+        "chosenPath": "B (MM)",
+        "mmLoadBps": 500,
+        "maxIL": "1191.60",
+        "mmCollateralLocked": "1191.60",
+        "settledRealisedIL": "15.43",
+        "settledPayout": "15.43",
+        "settledFromMMCollateral": true
+      }
     }
   }
 }
