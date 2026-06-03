@@ -263,6 +263,39 @@ hits the `Status.ACTIVE` precondition and reverts. PR/commit: 5.13.
 the code paths the tests cover (see §1). No additional findings beyond
 the documented Fork-1 design observation (§3.1).
 
+### 4.4 cvAMM contracts static analysis (Slither, P3.9)
+
+Re-ran Slither 0.11.5 on the cvAMM additions (`ConvexityVault`, `FairValueOracle`,
+`VolOracle`) + the modified `InflexionCore` (`createSwap` / `createSwapPathA` /
+`createSwapRouted` + the settle dispatch). **74 results → 0 high, 0 confirmed
+vulnerabilities; 1 cleanup applied** (the stray foundry-template `Counter.sol` /
+`Counter.t.sol` / `Counter.s.sol` deleted — they were the only `^0.8.13` usage).
+Reproduce: `slither packages/contracts --filter-paths "test|script|lib"`.
+
+| Detector                  | Sev  | Disposition                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reentrancy-benign`       | low  | `createSwap{,PathA,Routed}` write `swaps[swapId]` _after_ `lockCollateral` + NFT `safeTransferFrom` + `accruePremium`. All callees are owner-deployed trusted contracts (ConvexityVault / UnderwriterVault, ILVault, canonical NPM); `swapId` is fresh (`nextSwapId++`) so there is no pre-existing state to corrupt, and any callee revert reverts the whole tx. |
+| `reentrancy-events`       | low  | Events (`SwapCreated`/`SwapRouted`/`SwapSettled`, `ILVault.{claimFees,returnNFT}`) emitted after external calls. Observational; field values depend on call results. `settle` keeps the status-flip-first CEI from 5.13.                                                                                                                                          |
+| `incorrect-equality`      | med  | `ConvexityVault` exact-zero guards (`supply==0` ⇒ first-deposit 1:1, `total==0` empty pool, `t==0`, `r.shares==0`). Control-flow guards on exact zero, not balance/threshold comparisons — not a manipulation vector.                                                                                                                                             |
+| `unused-return`           | med  | Multi-field tuple destructuring: `NPM.positions()` (12→≤7), Chainlink `latest/getRoundData` (5→2), `pool.observe()` (2→1), `ConvexityVault.inventory()` (5→2: util+conc), `VolOracle.poke()` (σ_ref read separately via `fairPremium`), `FairValueOracle.fairPremium()` (fairRateWad unused). Intentional + idiomatic.                                            |
+| `shadowing-local`         | low  | `IConvexityVault.inventory()` named returns mirror the same-named getters — deliberate API symmetry.                                                                                                                                                                                                                                                              |
+| `timestamp`               | low  | Time-based protocol checks (validity / expiry / cooldown / staleness) + Slither lumping the `==0` guards here. Seconds-scale drift is irrelevant against minutes–hours windows.                                                                                                                                                                                   |
+| `cyclomatic-complexity`   | info | `createSwap` (17), `getSettlementPrice` (12) — spec-traceable multi-phase CEI / round-walking logic.                                                                                                                                                                                                                                                              |
+| `naming-convention`       | info | Leading-underscore setter args (avoid storage shadowing) + `P0/Pa/Pb` math notation in `FairValueOracle.fairRateFromPrices`. Project convention.                                                                                                                                                                                                                  |
+| `unindexed-event-address` | info | `CvammConfigured(address,address,address)` — a one-time owner config event; indexing deferred.                                                                                                                                                                                                                                                                    |
+
+**Manual review.** ConvexityVault: the junior-first-loss waterfall
+(`releaseAndDistribute` caps payout at `juniorAssets`), the withdrawal cooldown +
+locked/free accounting (the pool cannot be run), and `lockCollateral`'s
+`lockedAfter ≤ juniorAssets` check (the `u ≤ 1−sf` senior-protection condition);
+share math handles zero supply/assets. FairValueOracle / VolOracle: pure/view math
+
+- a single permissionless `poke`; no fund custody, no reentrant surface. **The FULL
+  no-bad-debt guarantee (I1) is structural and independent of these oracles** —
+  `settle` caps payout at `MaxIL == collateral`. No findings beyond the documented
+  design observations (§3.1). _The Stylus FairValueOracle is upstream of settle and
+  is a pure pricer; its accuracy/gas record is in `docs/STYLUS_FAIRVALUE_BENCHMARK.md`._
+
 ---
 
 ## 5. Trust model (spec §4.5)
