@@ -6,7 +6,10 @@ solc_version = "0.8.24"
 optimizer = true
 optimizer_runs = 1_000_000
 via_ir = true
-fs_permissions = [{ access = "read", path = "../../deployments" }]
+fs_permissions = [
+  { access = "read", path = "../../deployments" },
+  { access = "read", path = "../../quant/params.json" },
+]
 remappings = [
   "@openzeppelin/=lib/openzeppelin-contracts/",
   "@uniswap/v3-core/=lib/v3-core/",
