@@ -1,0 +1,46 @@
+[package]
+name = "fair-value-oracle"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Exact closed-form FairValue (Φ-sum) Stylus contract — integer fixed-point, machine-precision erf (Inflexion P2.2)"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "fair-value-oracle"
+path = "src/main.rs"
+# The bin is only the `export-abi` entrypoint (`#![no_main]` otherwise) — no unit
+# tests, so skip its harness under `cargo test` (else the missing `main` fails to
+# link). The numeric tests live in the lib (`src/fixed.rs`, `src/fairrate.rs`).
+test = false
+
+[dependencies]
+stylus-sdk = "0.7"
+# Direct handle so the `sol!` macro's `::alloy_sol_types` extern-prelude paths
+# resolve. Pinned to stylus-sdk 0.7's exact alloy version — a different patch
+# would link a second alloy instance and break `#[derive(SolidityError)]`.
+alloy-sol-types = "=0.8.14"
+
+# NOTE: deliberately NO `libm` / float crate. The Stylus VM rejects WASM
+# floating-point ops at activation ("No implementation for floating point
+# operation ConvertIntOp(F64, I64) in user", prover/src/wavm.rs) — verified on
+# this toolchain. All transcendentals here are integer fixed-point (see
+# src/fixed.rs), which is why the port can be ≡ the Python closed form to machine
+# precision where the Solidity A&S erf cannot. See docs/STYLUS_FAIRVALUE_BENCHMARK.md.
+
+[features]
+export-abi = ["stylus-sdk/export-abi"]
+
+[profile.release]
+codegen-units = 1
+strip = true
+lto = true
+panic = "abort"
+# opt-level "3" (speed), not "z" (size): this is a COMPUTE-heavy kernel where
+# runtime ink dominates the one-time data fee. The OZ Poseidon benchmark + the
+# Stylus gas model (I64DivU=1270 ink, I64Mul=160) make instruction count the
+# lever. Size stays well under the Stylus limit (~17KB vs 24KB cap).
+opt-level = 3
