@@ -33,5 +33,44 @@
     "usdc": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
     "usdcDecimals": 6,
     "_poolNote": "There is NO pre-seeded WETH/USDC v3 pool with material liquidity on Arbitrum Sepolia (developer testnet). The demo must create + seed it (Factory.createPool -> pool.initialize(sqrtP) -> NPM.mint). Obtain testnet USDC from https://faucet.circle.com/ and WETH by wrapping ETH."
+  },
+  "deployment": {
+    "_deployedAt": "2026-06-03",
+    "_deployer": "0x96455C9b00D530BD0629b71B674298440328b1Dd",
+    "_note": "P3.10 — full cvAMM stack live on Arbitrum Sepolia. Stylus FairValueOracle deployed via `cargo stylus deploy` (WSL2); Solidity stack via script/Deploy.s.sol (USDC=demo dUSDC, STYLUS_FVO set, SKIP_FVO_INIT=true then init via cast). InflexionCore fits EIP-170 via the library extraction at optimizer_runs=2000 (23,900B). Markets+pool+LP seeded via script/SeedDemo.s.sol; a live createSwapPathA (swap #1) was priced on-chain by the Stylus FVO (V0=$120,351, MaxIL=collateral=$706.29, I1 holds).",
+    "stylus": {
+      "fairValueOracle": "0x10E3399025E930da7B4d4bE71181157CCee4E882",
+      "_activationTx": "0x9b086b7270f0061eea2534485c2565093944b2affa0c17f533ee71b651f77d77",
+      "_runtimeBytes": 21702
+    },
+    "core": {
+      "inflexionCore": "0x15b74EfcAB40A08281C0Cea972BeE0bbA1a9A96d",
+      "oracleManager": "0x584de30E891d7346f8720951961e29b19E16d4fd",
+      "volOracle": "0xE79Bf574BfCfC17bA858CC311CE5FeF8B78e947B",
+      "ilMath": "0xC203E2686601Cc252EcE66F8c792FF88E8fbDD9b",
+      "ilVault": "0x047CC6Bd6327798f231F75562d63C886e7476Eb2",
+      "underwriterVault": "0xa26dfDdE77BA5C8F95B6Fa225f62D288799989EF",
+      "convexityVault": "0xB8dF0204Ec18834AF16652Cc8ec5D39BD403a2D2",
+      "treasury": "0x96455C9b00D530BD0629b71B674298440328b1Dd"
+    },
+    "libraries": {
+      "_note": "Auto-deployed + linked by forge during the Deploy.s.sol broadcast (public library functions, delegatecall).",
+      "tickMath": "0xc6e5be49490a501004e87412fbc9bb1c91ea4de8",
+      "cvammPricing": "0x86921f776adfec34d7b7c18ba87a7de52ecb757b",
+      "swapMath": "0x021af1ed28ae948da4dc505d51dfce30139bb441",
+      "quoteVerification": "0x0f7a413a11d94d2bee2d710860b54e9a215a4a02"
+    },
+    "demo": {
+      "_note": "Numeraire-correct mock pair (dWETH < dUSDC so token1=dUSDC=numeraire) + seeded fee-500 pool + LP position + an open Path-A swap. dWETH oracle-priced via the real Chainlink ETH/USD feed.",
+      "demoWeth": "0xe8cc35BA27De935972d78348B9E43bF6F97c2444",
+      "demoWethDecimals": 18,
+      "demoUsdc": "0xeF0462608C6D0C39a6D8f4E9a7316e8433834309",
+      "demoUsdcDecimals": 6,
+      "pool": "0xc47595A7eDad7a93A890Aa7B11a705e9a18AA40B",
+      "poolFee": 500,
+      "lpPositionTokenId": 3174,
+      "marketId_fee500_7d": "0xd1aa1fadc568d6a86c186936ff1de1ec737c844b21b3eebcc2b0ba3080615ca3",
+      "smokeTestSwapId": 1
+    }
   }
 }
