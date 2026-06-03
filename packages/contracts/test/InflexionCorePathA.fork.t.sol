@@ -185,6 +185,7 @@ contract InflexionCorePathAForkTest is Test {
             );
         emit log_named_uint("position L", uint256(liquidity));
         IERC721(NPM).setApprovalForAll(address(core), true);
+        IERC20(USDC).approve(address(core), type(uint256).max); // LP pays the Path-A premium in USDC
         vm.stopPrank();
 
         // ── 3. Path A: signature-free pooled swap. Premium is the on-chain
