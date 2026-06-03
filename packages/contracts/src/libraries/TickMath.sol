@@ -32,7 +32,7 @@ library TickMath {
     /// @return sqrtPriceX96   Q64.96 sqrt price.
     function getSqrtRatioAtTick(
         int24 tick
-    ) internal pure returns (uint160 sqrtPriceX96) {
+    ) public pure returns (uint160 sqrtPriceX96) {
         uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
         if (absTick > uint256(int256(MAX_TICK))) revert TickOutOfRange(tick);
 
