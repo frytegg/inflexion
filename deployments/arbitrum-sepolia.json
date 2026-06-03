@@ -20,10 +20,18 @@
     "_decimals": 8
   },
   "uniswap": {
-    "_source": "https://developers.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments (verified 2026-05-28)",
+    "_source": "https://developers.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments (verified 2026-05-28; re-confirmed 2026-06-03)",
     "v3Factory": "0x248AB79Bbb9bC29bB72f7Cd42F17e054Fc40188e",
     "nonfungiblePositionManager": "0x6b2937Bde17889EDCf8fbD8dE31C3C2a70Bc4d65",
     "swapRouter02": "0x101F443B4d1b059569D643917553c771E1b9663E",
     "quoterV2": "0x2779a0CC1c3e0E44D2542EC3e79e3864Ae93Ef0B"
+  },
+  "tokens": {
+    "_source": "WETH9: Uniswap v3 Arbitrum Sepolia deployment 'Wrapped Native Token' (https://developers.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments). USDC: Circle native testnet USDC (https://developers.circle.com/stablecoins/usdc-contract-addresses). Both verified 2026-06-03; cross-confirmed in aave-address-book/AaveV3ArbitrumSepolia.sol + sepolia.arbiscan.io.",
+    "weth": "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73",
+    "wethDecimals": 18,
+    "usdc": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+    "usdcDecimals": 6,
+    "_poolNote": "There is NO pre-seeded WETH/USDC v3 pool with material liquidity on Arbitrum Sepolia (developer testnet). The demo must create + seed it (Factory.createPool -> pool.initialize(sqrtP) -> NPM.mint). Obtain testnet USDC from https://faucet.circle.com/ and WETH by wrapping ETH."
   }
 }

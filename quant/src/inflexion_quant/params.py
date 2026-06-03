@@ -35,7 +35,7 @@ from pydantic import (
 from inflexion_quant.calibrate import CalibrationResult, calibrate_all
 
 
-PARAMS_SCHEMA_VERSION = "2.0.0"
+PARAMS_SCHEMA_VERSION = "2.1.0"
 
 
 # ─── Sub-models ──────────────────────────────────────────────────────────────
@@ -108,6 +108,116 @@ class ExposureCaps(BaseModel):
         return self
 
 
+# ─── cvAMM block (P3, schema 2.1.0) ──────────────────────────────────────────
+#
+# The operational cvAMM parameters the ON-CHAIN contracts read (FairValueOracle /
+# VolOracle / ConvexityVault) — in on-chain units (bps integers; WAD = 1e18) so
+# `Deploy.s.sol` reads them straight from params.json (no contract hardcodes any
+# primitive, CLAUDE.md inv. 6). Calibrated by the P1.13 heavy single-asset run;
+# the full provenance/notes live in quant/params.cvamm.schema.json.
+
+
+class VolOracleParams(BaseModel):
+    """`VolOracle` constructor: σ-EWMA windows + conservative floor (WAD)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    short_halflife_seconds: int = Field(..., gt=0)
+    long_halflife_seconds: int = Field(..., gt=0)
+    floor_wad: int = Field(..., gt=0)
+    min_sample_interval_seconds: int = Field(..., gt=0)
+    max_sample_interval_seconds: int = Field(..., gt=0)
+
+
+class CvammLoadParams(BaseModel):
+    """`CvammPricing.LoadParams` — baseLoad-by-regime + the two skews + the I10
+    clamp ceiling. bps integers / WAD."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_load_calm_bps: int = Field(..., ge=0)
+    base_load_normal_bps: int = Field(..., ge=0)
+    base_load_stressed_bps: int = Field(..., ge=0)
+    regime_calm_below_wad: int = Field(..., gt=0)
+    regime_stressed_at_wad: int = Field(..., gt=0)
+    util_knee_wad: int = Field(..., ge=0)
+    util_slope_wad: int = Field(..., ge=0)
+    util_power_wad: int = Field(..., ge=0)
+    util_cap_wad: int = Field(..., ge=0)
+    disp_slope_wad: int = Field(..., ge=0)
+    disp_power_wad: int = Field(..., ge=0)
+    disp_cap_wad: int = Field(..., ge=0)
+    max_load_bps: int = Field(..., gt=0)
+
+
+class ConvexityVaultParams(BaseModel):
+    """`ConvexityVault` constructor: withdrawal cooldown + senior premium share."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    withdrawal_cooldown_seconds: int = Field(..., gt=0)
+    senior_premium_share_bps: int = Field(..., ge=0, le=10_000)
+
+
+class CvammParams(BaseModel):
+    """Operational cvAMM block (schema 2.1.0). What the on-chain contracts read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    doc: str
+    vol_oracle: VolOracleParams
+    load_params: CvammLoadParams
+    convexity_vault: ConvexityVaultParams
+    provenance: str
+
+
+def _default_cvamm() -> CvammParams:
+    """The P1.13-calibrated launch cvAMM block (mirrors quant/params.json)."""
+    return CvammParams(
+        doc=(
+            "Operational cvAMM parameters the on-chain contracts read "
+            "(FairValueOracle / VolOracle / ConvexityVault). Calibrated by the "
+            "P1.13 heavy single-asset run; full provenance + notes in "
+            "quant/params.cvamm.schema.json. Values are in ON-CHAIN units "
+            "(bps integers; WAD = 1e18). No contract hardcodes these (CLAUDE.md inv. 6)."
+        ),
+        vol_oracle=VolOracleParams(
+            short_halflife_seconds=86_400,
+            long_halflife_seconds=2_592_000,
+            floor_wad=500_000_000_000_000_000,
+            min_sample_interval_seconds=3_600,
+            max_sample_interval_seconds=604_800,
+        ),
+        load_params=CvammLoadParams(
+            base_load_calm_bps=2_000,
+            base_load_normal_bps=3_000,
+            base_load_stressed_bps=5_000,
+            regime_calm_below_wad=600_000_000_000_000_000,
+            regime_stressed_at_wad=1_025_000_000_000_000_000,
+            util_knee_wad=450_000_000_000_000_000,
+            util_slope_wad=600_000_000_000_000_000,
+            util_power_wad=2_000_000_000_000_000_000,
+            util_cap_wad=600_000_000_000_000_000,
+            disp_slope_wad=500_000_000_000_000_000,
+            disp_power_wad=1_500_000_000_000_000_000,
+            disp_cap_wad=500_000_000_000_000_000,
+            max_load_bps=16_000,
+        ),
+        convexity_vault=ConvexityVaultParams(
+            withdrawal_cooldown_seconds=604_800,
+            senior_premium_share_bps=2_000,
+        ),
+        provenance=(
+            "P1.13 heavy single-asset run (quant/HEAVY_CALIBRATION.md + "
+            "quant/params.cvamm.schema.json); 6-agent adversarial audit GO. "
+            "floor_wad=0.5 (conservative > calm ETH ~0.45); base loads "
+            "calm/normal/stressed 20/30/50%; util knee 0.45/slope 0.6/power 2/cap "
+            "0.6; disp slope 0.5/power 1.5/cap 0.5; max_load 16000bps (load-stack "
+            "ceiling, premium<=MaxIL by construction)."
+        ),
+    )
+
+
 # ─── Top-level Params ────────────────────────────────────────────────────────
 
 
@@ -145,6 +255,10 @@ class Params(BaseModel):
     fixed_point_iterations: PositiveInt
     stability_check: dict[str, float] | None = None
     notes: str
+
+    # cvAMM block (schema 2.1.0) — the on-chain cvAMM params (Deploy.s.sol reads it).
+    # Defaulted so pre-2.1.0 callers / minimal constructions still validate.
+    cvamm: CvammParams = Field(default_factory=_default_cvamm)
 
     @field_validator("schema_version")
     @classmethod
