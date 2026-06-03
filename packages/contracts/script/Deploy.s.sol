@@ -109,7 +109,15 @@ contract Deploy is Script {
 
         // SHIP STYLUS: point core at the Stylus FairValueOracle (same IFairValueOracle
         // ABI as the Solidity reference; init wires it to this VolOracle).
-        IStylusFvoInit(stylusFvo).init(address(vol));
+        // NOTE: `init` is a CALL into the Stylus contract, which Foundry's revm cannot
+        // execute (Stylus WASM runs only on a Nitro node). `forge script` runs the body in
+        // revm to collect broadcast txs, so calling it here reverts the whole run when
+        // STYLUS_FVO is a real Stylus contract. Set SKIP_FVO_INIT=true to omit it and
+        // instead `cast send $STYLUS_FVO "init(address)" $vol` against the live node (the
+        // canonical Sepolia path). setCvamm only STORES the address (no Stylus call).
+        if (!vm.envOr("SKIP_FVO_INIT", false)) {
+            IStylusFvoInit(stylusFvo).init(address(vol));
+        }
         core.setCvamm(IConvexityVault(address(cVault)), IFairValueOracle(stylusFvo), IVolOracle(address(vol)));
         core.setLoadParams(lp);
 
