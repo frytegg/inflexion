@@ -513,6 +513,61 @@ contract InflexionCoreRouterTest is Test {
         assertLe(uint256(premium), PREMIUM_A, "router never charges above the pool floor");
     }
 
+    // ─── I10 on each rail DIRECTLY (createSwapPathA / createSwap), not just routed
+    // ───────────────────────────────────────────────────────────────────────────
+
+    /// @dev Path A: for ANY σ (calm/normal/stressed regime ⇒ different baseLoad) the
+    ///      pool premium is `FairPremium·(1 + clamp(baseLoad+util+disp, maxLoad))`,
+    ///      so I10 holds by construction and the economic cap (≤ MaxIL) is enforced.
+    function testFuzz_pathA_I10(
+        uint256 sigmaWad
+    ) public {
+        sigmaWad = bound(sigmaWad, 1e16, 5e18); // 1%..500% vol — spans all three regimes
+        mvol.setSigma(sigmaWad);
+        uint256 tokenId = _mintNFT();
+        vm.prank(lp);
+        uint256 id = core.createSwapPathA(MARKET_ID, tokenId, type(uint256).max);
+
+        (, uint128 premium) = _premiumV0Of(id);
+        uint256 i10Ceiling = (FAIR_PREM * (10_000 + 16_000)) / 10_000;
+        assertLe(uint256(premium), i10Ceiling, "I10 (Path A): premium <= FairPremium*(1+maxLoad)");
+        assertLe(uint256(premium), MAX_IL, "economic cap (Path A): premium <= MaxIL");
+        assertEq(_mmOf(id), address(cVault), "Path A counterparty is the pool");
+    }
+
+    /// @dev Path B: a valid quote with `loadBps ≤ maxLoadBps` yields a premium
+    ///      `FairPremium·(1 + loadBps)` capped at MaxIL — I10 holds.
+    function testFuzz_pathB_I10(
+        uint16 loadBps
+    ) public {
+        loadBps = uint16(bound(loadBps, 0, 16_000));
+        uint256 tokenId = _mintNFT();
+        InflexionCore.SignedQuote memory q = _quote(loadBps, 1);
+        bytes memory sig = _sign(q, mm.privateKey);
+        vm.prank(lp);
+        uint256 id = core.createSwap(q, sig, tokenId, type(uint256).max);
+
+        (, uint128 premium) = _premiumV0Of(id);
+        uint256 i10Ceiling = (FAIR_PREM * (10_000 + 16_000)) / 10_000;
+        assertLe(uint256(premium), i10Ceiling, "I10 (Path B): premium <= FairPremium*(1+maxLoad)");
+        assertLe(uint256(premium), MAX_IL, "economic cap (Path B): premium <= MaxIL");
+        assertEq(_mmOf(id), mm.addr, "Path B counterparty is the MM");
+    }
+
+    /// @dev Path B: a quote whose `loadBps` exceeds the I10 ceiling is rejected
+    ///      (the clamp is enforced as a hard revert on the firm-quote rail).
+    function testFuzz_pathB_I10_exceedsReverts(
+        uint16 loadBps
+    ) public {
+        loadBps = uint16(bound(loadBps, 16_001, type(uint16).max));
+        uint256 tokenId = _mintNFT();
+        InflexionCore.SignedQuote memory q = _quote(loadBps, 1);
+        bytes memory sig = _sign(q, mm.privateKey);
+        vm.prank(lp);
+        vm.expectRevert(abi.encodeWithSelector(InflexionCore.LoadExceedsMax.selector, loadBps, uint256(16_000)));
+        core.createSwap(q, sig, tokenId, type(uint256).max);
+    }
+
     function _premium(
         uint256 id
     ) internal view returns (uint128 premium) {
