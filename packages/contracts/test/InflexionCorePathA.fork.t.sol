@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test, Vm} from "forge-std/Test.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {AggregatorV2V3Interface} from "@chainlink/shared/interfaces/AggregatorV2V3Interface.sol";
+import { Test, Vm } from "forge-std/Test.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import { AggregatorV2V3Interface } from "@chainlink/shared/interfaces/AggregatorV2V3Interface.sol";
 
-import {InflexionCore} from "../src/InflexionCore.sol";
-import {UnderwriterVault} from "../src/UnderwriterVault.sol";
-import {ILVault} from "../src/ILVault.sol";
-import {OracleManager} from "../src/OracleManager.sol";
-import {ILMath} from "../src/ILMath.sol";
-import {ConvexityVault} from "../src/ConvexityVault.sol";
-import {FairValueOracle} from "../src/FairValueOracle.sol";
-import {VolOracle} from "../src/VolOracle.sol";
-import {CvammPricing} from "../src/libraries/CvammPricing.sol";
-import {IConvexityVault} from "../src/interfaces/IConvexityVault.sol";
-import {IFairValueOracle} from "../src/interfaces/IFairValueOracle.sol";
-import {IVolOracle} from "../src/interfaces/IVolOracle.sol";
-import {IOracleManager} from "../src/interfaces/IOracleManager.sol";
+import { InflexionCore } from "../src/InflexionCore.sol";
+import { UnderwriterVault } from "../src/UnderwriterVault.sol";
+import { ILVault } from "../src/ILVault.sol";
+import { OracleManager } from "../src/OracleManager.sol";
+import { ILMath } from "../src/ILMath.sol";
+import { ConvexityVault } from "../src/ConvexityVault.sol";
+import { FairValueOracle } from "../src/FairValueOracle.sol";
+import { VolOracle } from "../src/VolOracle.sol";
+import { CvammPricing } from "../src/libraries/CvammPricing.sol";
+import { IConvexityVault } from "../src/interfaces/IConvexityVault.sol";
+import { IFairValueOracle } from "../src/interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
+import { IOracleManager } from "../src/interfaces/IOracleManager.sol";
 
 /// @title  P3.8 — Path-A end-to-end fork test with the REAL cvAMM stack
 /// @notice Real Arbitrum One (WETH/USDC, Uniswap v3 NPM + pool, ETH/USD Chainlink,
@@ -57,7 +57,8 @@ contract InflexionCorePathAForkTest is Test {
     uint256 internal constant ROLL_BLOCKS = 10_000; // ~42 min @ ~0.25s blocks
     uint32 internal constant DURATION = 20 minutes;
 
-    // ─── Local stack ───────────────────────────────────────────────────
+    // ─── Local stack
+    // ───────────────────────────────────────────────────
     InflexionCore internal core;
     UnderwriterVault internal vault;
     ILVault internal ilVault;
@@ -170,18 +171,18 @@ contract InflexionCorePathAForkTest is Test {
         (uint256 tokenId, uint128 liquidity,,) = INPM(NPM)
             .mint(
                 INPM.MintParams({
-                    token0: WETH,
-                    token1: USDC,
-                    fee: FEE_500,
-                    tickLower: tickLower,
-                    tickUpper: tickUpper,
-                    amount0Desired: 30 ether,
-                    amount1Desired: 90_000e6,
-                    amount0Min: 0,
-                    amount1Min: 0,
-                    recipient: lp,
-                    deadline: block.timestamp + 60
-                })
+                token0: WETH,
+                token1: USDC,
+                fee: FEE_500,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                amount0Desired: 30 ether,
+                amount1Desired: 90_000e6,
+                amount0Min: 0,
+                amount1Min: 0,
+                recipient: lp,
+                deadline: block.timestamp + 60
+            })
             );
         emit log_named_uint("position L", uint256(liquidity));
         IERC721(NPM).setApprovalForAll(address(core), true);
@@ -248,8 +249,13 @@ contract InflexionCorePathAForkTest is Test {
         assertEq(cVault.totalLocked(), 0, "pool collateral released");
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────
-    function _deposit(address who, IConvexityVault.Tranche t, uint256 amt) internal {
+    // ─── Helpers
+    // ─────────────────────────────────────────────────────────
+    function _deposit(
+        address who,
+        IConvexityVault.Tranche t,
+        uint256 amt
+    ) internal {
         deal(USDC, who, amt);
         vm.startPrank(who);
         IERC20(USDC).approve(address(cVault), amt);
@@ -257,7 +263,10 @@ contract InflexionCorePathAForkTest is Test {
         vm.stopPrank();
     }
 
-    function _findRoundAt(address feed, uint64 T) internal view returns (uint80) {
+    function _findRoundAt(
+        address feed,
+        uint64 T
+    ) internal view returns (uint80) {
         AggregatorV2V3Interface f = AggregatorV2V3Interface(feed);
         (uint80 latest,,,,) = f.latestRoundData();
         uint80 max = 500;
@@ -275,7 +284,8 @@ contract InflexionCorePathAForkTest is Test {
     }
 }
 
-// ─── External interfaces (minimal) ───────────────────────────────────────
+// ─── External interfaces (minimal)
+// ───────────────────────────────────────
 interface INPM {
     struct MintParams {
         address token0;
@@ -291,10 +301,9 @@ interface INPM {
         uint256 deadline;
     }
 
-    function mint(MintParams calldata params)
-        external
-        payable
-        returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
+    function mint(
+        MintParams calldata params
+    ) external payable returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
 }
 
 interface IV3Pool {
@@ -302,5 +311,9 @@ interface IV3Pool {
 }
 
 interface IV3Factory {
-    function getPool(address token0, address token1, uint24 fee) external view returns (address);
+    function getPool(
+        address token0,
+        address token1,
+        uint24 fee
+    ) external view returns (address);
 }

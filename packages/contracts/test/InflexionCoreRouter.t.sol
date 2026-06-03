@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import { Test, Vm } from "forge-std/Test.sol";
 
-import {InflexionCore} from "../src/InflexionCore.sol";
-import {UnderwriterVault} from "../src/UnderwriterVault.sol";
-import {ILVault} from "../src/ILVault.sol";
-import {ConvexityVault} from "../src/ConvexityVault.sol";
-import {OracleManager} from "../src/OracleManager.sol";
-import {IConvexityVault} from "../src/interfaces/IConvexityVault.sol";
-import {IFairValueOracle} from "../src/interfaces/IFairValueOracle.sol";
-import {IVolOracle} from "../src/interfaces/IVolOracle.sol";
-import {CvammPricing} from "../src/libraries/CvammPricing.sol";
+import { InflexionCore } from "../src/InflexionCore.sol";
+import { UnderwriterVault } from "../src/UnderwriterVault.sol";
+import { ILVault } from "../src/ILVault.sol";
+import { ConvexityVault } from "../src/ConvexityVault.sol";
+import { OracleManager } from "../src/OracleManager.sol";
+import { IConvexityVault } from "../src/interfaces/IConvexityVault.sol";
+import { IFairValueOracle } from "../src/interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
+import { CvammPricing } from "../src/libraries/CvammPricing.sol";
 
-import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockAggregator} from "./mocks/MockAggregator.sol";
-import {MockNonfungiblePositionManager} from "./mocks/MockNonfungiblePositionManager.sol";
-import {MockILMath} from "./mocks/MockILMath.sol";
-import {MockVolOracle} from "./mocks/MockVolOracle.sol";
-import {MockFairValueOracle} from "./mocks/MockFairValueOracle.sol";
+import { MockERC20 } from "./mocks/MockERC20.sol";
+import { MockAggregator } from "./mocks/MockAggregator.sol";
+import { MockNonfungiblePositionManager } from "./mocks/MockNonfungiblePositionManager.sol";
+import { MockILMath } from "./mocks/MockILMath.sol";
+import { MockVolOracle } from "./mocks/MockVolOracle.sol";
+import { MockFairValueOracle } from "./mocks/MockFairValueOracle.sol";
 
 /// @title  InflexionCore P3.5 — cheapest-of-{Path A pool, valid MM quote} router
 /// @notice Clean 18/18-dec market (oracleToken == token0, feed 1e18 => sqrtP0 = 2^96,
@@ -151,7 +151,11 @@ contract InflexionCoreRouterTest is Test {
         });
     }
 
-    function _deposit(address who, IConvexityVault.Tranche t, uint256 amt) internal {
+    function _deposit(
+        address who,
+        IConvexityVault.Tranche t,
+        uint256 amt
+    ) internal {
         usd.mint(who, amt);
         vm.startPrank(who);
         usd.approve(address(cVault), amt);
@@ -166,7 +170,10 @@ contract InflexionCoreRouterTest is Test {
     }
 
     /// @dev A fully-valid quote (signed by `mm`) with the given load + nonce.
-    function _quote(uint16 loadBps, uint256 nonce) internal view returns (InflexionCore.SignedQuote memory q) {
+    function _quote(
+        uint16 loadBps,
+        uint256 nonce
+    ) internal view returns (InflexionCore.SignedQuote memory q) {
         q = InflexionCore.SignedQuote({
             mm: mm.addr,
             marketId: MARKET_ID,
@@ -184,7 +191,10 @@ contract InflexionCoreRouterTest is Test {
         });
     }
 
-    function _sign(InflexionCore.SignedQuote memory q, uint256 pk) internal view returns (bytes memory sig) {
+    function _sign(
+        InflexionCore.SignedQuote memory q,
+        uint256 pk
+    ) internal view returns (bytes memory sig) {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", core.domainSeparator(), core.hashQuote(q)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         sig = abi.encodePacked(r, s, v);
@@ -195,11 +205,15 @@ contract InflexionCoreRouterTest is Test {
         q.marketId = MARKET_ID;
     }
 
-    function _mmOf(uint256 id) internal view returns (address mm_) {
+    function _mmOf(
+        uint256 id
+    ) internal view returns (address mm_) {
         (,, mm_,,,,,,,,,,,,) = core.swaps(id);
     }
 
-    function _premiumV0Of(uint256 id) internal view returns (uint128 v0, uint128 premium) {
+    function _premiumV0Of(
+        uint256 id
+    ) internal view returns (uint128 v0, uint128 premium) {
         (,,, v0,,, premium,,,,,,,,) = core.swaps(id);
     }
 
@@ -480,7 +494,9 @@ contract InflexionCoreRouterTest is Test {
     // ─── I10 holds whichever rail wins
     // ───────────────────────────────────
 
-    function testFuzz_router_I10_bothPaths(uint16 loadBps) public {
+    function testFuzz_router_I10_bothPaths(
+        uint16 loadBps
+    ) public {
         loadBps = uint16(bound(loadBps, 0, 16_000)); // within the protocol ceiling
         uint256 tokenId = _mintNFT();
         InflexionCore.SignedQuote memory q = _quote(loadBps, 1);
@@ -503,7 +519,9 @@ contract InflexionCoreRouterTest is Test {
     /// @dev Path A: for ANY σ (calm/normal/stressed regime ⇒ different baseLoad) the
     ///      pool premium is `FairPremium·(1 + clamp(baseLoad+util+disp, maxLoad))`,
     ///      so I10 holds by construction and the economic cap (≤ MaxIL) is enforced.
-    function testFuzz_pathA_I10(uint256 sigmaWad) public {
+    function testFuzz_pathA_I10(
+        uint256 sigmaWad
+    ) public {
         sigmaWad = bound(sigmaWad, 1e16, 5e18); // 1%..500% vol — spans all three regimes
         mvol.setSigma(sigmaWad);
         uint256 tokenId = _mintNFT();
@@ -519,7 +537,9 @@ contract InflexionCoreRouterTest is Test {
 
     /// @dev Path B: a valid quote with `loadBps ≤ maxLoadBps` yields a premium
     ///      `FairPremium·(1 + loadBps)` capped at MaxIL — I10 holds.
-    function testFuzz_pathB_I10(uint16 loadBps) public {
+    function testFuzz_pathB_I10(
+        uint16 loadBps
+    ) public {
         loadBps = uint16(bound(loadBps, 0, 16_000));
         uint256 tokenId = _mintNFT();
         InflexionCore.SignedQuote memory q = _quote(loadBps, 1);
@@ -536,7 +556,9 @@ contract InflexionCoreRouterTest is Test {
 
     /// @dev Path B: a quote whose `loadBps` exceeds the I10 ceiling is rejected
     ///      (the clamp is enforced as a hard revert on the firm-quote rail).
-    function testFuzz_pathB_I10_exceedsReverts(uint16 loadBps) public {
+    function testFuzz_pathB_I10_exceedsReverts(
+        uint16 loadBps
+    ) public {
         loadBps = uint16(bound(loadBps, 16_001, type(uint16).max));
         uint256 tokenId = _mintNFT();
         InflexionCore.SignedQuote memory q = _quote(loadBps, 1);
@@ -546,7 +568,9 @@ contract InflexionCoreRouterTest is Test {
         core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
-    function _premium(uint256 id) internal view returns (uint128 premium) {
+    function _premium(
+        uint256 id
+    ) internal view returns (uint128 premium) {
         (,,,,,, premium,,,,,,,,) = core.swaps(id);
     }
 }

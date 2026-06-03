@@ -1,27 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Script, console2} from "forge-std/Script.sol";
-import {stdJson} from "forge-std/StdJson.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Script, console2 } from "forge-std/Script.sol";
+import { stdJson } from "forge-std/StdJson.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {OracleManager} from "../src/OracleManager.sol";
-import {VolOracle} from "../src/VolOracle.sol";
-import {ILMath} from "../src/ILMath.sol";
-import {ILVault} from "../src/ILVault.sol";
-import {UnderwriterVault} from "../src/UnderwriterVault.sol";
-import {ConvexityVault} from "../src/ConvexityVault.sol";
-import {InflexionCore} from "../src/InflexionCore.sol";
-import {IOracleManager} from "../src/interfaces/IOracleManager.sol";
-import {IConvexityVault} from "../src/interfaces/IConvexityVault.sol";
-import {IFairValueOracle} from "../src/interfaces/IFairValueOracle.sol";
-import {IVolOracle} from "../src/interfaces/IVolOracle.sol";
-import {CvammPricing} from "../src/libraries/CvammPricing.sol";
+import { OracleManager } from "../src/OracleManager.sol";
+import { VolOracle } from "../src/VolOracle.sol";
+import { ILMath } from "../src/ILMath.sol";
+import { ILVault } from "../src/ILVault.sol";
+import { UnderwriterVault } from "../src/UnderwriterVault.sol";
+import { ConvexityVault } from "../src/ConvexityVault.sol";
+import { InflexionCore } from "../src/InflexionCore.sol";
+import { IOracleManager } from "../src/interfaces/IOracleManager.sol";
+import { IConvexityVault } from "../src/interfaces/IConvexityVault.sol";
+import { IFairValueOracle } from "../src/interfaces/IFairValueOracle.sol";
+import { IVolOracle } from "../src/interfaces/IVolOracle.sol";
+import { CvammPricing } from "../src/libraries/CvammPricing.sol";
 
 /// @dev Minimal interface to wire the deployed Stylus `FairValueOracle` (set-once
 ///      `init(vol)` — the Stylus analogue of the Solidity constructor arg).
 interface IStylusFvoInit {
-    function init(address vol) external;
+    function init(
+        address vol
+    ) external;
 }
 
 /// @title  Deploy — full cvAMM stack to Arbitrum Sepolia (P3.10), Stylus-shipped
@@ -72,13 +74,15 @@ contract Deploy is Script {
         uint256 cooldown = pj.readUint(".cvamm.convexity_vault.withdrawal_cooldown_seconds");
         uint256 seniorShareBps = pj.readUint(".cvamm.convexity_vault.senior_premium_share_bps");
 
-        address usdc = vm.envOr("USDC", address(0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d)); // Circle Sepolia USDC (6 dec)
+        address usdc = vm.envOr("USDC", address(0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d)); // Circle Sepolia USDC (6
+        // dec)
         address stylusFvo = vm.envAddress("STYLUS_FVO"); // deployed via cargo stylus deploy
         address treasury = vm.envOr("TREASURY", msg.sender);
 
         vm.startBroadcast();
 
-        // ── deploy ───────────────────────────────────────────────────────────
+        // ── deploy
+        // ───────────────────────────────────────────────────────────
         OracleManager oracle = new OracleManager(SEQUENCER);
         oracle.setPriceFeed(WETH, ETH_USD, STALENESS);
 
@@ -97,7 +101,8 @@ contract Deploy is Script {
         ConvexityVault cVault = new ConvexityVault(IERC20(usdc), cooldown, seniorShareBps);
         InflexionCore core = new InflexionCore(IERC20(usdc), oracle, ilMath, uVault, ilVault, NPM, treasury);
 
-        // ── wire ───────────────────────────────────────────────────────────────
+        // ── wire
+        // ───────────────────────────────────────────────────────────────
         uVault.setCore(address(core));
         ilVault.setCore(address(core));
         cVault.setCore(address(core));
@@ -127,7 +132,9 @@ contract Deploy is Script {
         console2.log("treasury        ", treasury);
     }
 
-    function _readLoadParams(string memory pj) internal pure returns (CvammPricing.LoadParams memory lp) {
+    function _readLoadParams(
+        string memory pj
+    ) internal pure returns (CvammPricing.LoadParams memory lp) {
         lp = CvammPricing.LoadParams({
             baseLoadCalmBps: uint16(pj.readUint(".cvamm.load_params.base_load_calm_bps")),
             baseLoadNormalBps: uint16(pj.readUint(".cvamm.load_params.base_load_normal_bps")),
@@ -150,7 +157,9 @@ contract Deploy is Script {
     ///      address, TOKEN1 = the USDC numéraire, ORACLE_TOKEN = WETH). Skipped
     ///      otherwise so the stack still deploys cleanly on Sepolia where the
     ///      default token ordering is inverted (see the header note).
-    function _registerMarketsIfConfigured(InflexionCore core) internal {
+    function _registerMarketsIfConfigured(
+        InflexionCore core
+    ) internal {
         address t0 = vm.envOr("TOKEN0", address(0));
         address t1 = vm.envOr("TOKEN1", address(0));
         if (t0 == address(0) || t1 == address(0)) {
