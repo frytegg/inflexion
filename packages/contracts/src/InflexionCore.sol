@@ -7,8 +7,6 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import { EIP712 } from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IILMath } from "./interfaces/IILMath.sol";
@@ -20,6 +18,8 @@ import { UnderwriterVault } from "./UnderwriterVault.sol";
 import { ILVault } from "./ILVault.sol";
 import { TickMath } from "./libraries/TickMath.sol";
 import { CvammPricing } from "./libraries/CvammPricing.sol";
+import { SwapMath } from "./libraries/SwapMath.sol";
+import { QuoteVerification } from "./libraries/QuoteVerification.sol";
 
 /// @notice Slim local subset of Uniswap v3 NonfungiblePositionManager that
 ///         we read (`positions`) during `createSwap`. v3-periphery's full
@@ -94,10 +94,6 @@ contract InflexionCore is EIP712, Ownable {
     uint256 public constant FULL_TREASURY_BPS = 100;
 
     uint256 private constant _BPS = 10_000;
-
-    /// @notice 2^192 — the squared Q64.96 scale, used by the oracle→sqrtP
-    ///         conversion (`_oracleSqrtPriceX96`).
-    uint256 private constant _Q192 = 1 << 192;
 
     // ─── Enums
     // ────────────────────────────────────────────────────────────
@@ -476,24 +472,7 @@ contract InflexionCore is EIP712, Ownable {
     function hashQuote(
         SignedQuote calldata q
     ) public pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                SIGNED_QUOTE_TYPEHASH,
-                q.mm,
-                q.marketId,
-                q.loadBps,
-                q.minMaxILRatioBps,
-                q.maxMaxILRatioBps,
-                q.quotePrice,
-                q.priceBandBps,
-                q.model,
-                q.partialRatioBps,
-                q.maxNotionalV0,
-                q.validUntil,
-                q.quoteId,
-                q.nonce
-            )
-        );
+        return QuoteVerification.hashQuote(q);
     }
 
     /// @notice Recover signer of a SignedQuote from the EIP-712 digest.
@@ -501,8 +480,7 @@ contract InflexionCore is EIP712, Ownable {
         SignedQuote calldata q,
         bytes calldata sig
     ) public view returns (address) {
-        bytes32 digest = _hashTypedDataV4(hashQuote(q));
-        return ECDSA.recover(digest, sig);
+        return QuoteVerification.recoverSigner(_domainSeparatorV4(), q, sig);
     }
 
     // ─── Views (Task 5.9)
@@ -660,8 +638,7 @@ contract InflexionCore is EIP712, Ownable {
         if (consumedNotional[quote.quoteId] + g.V0 > quote.maxNotionalV0) return (false, 0); // I7 capacity
         if (underwriterVault.availableBalance(quote.mm) < g.maxIL) return (false, 0); // MM solvency
         // Signature last (most expensive — EIP-1271 may STATICCALL an external signer).
-        bytes32 digest = _hashTypedDataV4(hashQuote(quote));
-        if (!SignatureChecker.isValidSignatureNow(quote.mm, digest, signature)) return (false, 0);
+        if (!QuoteVerification.isSignatureValid(_domainSeparatorV4(), quote, quote.mm, signature)) return (false, 0);
         premiumB = _pathBPremiumFromFair(fairPrem, quote.loadBps, g.maxIL);
         if (premiumB < MIN_PREMIUM) return (false, 0); // dust-B unusable (don't win-then-revert)
         usable = true;
@@ -794,8 +771,7 @@ contract InflexionCore is EIP712, Ownable {
         // (§4.7, pre-authorized). `SignatureChecker` recovers ECDSA for EOAs and
         // calls `isValidSignature` for contract signers (incl. a vault-signer);
         // EOA-signed quotes still validate identically, so this is non-breaking.
-        bytes32 digest = _hashTypedDataV4(hashQuote(quote));
-        if (!SignatureChecker.isValidSignatureNow(quote.mm, digest, signature)) {
+        if (!QuoteVerification.isSignatureValid(_domainSeparatorV4(), quote, quote.mm, signature)) {
             revert InvalidSignature(address(0), quote.mm);
         }
 
@@ -1114,8 +1090,7 @@ contract InflexionCore is EIP712, Ownable {
         uint256 amount0,
         uint160 sqrtPX96
     ) internal pure returns (uint256) {
-        uint256 step = Math.mulDiv(amount0, uint256(sqrtPX96), 1 << 96);
-        return Math.mulDiv(step, uint256(sqrtPX96), 1 << 96);
+        return SwapMath.amount0InToken1(amount0, sqrtPX96);
     }
 
     /// @dev Reconstruct entry amounts from sqrt prices + L. Mirrors the
@@ -1128,12 +1103,7 @@ contract InflexionCore is EIP712, Ownable {
         uint160 sqrtPbX96,
         uint128 liquidity
     ) internal pure returns (uint128 amount0, uint128 amount1) {
-        uint256 numer0 = Math.mulDiv(uint256(liquidity), uint256(sqrtPbX96) - uint256(sqrtP0X96), 1 << 96);
-        uint256 amt0 = Math.mulDiv(numer0, 1 << 96, uint256(sqrtP0X96));
-        amt0 = Math.mulDiv(amt0, 1 << 96, uint256(sqrtPbX96));
-        uint256 amt1 = Math.mulDiv(uint256(liquidity), uint256(sqrtP0X96) - uint256(sqrtPaX96), 1 << 96);
-        amount0 = uint128(amt0);
-        amount1 = uint128(amt1);
+        return SwapMath.entryAmounts(sqrtP0X96, sqrtPaX96, sqrtPbX96, liquidity);
     }
 
     /// @dev Convert an oracle price (USD per `oracleToken`, scaled to
@@ -1157,22 +1127,8 @@ contract InflexionCore is EIP712, Ownable {
         MarketConfig memory cfg,
         uint256 oraclePrice
     ) internal pure returns (uint160) {
-        if (oraclePrice == 0) revert OracleSqrtOutOfRange(0);
-        uint256 inner;
-        if (cfg.oracleToken == cfg.token0) {
-            // inner = oraclePrice · 2^192 / 10^(t0dec + oracleDec − t1dec)
-            uint256 d = uint256(cfg.token0Decimals) + uint256(cfg.oracleDecimals);
-            if (d < uint256(cfg.token1Decimals)) revert UnsupportedDecimals();
-            inner = Math.mulDiv(oraclePrice, _Q192, 10 ** (d - uint256(cfg.token1Decimals)));
-        } else {
-            // oracleToken == token1 (registerMarket guarantees one of the two).
-            // inner = 10^(oracleDec + t1dec − t0dec) · 2^192 / oraclePrice
-            uint256 e = uint256(cfg.oracleDecimals) + uint256(cfg.token1Decimals);
-            if (e < uint256(cfg.token0Decimals)) revert UnsupportedDecimals();
-            inner = Math.mulDiv(10 ** (e - uint256(cfg.token0Decimals)), _Q192, oraclePrice);
-        }
-        uint256 sq = Math.sqrt(inner);
-        if (sq == 0 || sq > type(uint160).max) revert OracleSqrtOutOfRange(sq);
-        return uint160(sq);
+        return SwapMath.oracleSqrtPriceX96(
+            oraclePrice, cfg.oracleToken == cfg.token0, cfg.token0Decimals, cfg.token1Decimals, cfg.oracleDecimals
+        );
     }
 }

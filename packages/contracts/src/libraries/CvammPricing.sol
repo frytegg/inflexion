@@ -82,7 +82,7 @@ library CvammPricing {
         uint256 uWad,
         uint256 hWad,
         LoadParams memory p
-    ) internal pure returns (uint256) {
+    ) public pure returns (uint256) {
         uint256 total = baseLoadWad(sigmaRefWad, p) + utilSkewWad(uWad, p) + dispSkewWad(hWad, p);
         uint256 maxLoad = p.maxLoadBps * BPS_TO_WAD;
         return total > maxLoad ? maxLoad : total;
@@ -92,7 +92,7 @@ library CvammPricing {
     function premiumFromLoad(
         uint256 fairPremium,
         uint256 totalLoad
-    ) internal pure returns (uint256) {
+    ) public pure returns (uint256) {
         return Math.ceilDiv(fairPremium * (WAD + totalLoad), WAD);
     }
 
