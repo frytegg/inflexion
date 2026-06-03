@@ -17,7 +17,14 @@
   fully realized in Solidity).
 - After a deep gas-optimization pass, the Stylus `fairRate` costs **~58k gas mean**
   vs Solidity's ~54k — **1.08×**, and is **cheaper than Solidity for the common
-  tight/±10% geometries**. Down from a naïve 463k (8×).
+  tight/±10% geometries**. Down from a naïve 463k (8×). The **shipped** contract is
+  a complete drop-in `IFairValueOracle` (`fairRate` / `fairRateFromPrices` /
+  `fairPremium` / `volOracle` / `init`): adding `fairPremium` (a cross-contract
+  STATICCALL to `VolOracle.sigmaRef` + `·MaxIL`) pushed the binary to 27.8 KB, over
+  the 24 KB Stylus cap, so `#[inline(always)]` was relaxed to `#[inline]` — back to
+  **21.7 KB** at a cost of only **~1.6k gas** (`fairRate` → **59.6k, 1.11×**).
+  `fairPremium` verified on Nitro (premium / fairRate / σ all exact). Core points
+  at this contract via `setCvamm` — no core change (same ABI/selectors).
 - **Decision: SHIP STYLUS** as the production `FairValueOracle`. It is
   machine-precise (Solidity is not), at gas parity, and an Arbitrum-native Stylus
   showcase for the buildathon. Solidity is kept as the CI cross-check oracle.
