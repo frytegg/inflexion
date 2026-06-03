@@ -4,9 +4,19 @@ out = "out"
 libs = ["lib"]
 solc_version = "0.8.24"
 optimizer = true
-optimizer_runs = 1_000_000
+# InflexionCore must fit Arbitrum Nitro's EIP-170 24,576-byte runtime limit (it
+# dropped the old 48KB allowance). At 1,000,000 runs the core is 31,199B (un-
+# deployable); pure/EIP-712/geometry logic was extracted into linked libraries
+# (TickMath, CvammPricing, SwapMath, QuoteVerification — see src/libraries/), and
+# runs were set to the highest value that fits with margin: 2,000 → core 23,900B
+# (676B headroom). The optimizer gas/size curve is flat from ~40k to 1M runs, so
+# this preserves nearly all of the runtime-gas benefit while clearing the limit.
+optimizer_runs = 2000
 via_ir = true
-fs_permissions = [{ access = "read", path = "../../deployments" }]
+fs_permissions = [
+  { access = "read", path = "../../deployments" },
+  { access = "read", path = "../../quant/params.json" },
+]
 remappings = [
   "@openzeppelin/=lib/openzeppelin-contracts/",
   "@uniswap/v3-core/=lib/v3-core/",

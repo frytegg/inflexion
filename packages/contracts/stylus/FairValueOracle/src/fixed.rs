@@ -93,14 +93,14 @@ const ACHEB: [I256; 16] = [
     ])),
 ];
 
-#[inline(always)]
+#[inline]
 fn i(v: u64) -> I256 {
     I256::from_raw(U256::from_limbs([v, 0, 0, 0]))
 }
 
 // ─── fixed-point multiply / divide (U256 — no U512; products fit, see header) ──
 /// `(x·y)/ONE`, truncated toward zero.
-#[inline(always)]
+#[inline]
 pub fn smul(x: I256, y: I256) -> I256 {
     let neg = x.is_negative() ^ y.is_negative();
     let q = I256::from_raw(x.unsigned_abs() * y.unsigned_abs() / ONE_U);
@@ -112,7 +112,7 @@ pub fn smul(x: I256, y: I256) -> I256 {
 }
 
 /// `(x·ONE)/y`, truncated toward zero.
-#[inline(always)]
+#[inline]
 pub fn sdiv(x: I256, y: I256) -> I256 {
     let neg = x.is_negative() ^ y.is_negative();
     let q = I256::from_raw(x.unsigned_abs() * ONE_U / y.unsigned_abs());

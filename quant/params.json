@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "2.1.0",
   "quant_package_version": "0.1.0",
   "created_at": "2026-05-27T20:56:53+00:00",
   "c_min": 0.07250000000000001,
@@ -65,5 +65,35 @@
     "fund_target_std": 8126.653087702461,
     "fund_target_spread_pct": 43.916856630501165
   },
-  "notes": "Calibrated against CorrelatedCrashConfig.severe() on 50000 runs × 200 positions, rng_seed=20260527, horizon=30d. Fixed-point bisection converged in 7 iterations. Audit-fix v1.1: fund_target uses CVaR; fee_curve targets mean pnl (not median); per-horizon ruin budget 0.10% ≈ 1.21% annualized; severe() params anchored to historical episodes (Terra/FTX/March 2020). Mainnet TODOs in ROADMAP §14: portfolio-level multi-market calibration, empirical position mix from Uniswap subgraph, multi-period fund evolution, MM/LP behavioral models, multi-σ floor curve, depeg/oracle failure mechanisms."
+  "notes": "Calibrated against CorrelatedCrashConfig.severe() on 50000 runs × 200 positions, rng_seed=20260527, horizon=30d. Fixed-point bisection converged in 7 iterations. Audit-fix v1.1: fund_target uses CVaR; fee_curve targets mean pnl (not median); per-horizon ruin budget 0.10% ≈ 1.21% annualized; severe() params anchored to historical episodes (Terra/FTX/March 2020). Mainnet TODOs in ROADMAP §14: portfolio-level multi-market calibration, empirical position mix from Uniswap subgraph, multi-period fund evolution, MM/LP behavioral models, multi-σ floor curve, depeg/oracle failure mechanisms.",
+  "cvamm": {
+    "doc": "Operational cvAMM parameters the on-chain contracts read (FairValueOracle / VolOracle / ConvexityVault). Calibrated by the P1.13 heavy single-asset run; full provenance + notes in quant/params.cvamm.schema.json. Values are in ON-CHAIN units (bps integers; WAD = 1e18). No contract hardcodes these (CLAUDE.md inv. 6).",
+    "vol_oracle": {
+      "short_halflife_seconds": 86400,
+      "long_halflife_seconds": 2592000,
+      "floor_wad": 500000000000000000,
+      "min_sample_interval_seconds": 3600,
+      "max_sample_interval_seconds": 604800
+    },
+    "load_params": {
+      "base_load_calm_bps": 2000,
+      "base_load_normal_bps": 3000,
+      "base_load_stressed_bps": 5000,
+      "regime_calm_below_wad": 600000000000000000,
+      "regime_stressed_at_wad": 1025000000000000000,
+      "util_knee_wad": 450000000000000000,
+      "util_slope_wad": 600000000000000000,
+      "util_power_wad": 2000000000000000000,
+      "util_cap_wad": 600000000000000000,
+      "disp_slope_wad": 500000000000000000,
+      "disp_power_wad": 1500000000000000000,
+      "disp_cap_wad": 500000000000000000,
+      "max_load_bps": 16000
+    },
+    "convexity_vault": {
+      "withdrawal_cooldown_seconds": 604800,
+      "senior_premium_share_bps": 2000
+    },
+    "provenance": "P1.13 heavy single-asset run (quant/HEAVY_CALIBRATION.md + quant/params.cvamm.schema.json); 6-agent adversarial audit GO. floor_wad=0.5 (conservative > calm ETH ~0.45); base loads calm/normal/stressed 20/30/50%; util knee 0.45/slope 0.6/power 2/cap 0.6; disp slope 0.5/power 1.5/cap 0.5; max_load 16000bps (load-stack ceiling, premium<=MaxIL by construction)."
+  }
 }

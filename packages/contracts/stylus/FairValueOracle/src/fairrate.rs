@@ -30,12 +30,12 @@ const WAD_U: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 const HALF_LIFT: I256 = I256::from_raw(U256::from_limbs([500_000, 0, 0, 0]));
 const SECONDS_PER_YEAR: I256 = I256::from_raw(U256::from_limbs([31_536_000, 0, 0, 0]));
 
-#[inline(always)]
+#[inline]
 fn i2(v: u64) -> I256 {
     I256::from_raw(U256::from_limbs([v, 0, 0, 0]))
 }
 
-#[inline(always)]
+#[inline]
 fn maxi(a: I256, b: I256) -> I256 {
     if a > b {
         a
@@ -52,7 +52,7 @@ enum Lim {
     Fin(I256),
 }
 
-#[inline(always)]
+#[inline]
 fn phi_for(l: &Lim, s_t: I256, cterm: I256) -> I256 {
     match l {
         Lim::Zero => ONE,
