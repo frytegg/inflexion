@@ -568,6 +568,52 @@ contract InflexionCoreRouterTest is Test {
         core.createSwap(q, sig, tokenId, type(uint256).max);
     }
 
+    // ─── Data-moat events: SwapPriced + QuoteFilled
+    // ─────────────────────
+
+    /// @notice Path A emits SwapPriced(path=0) with the FULL load breakdown +
+    ///         σ_ref. σ=0.6 ⇒ NORMAL regime baseLoad 0.30; util/conc 0 on the
+    ///         first swap ⇒ utilSkew/dispSkew 0; totalLoad 0.30; not capped.
+    function test_swapPriced_pathA_componentsAndSigma() public {
+        uint256 tokenId = _mintNFT();
+        uint256 id = core.nextSwapId();
+        vm.expectEmit(true, false, false, true, address(core));
+        emit InflexionCore.SwapPriced(id, uint8(0), FAIR_PREM, 3e17, 0, 0, 3e17, 6e17, false);
+        vm.prank(lp);
+        core.createSwapPathA(MARKET_ID, tokenId, type(uint256).max);
+    }
+
+    /// @notice Path B emits QuoteFilled (attribution) then SwapPriced(path=1):
+    ///         components 0, totalLoad = loadBps·1e14 (1500 ⇒ 1.5e17), σ_ref 6e17.
+    function test_swapPriced_and_quoteFilled_pathB() public {
+        uint256 tokenId = _mintNFT();
+        InflexionCore.SignedQuote memory q = _quote(1500, 1); // B beats the pool
+        bytes memory sig = _sign(q, mm.privateKey);
+        uint256 id = core.nextSwapId();
+        // Emission order inside the call: SwapCreated, QuoteFilled, SwapPriced, SwapRouted.
+        vm.expectEmit(true, true, true, true, address(core));
+        emit InflexionCore.QuoteFilled(id, mm.addr, bytes32(uint256(0xB0B)), 1, 1500);
+        vm.expectEmit(true, false, false, true, address(core));
+        emit InflexionCore.SwapPriced(id, uint8(1), FAIR_PREM, 0, 0, 0, 15e16, 6e17, false);
+        vm.prank(lp);
+        core.createSwapRouted(q, sig, tokenId, type(uint256).max);
+    }
+
+    /// @notice cappedAtMaxIL flags a fill where premium hit the MaxIL cap (zero
+    ///         load info — excluded from the clearing-load surface). loadBps 15000
+    ///         ⇒ FairPremium·2.5 > MaxIL ⇒ capped; via direct createSwap (a capped
+    ///         B can never WIN routing, so route would pick A).
+    function test_swapPriced_cappedFlag_directPathB() public {
+        uint256 tokenId = _mintNFT();
+        InflexionCore.SignedQuote memory q = _quote(15_000, 1);
+        bytes memory sig = _sign(q, mm.privateKey);
+        uint256 id = core.nextSwapId();
+        vm.expectEmit(true, false, false, true, address(core));
+        emit InflexionCore.SwapPriced(id, uint8(1), FAIR_PREM, 0, 0, 0, 15e17, 6e17, true);
+        vm.prank(lp);
+        core.createSwap(q, sig, tokenId, type(uint256).max);
+    }
+
     function _premium(
         uint256 id
     ) internal view returns (uint128 premium) {

@@ -255,6 +255,25 @@ contract InflexionCore is EIP712, Ownable {
     ///         Makes the cheapest-wins routing auditable on-chain without widening
     ///         SwapRecord — the executed path is also inferable from `mm`.
     event SwapRouted(uint256 indexed swapId, bool pathB, uint256 premiumA, uint256 premiumB);
+    /// @notice Per-fill clearing-price record on EVERY create path (data moat). `path`
+    ///         0 = cvAMM pool (A), 1 = MM (B). For Path B the load components are 0 and
+    ///         `totalLoadWad` is the MM's `loadBps` in WAD. `cappedAtMaxIL` flags fills
+    ///         that hit the MaxIL cap (zero load info — excluded from the load surface).
+    event SwapPriced(
+        uint256 indexed swapId,
+        uint8 path,
+        uint256 fairPremium,
+        uint256 baseLoadWad,
+        uint256 utilSkewWad,
+        uint256 dispSkewWad,
+        uint256 totalLoadWad,
+        uint256 sigmaRefWad,
+        bool cappedAtMaxIL
+    );
+    /// @notice MM fill attribution: which signed quote/nonce filled a Path-B swap.
+    event QuoteFilled(
+        uint256 indexed swapId, address indexed mm, bytes32 indexed quoteId, uint256 nonce, uint16 loadBps
+    );
     event CvammConfigured(address convexityVault, address fairValueOracle, address volOracle);
     event CvammFrozen();
     event CvammEnabledSet(bytes32 indexed marketId, bool enabled);
@@ -539,6 +558,19 @@ contract InflexionCore is EIP712, Ownable {
         uint256 livePrice;
     }
 
+    /// @dev Memory-only pricing breakdown for the `SwapPriced` event (data moat).
+    ///      For Path B the load components are 0 and `totalLoad` is `loadBps` in WAD.
+    struct SwapPricing {
+        uint256 premium;
+        uint256 fairPrem;
+        uint256 sigmaRef;
+        uint256 baseLoad;
+        uint256 utilSkew;
+        uint256 dispSkew;
+        uint256 totalLoad;
+        bool capped;
+    }
+
     /// @dev Shared PHASE-1 read prologue (identical for all three entry points):
     ///      ownerOf check, position read + marketId cross-check, Pa/Pb via TickMath,
     ///      oracle-pinned P0, in-range gate, computeMaxIL, entry snapshot, V0. `view`
@@ -587,18 +619,56 @@ contract InflexionCore is EIP712, Ownable {
         if (premium > maxIL) premium = maxIL;
     }
 
-    /// @dev Path-A premium from a precomputed FairPremium + σ_ref (so the router can
+    /// @dev Path-A pricing from a precomputed FairPremium + σ_ref (so the router can
     ///      poke ONCE and price both rails off the same FairPremium). Reads pool
-    ///      inventory, applies the I10-clamped load stack, caps at MaxIL.
-    function _pathAPremiumFromFair(
+    ///      inventory, applies the I10-clamped load stack, caps at MaxIL — and
+    ///      returns the full load breakdown for the `SwapPriced` event.
+    function _pricePathAFromFair(
         uint256 fairPrem,
         uint256 sigmaRef,
         uint256 maxIL
-    ) internal view returns (uint256 premium) {
+    ) internal view returns (SwapPricing memory r) {
+        r.fairPrem = fairPrem;
+        r.sigmaRef = sigmaRef;
         (,,, uint256 util, uint256 conc) = convexityVault.inventory();
-        uint256 load = CvammPricing.totalLoadWad(sigmaRef, util, conc, loadParams);
-        premium = CvammPricing.premiumFromLoad(fairPrem, load);
-        if (premium > maxIL) premium = maxIL; // never charge more than the max payout
+        (r.baseLoad, r.utilSkew, r.dispSkew, r.totalLoad) =
+            CvammPricing.loadComponents(sigmaRef, util, conc, loadParams);
+        uint256 prem = CvammPricing.premiumFromLoad(fairPrem, r.totalLoad);
+        if (prem > maxIL) {
+            prem = maxIL; // never charge more than the max payout
+            r.capped = true;
+        }
+        r.premium = prem;
+    }
+
+    /// @dev Path-B pricing from a precomputed FairPremium (pure): `premium =
+    ///      ceil(FairPremium·(1+loadBps))` capped at MaxIL, with the breakdown for
+    ///      `SwapPriced` (components 0; `totalLoad` = `loadBps` in WAD).
+    function _pricePathB(
+        uint256 fairPrem,
+        uint256 sigmaRef,
+        uint16 loadBps,
+        uint256 maxIL
+    ) internal pure returns (SwapPricing memory r) {
+        r.fairPrem = fairPrem;
+        r.sigmaRef = sigmaRef;
+        r.totalLoad = uint256(loadBps) * CvammPricing.BPS_TO_WAD;
+        uint256 prem = Math.ceilDiv(fairPrem * (_BPS + uint256(loadBps)), _BPS);
+        if (prem > maxIL) {
+            prem = maxIL;
+            r.capped = true;
+        }
+        r.premium = prem;
+    }
+
+    /// @dev Emit the per-fill clearing-price record (data moat). Split out so the
+    ///      9-field event does not inflate the create-function stack frames.
+    function _emitPriced(
+        uint256 swapId,
+        uint8 path,
+        SwapPricing memory r
+    ) internal {
+        emit SwapPriced(swapId, path, r.fairPrem, r.baseLoad, r.utilSkew, r.dispSkew, r.totalLoad, r.sigmaRef, r.capped);
     }
 
     /// @dev Router-side Path-B usability predicate (P3.5): runs the FULL Path-B gate
@@ -736,6 +806,7 @@ contract InflexionCore is EIP712, Ownable {
         if (treasuryCut > 0) usdc.safeTransfer(treasury, treasuryCut);
 
         emit SwapCreated(swapId, msg.sender, quote.mm, tokenId, uint128(g.V0), uint128(g.maxIL), uint128(premium));
+        emit QuoteFilled(swapId, quote.mm, quote.quoteId, quote.nonce, quote.loadBps);
     }
 
     // ─── createSwap (Task 5.7)
@@ -784,8 +855,9 @@ contract InflexionCore is EIP712, Ownable {
         if (uint256(quote.loadBps) > loadParams.maxLoadBps) {
             revert LoadExceedsMax(quote.loadBps, loadParams.maxLoadBps);
         }
-        (uint256 fairPrem,) = _fairPremium(cfg, g.sqrtP0X96, g.sqrtPaX96, g.sqrtPbX96, g.maxIL);
-        uint256 premium = _pathBPremiumFromFair(fairPrem, quote.loadBps, g.maxIL);
+        (uint256 fairPrem, uint256 sigmaRef) = _fairPremium(cfg, g.sqrtP0X96, g.sqrtPaX96, g.sqrtPbX96, g.maxIL);
+        SwapPricing memory pr = _pricePathB(fairPrem, sigmaRef, quote.loadBps, g.maxIL);
+        uint256 premium = pr.premium;
 
         // ───── PHASE 2 — CHECKS
         // ──────────────────────────────────────────
@@ -834,6 +906,7 @@ contract InflexionCore is EIP712, Ownable {
         // ───── PHASE 3 + 4 — EFFECTS + INTERACTIONS
         // ──────────────────────
         swapId = _executePathB(quote, g, tokenId, premium, cfg);
+        _emitPriced(swapId, 1, pr);
     }
 
     // ─── createSwapPathA — cvAMM, signature-free (P3.3, spec §4.0/§5.2) ────
@@ -866,7 +939,8 @@ contract InflexionCore is EIP712, Ownable {
         Geometry memory g = _prepareSwap(cfg, marketId, tokenId);
 
         // Path-A pricing: on-chain FairPremium + I10-clamped load stack.
-        uint256 premium = _pathAPremium(cfg, g.sqrtP0X96, g.sqrtPaX96, g.sqrtPbX96, g.maxIL);
+        SwapPricing memory pr = _pricePathA(cfg, g);
+        uint256 premium = pr.premium;
 
         // ───── PHASE 2 — CHECKS
         if (g.V0 < MIN_POSITION_V0) revert DustPosition(uint128(g.V0));
@@ -875,6 +949,7 @@ contract InflexionCore is EIP712, Ownable {
 
         // ───── PHASE 3 + 4 — EFFECTS + INTERACTIONS
         swapId = _executePathA(g, marketId, tokenId, premium, cfg);
+        _emitPriced(swapId, 0, pr);
     }
 
     // ─── createSwapRouted — cheapest of {pool, valid MM quote} (P3.5) ───────
@@ -914,7 +989,8 @@ contract InflexionCore is EIP712, Ownable {
 
         // ───── PRICE BOTH RAILS off the SAME FairPremium (single VolOracle poke).
         (uint256 fairPrem, uint256 sigmaRef) = _fairPremium(cfg, g.sqrtP0X96, g.sqrtPaX96, g.sqrtPbX96, g.maxIL);
-        uint256 premiumA = _pathAPremiumFromFair(fairPrem, sigmaRef, g.maxIL);
+        SwapPricing memory prA = _pricePathAFromFair(fairPrem, sigmaRef, g.maxIL);
+        uint256 premiumA = prA.premium;
         (bool usableB, uint256 premiumB) = _quoteUsableAndPremiumB(quote, signature, g, fairPrem);
 
         // ───── ROUTE — MM wins only if it STRICTLY beats the pool (tie ⇒ Path A,
@@ -929,8 +1005,10 @@ contract InflexionCore is EIP712, Ownable {
         // ───── PHASE 3 + 4 — ONLY the chosen executor mutates state.
         if (useB) {
             swapId = _executePathB(quote, g, tokenId, premium, cfg);
+            _emitPriced(swapId, 1, _pricePathB(fairPrem, sigmaRef, quote.loadBps, g.maxIL));
         } else {
             swapId = _executePathA(g, quote.marketId, tokenId, premium, cfg);
+            _emitPriced(swapId, 0, prA);
         }
         emit SwapRouted(swapId, useB, premiumA, premiumB);
     }
@@ -956,18 +1034,14 @@ contract InflexionCore is EIP712, Ownable {
         (fairPrem,, sigmaRef) = fairValueOracle.fairPremium(cfg.oracleToken, aWad, bWad, cfg.durationSeconds, maxIL);
     }
 
-    /// @dev Path-A premium: FairPremium (on-chain, σ_ref-driven) × (1 + I10 load).
-    ///      Caps the premium at MaxIL — the max possible payout, an economic
-    ///      overcharge guard.
-    function _pathAPremium(
+    /// @dev Path-A pricing: poke σ_ref, read the on-chain FairPremium, apply the
+    ///      I10 load stack, cap at MaxIL — full breakdown for the `SwapPriced` event.
+    function _pricePathA(
         MarketConfig memory cfg,
-        uint160 sqrtP0X96,
-        uint160 sqrtPaX96,
-        uint160 sqrtPbX96,
-        uint256 maxIL
-    ) internal returns (uint256 premium) {
-        (uint256 fairPrem, uint256 sigmaRef) = _fairPremium(cfg, sqrtP0X96, sqrtPaX96, sqrtPbX96, maxIL);
-        premium = _pathAPremiumFromFair(fairPrem, sigmaRef, maxIL);
+        Geometry memory g
+    ) internal returns (SwapPricing memory r) {
+        (uint256 fairPrem, uint256 sigmaRef) = _fairPremium(cfg, g.sqrtP0X96, g.sqrtPaX96, g.sqrtPbX96, g.maxIL);
+        r = _pricePathAFromFair(fairPrem, sigmaRef, g.maxIL);
     }
 
     // ─── settle (Task 5.8, spec §5.4)
