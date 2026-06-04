@@ -1,0 +1,28 @@
+{
+  "name": "@inflexion/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "@inflexion/sdk — LP / Depositor / MM / Data surfaces over the live Arbitrum Sepolia deployment (viem). Re-exports @inflexion/engine/quote for EIP-712.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./quote": "./dist/quote.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@inflexion/engine": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.2"
+  }
+}

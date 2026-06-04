@@ -29,9 +29,24 @@ After the events, `InflexionCore` is **24,789 B vs the 24,576 B limit (+213 B)**
 - **Signal 2 dynamic half** (quote competition / MM no-quote / widen-under-stress): same engine telemetry → API `GET /data/quote-competition`.
 - **Signal 5 net-gamma**: off-chain Greeks sum over the subgraph active-swap set (API/GreeksEngine) → `NetGammaSnapshot`.
 
-## Doc-correctness fixes pending (apply during the SDK build)
+> **DAY-ONE CAPTURE (do not skip — unreconstructable retroactively):** Signals 2 & 4
+> are now logged by the engine **from the first interaction**, before any `/data`
+> endpoint exists. `packages/engine/src/telemetry.ts` (`TelemetrySink`) writes two
+> append-only JSONL sinks: `DEMAND_LOG` (every `GET /quote` + `POST /telemetry/preview`)
+> and `COMPETITION_LOG` (every WS quote, winners + losers). **Set both env vars on
+> the engine NOW**, not at redeploy — anything not captured before the redeploy is
+> lost forever. The API just _reads_ these logs at redeploy. Schemas + ops:
+> `docs/ENGINE_TELEMETRY.md`. The SDK `previewPremium` POSTs the best-effort ping.
+
+## Doc-correctness fixes — APPLIED during the SDK build (2026-06)
 
 From the access-layer verification (`docs/ACCESS_LAYER_ARCHITECTURE.md`): CvammPricing component skews were `internal` (now fixed on-chain via `loadComponents`); `regime` = σ_ref banded vs `loadParams.regimeCalm/Stressed` (NOT `sigmaComponents.binding`); `resolveMarket(swapId)` helper (SwapRecord omits marketId); LP oracle degraded-mode typed errors; MM streamable signal = geometry-independent inputs + pool `totalLoadWad`-in-bps (the "load to beat"); SwapPriced `cappedAtMaxIL` lets the moat exclude cap-bound fills; `SigmaPoint` backfill from `SwapPriced.sigmaRefWad` (poke is a no-op with no `Poked` event when `dt<minSampleInterval`).
+
+**Status — these are now corrected inline in `docs/ACCESS_LAYER_ARCHITECTURE.md`** (see its "Build reconciliation" block, corrections #1–#7). Per-component skews remain a TS-port interim until the on-chain `loadComponents` ships at this redeploy — at which point the SDK depositor/MM/data surfaces switch to the on-chain call with **no `LoadBreakdown` shape change**. The single remaining moving part for the SDK at redeploy is: (a) point `CvammPricing.loadComponents` reads on-chain, (b) wire the `QuoteFilled`/`SwapPriced` events for PRECISE MM fill attribution (today `isQuoteFilled` is `precision:'coarse'`).
+
+## SDK telemetry wiring — LIVE (no redeploy dependency)
+
+The SDK `LpClient.previewPremium` now fires the best-effort `POST ${engineBaseUrl}/telemetry/preview` ping (fire-and-forget; swallows every error — never blocks/fails the preview). Combined with the engine's `TelemetrySink` (`DEMAND_LOG`/`COMPETITION_LOG`), Signals 2 & 4's dynamic halves are captured **from the first interaction, before the API exists**. **Set `DEMAND_LOG` + `COMPETITION_LOG` on the engine NOW** (see `docs/ENGINE_TELEMETRY.md`) — anything not captured before the redeploy is lost forever (I7). This is independent of the contract redeploy.
 
 ## Redeploy steps (run once, on WSL2)
 

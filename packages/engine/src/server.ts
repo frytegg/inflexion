@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { type Address, isAddress } from 'viem'
 import { WebSocketServer } from 'ws'
 import { QuoteStore } from './store.js'
+import { type PreviewPingInput, TelemetrySink } from './telemetry.js'
 import {
   type QuoteEnvelope,
   type QuoteWire,
@@ -27,6 +28,18 @@ export interface EngineConfig {
   chainId: number
   verifyingContract: Address
   logPath?: string
+  /**
+   * Day-one telemetry sink for Signal 4 (latent demand): every `/quote` request +
+   * SDK `previewPremium` ping is appended here as JSONL. Off-chain only — unfilled
+   * interest never reaches the chain (I7). See docs/ENGINE_TELEMETRY.md.
+   */
+  demandLogPath?: string
+  /**
+   * Day-one telemetry sink for Signal 2 (dynamic half — quote competition): EVERY
+   * WS quote the relayer receives (winners AND losers) is appended here as JSONL,
+   * not just the latest stored one.
+   */
+  competitionLogPath?: string
   /** Reject quotes whose `validUntil` is already past, or more than this far out. */
   maxValiditySkewS?: number
   /** Injectable clock (seconds) for tests; defaults to wall clock. */
@@ -37,6 +50,7 @@ export interface EngineHandle {
   http: Server
   wss: WebSocketServer
   store: QuoteStore
+  telemetry: TelemetrySink
   close: () => Promise<void>
 }
 
@@ -57,15 +71,75 @@ function freshnessOk(env: QuoteEnvelope, nowSec: number, maxSkewS: number): bool
   return true
 }
 
+/** Read a request body up to `maxBytes`, parse as JSON; typed degraded result on failure. */
+function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number,
+): Promise<{ ok: true; value: unknown } | { ok: false; reason: string }> {
+  return new Promise((resolve) => {
+    let size = 0
+    const chunks: Buffer[] = []
+    let done = false
+    const finish = (r: { ok: true; value: unknown } | { ok: false; reason: string }): void => {
+      if (done) return
+      done = true
+      resolve(r)
+    }
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > maxBytes) {
+        finish({ ok: false, reason: 'body too large' })
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (raw.length === 0) {
+        finish({ ok: true, value: {} })
+        return
+      }
+      try {
+        finish({ ok: true, value: JSON.parse(raw) })
+      } catch {
+        finish({ ok: false, reason: 'invalid json' })
+      }
+    })
+    req.on('error', () => finish({ ok: false, reason: 'request error' }))
+  })
+}
+
 export function startEngine(cfg: EngineConfig): EngineHandle {
   const now = cfg.nowSec ?? (() => Math.floor(Date.now() / 1000))
   const maxSkewS = cfg.maxValiditySkewS ?? 60
   const store = new QuoteStore(cfg.logPath)
+  const telemetry = new TelemetrySink(cfg.demandLogPath, cfg.competitionLogPath)
 
   const http = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     if (req.method === 'GET' && url.pathname === '/health') {
-      json(res, 200, { ok: true, markets: store.marketCount() })
+      json(res, 200, {
+        ok: true,
+        markets: store.marketCount(),
+        telemetry: { demand: telemetry.demandEnabled, competition: telemetry.competitionEnabled },
+      })
+      return
+    }
+    // Day-one Signal 4 sink: the SDK's previewPremium best-effort POST. The body
+    // carries only bucketed geometry + marketId (no PII). Always 202-acks fast and
+    // never blocks the preview — a telemetry failure is reported as logged:false.
+    if (req.method === 'POST' && url.pathname === '/telemetry/preview') {
+      void (async () => {
+        const body = await readJsonBody(req, 4096)
+        if (!body.ok) {
+          json(res, 400, { ok: false, reason: body.reason })
+          return
+        }
+        const input = (body.value ?? {}) as PreviewPingInput
+        const result = telemetry.ingestPreview(input, now())
+        json(res, result.ok ? 202 : 400, result)
+      })()
       return
     }
     if (req.method === 'GET' && url.pathname === '/quote') {
@@ -74,6 +148,9 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
         json(res, 400, { error: 'marketId (bytes32 hex) required' })
         return
       }
+      // Day-one Signal 4: log the REQUEST itself (latent demand) before answering —
+      // best-effort, never blocks the response.
+      telemetry.logQuoteRequest(marketId, now())
       const best = store.best(marketId, now())
       if (best === undefined) {
         json(res, 404, { error: 'no live quote for market', marketId })
@@ -112,15 +189,22 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
           ws.send(JSON.stringify({ type: 'error', error: 'bad mm address' }))
           return
         }
+        // Day-one Signal 2 (quote competition): log EVERY received quote — winners
+        // AND losers/withdrawn — with `accepted` set per-outcome below. The chain
+        // only ever sees the realized fill, so the full competing field is lost
+        // unless captured here. Logging is best-effort and never blocks the ack.
         if (!freshnessOk(env, now(), maxSkewS)) {
+          telemetry.logQuote(env.quote, false, now(), 'stale-or-far-validUntil')
           ws.send(JSON.stringify({ type: 'rejected', reason: 'stale-or-far-validUntil' }))
           return
         }
         const ok = await verifyQuote(env, cfg.chainId, cfg.verifyingContract)
         if (!ok) {
+          telemetry.logQuote(env.quote, false, now(), 'bad-signature')
           ws.send(JSON.stringify({ type: 'rejected', reason: 'bad-signature' }))
           return
         }
+        telemetry.logQuote(env.quote, true, now())
         store.put(env, now())
         ws.send(
           JSON.stringify({ type: 'ack', marketId: env.quote.marketId, loadBps: env.quote.loadBps }),
@@ -136,5 +220,5 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
       wss.close(() => http.close(() => resolve()))
     })
 
-  return { http, wss, store, close }
+  return { http, wss, store, telemetry, close }
 }
