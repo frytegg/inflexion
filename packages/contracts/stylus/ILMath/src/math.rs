@@ -45,10 +45,23 @@ fn from_u512(x: U512) -> U256 {
     U256::from_be_slice(&bytes[32..])
 }
 
-/// `floor(a * b / denom)` with a full 512-bit intermediate product — the
-/// equivalent of OpenZeppelin `Math.mulDiv` / Uniswap `FullMath.mulDiv`.
-/// Panics on `denom == 0` (mirrors the Solidity divide-by-zero revert).
+/// `floor(a * b / denom)` — the equivalent of OpenZeppelin `Math.mulDiv` /
+/// Uniswap `FullMath.mulDiv`. Panics on `denom == 0` (mirrors the Solidity
+/// divide-by-zero revert).
+///
+/// **Fast path (the common case):** when `a * b` fits in 256 bits — which it
+/// does for every in-protocol call (`liquidity · Δsqrt ≈ 2^156`, `amount · 2^96`,
+/// etc.) — the result is computed in pure U256, skipping the 512-bit widening
+/// (two byte-buffer copies) and the 512-bit division (≈ 8× a 256-bit one). This
+/// is **wei-identical** to the full-width form: floor division agrees whenever
+/// the product does not overflow 256 bits. The 512-bit path remains only as the
+/// exact fallback for a genuine `a · b ≥ 2^256` (exercised by the proptest
+/// oracle), so the cross-check against `ILMath.sol` is unchanged.
+#[inline]
 pub fn mul_div(a: U256, b: U256, denom: U256) -> U256 {
+    if let Some(product) = a.checked_mul(b) {
+        return product / denom;
+    }
     let product = to_u512(a) * to_u512(b);
     from_u512(product / to_u512(denom))
 }
@@ -95,6 +108,7 @@ pub fn abs_diff(a: U256, b: U256) -> U256 {
 /// Token amounts held by `liquidity` at `sqrt_p`, for the range
 /// `[sqrt_pa, sqrt_pb]`. Caller guarantees `sqrt_pa ≤ sqrt_p ≤ sqrt_pb`.
 /// Whitepaper §6.30, evaluated with [`mul_div`].
+#[inline]
 pub fn amounts_at(sqrt_p: U256, sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> (U256, U256) {
     let q = q96();
     let mut t = mul_div(liquidity, sqrt_pb - sqrt_p, q);
@@ -107,6 +121,7 @@ pub fn amounts_at(sqrt_p: U256, sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -
 
 /// `amount0` (token0 wei) valued in token1 wei at `sqrt_p`:
 /// `amount0 * (sqrt_p / 2^96)^2`.
+#[inline]
 pub fn amount0_in_token1(amount0: U256, sqrt_p: U256) -> U256 {
     let q = q96();
     let step = mul_div(amount0, sqrt_p, q);
@@ -115,6 +130,7 @@ pub fn amount0_in_token1(amount0: U256, sqrt_p: U256) -> U256 {
 
 /// token0 amount of the whole range when price is at (or below) `sqrt_pa`
 /// — the position is then 100% token0.
+#[inline]
 pub fn amount0_boundary(sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> U256 {
     let q = q96();
     let mut t = mul_div(liquidity, sqrt_pb - sqrt_pa, q);
@@ -124,6 +140,7 @@ pub fn amount0_boundary(sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> U256 {
 
 /// token1 amount of the whole range when price is at (or above) `sqrt_pb`
 /// — the position is then 100% token1.
+#[inline]
 pub fn amount1_boundary(sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> U256 {
     mul_div(liquidity, sqrt_pb - sqrt_pa, q96())
 }
@@ -133,6 +150,7 @@ pub fn amount1_boundary(sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> U256 {
 /// `V_lp(P_T)` in token1 wei — the value of the LP position at settlement
 /// price `sqrt_pt`. Three regimes: below `Pa` (all token0), above `Pb`
 /// (all token1), in range otherwise.
+#[inline]
 pub fn v_lp(sqrt_pt: U256, sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> U256 {
     if sqrt_pt < sqrt_pa {
         let a0_at_pa = amount0_boundary(sqrt_pa, sqrt_pb, liquidity);
@@ -146,12 +164,14 @@ pub fn v_lp(sqrt_pt: U256, sqrt_pa: U256, sqrt_pb: U256, liquidity: U256) -> U25
 }
 
 /// `V_hold(P_T) = amount0_entry · P_T + amount1_entry` in token1 wei.
+#[inline]
 pub fn v_hold(amount0_entry: U256, amount1_entry: U256, sqrt_pt: U256) -> U256 {
     amount0_in_token1(amount0_entry, sqrt_pt) + amount1_entry
 }
 
 /// Realized IL at settlement: `max(0, V_hold − V_lp)` (invariant I3 — the
 /// subtraction is guarded, never an unchecked underflow).
+#[inline]
 pub fn il_at(
     sqrt_pt: U256,
     sqrt_pa: U256,
@@ -341,15 +361,24 @@ mod tests {
     #[test]
     fn amounts_fixture_matches_python() {
         let (a0, a1) = entry(100, 80, 125);
-        assert!(close(a0, U256::from(10_557_280_900_008_417u128), 100), "amount0: {a0}");
-        assert!(close(a1, U256::from(1_055_728_090_000_841_200u128), 100), "amount1: {a1}");
+        assert!(
+            close(a0, U256::from(10_557_280_900_008_417u128), 100),
+            "amount0: {a0}"
+        );
+        assert!(
+            close(a1, U256::from(1_055_728_090_000_841_200u128), 100),
+            "amount1: {a1}"
+        );
     }
 
     #[test]
     fn maxil_fixture_matches_python() {
         // Python il.py MaxIL = 139.32022500210132 → ×1e15 at L=1e18.
         let mx = maxil(100, 80, 125);
-        assert!(close(mx, U256::from(139_320_225_002_101_320u128), 10_000), "MaxIL: {mx}");
+        assert!(
+            close(mx, U256::from(139_320_225_002_101_320u128), 10_000),
+            "MaxIL: {mx}"
+        );
     }
 
     #[test]
@@ -357,7 +386,10 @@ mod tests {
         let (a0, a1) = entry(100, 80, 125);
         let il_pa = il(80, 80, 125, a0, a1);
         let il_pb = il(125, 80, 125, a0, a1);
-        assert_eq!(maxil(100, 80, 125), if il_pa > il_pb { il_pa } else { il_pb });
+        assert_eq!(
+            maxil(100, 80, 125),
+            if il_pa > il_pb { il_pa } else { il_pb }
+        );
     }
 
     #[test]
@@ -366,7 +398,10 @@ mod tests {
         let (a0, a1) = entry(100, 80, 125);
         let il_pa = il(80, 80, 125, a0, a1);
         let il_pb = il(125, 80, 125, a0, a1);
-        assert!(il_pb > il_pa, "Pb should dominate: il_pa={il_pa} il_pb={il_pb}");
+        assert!(
+            il_pb > il_pa,
+            "Pb should dominate: il_pa={il_pa} il_pb={il_pb}"
+        );
         assert_eq!(maxil(100, 80, 125), il_pb);
     }
 
@@ -376,7 +411,10 @@ mod tests {
         let (a0, a1) = entry(120, 80, 125);
         let il_pa = il(80, 80, 125, a0, a1);
         let il_pb = il(125, 80, 125, a0, a1);
-        assert!(il_pa > il_pb, "Pa should dominate: il_pa={il_pa} il_pb={il_pb}");
+        assert!(
+            il_pa > il_pb,
+            "Pa should dominate: il_pa={il_pa} il_pb={il_pb}"
+        );
         assert_eq!(maxil(120, 80, 125), il_pa);
     }
 
@@ -391,13 +429,22 @@ mod tests {
     fn maxil_scales_linearly_in_l() {
         let mx1 = compute_max_il(sp(100), sp(80), sp(125), lv()).unwrap();
         let mx2 = compute_max_il(sp(100), sp(80), sp(125), lv() * U256::from(2u8)).unwrap();
-        assert!(close(mx2, mx1 * U256::from(2u8), 50), "MaxIL not linear: {mx1} {mx2}");
+        assert!(
+            close(mx2, mx1 * U256::from(2u8), 50),
+            "MaxIL not linear: {mx1} {mx2}"
+        );
     }
 
     #[test]
     fn maxil_out_of_range_returns_none() {
-        assert!(compute_max_il(sp(70), sp(80), sp(125), lv()).is_none(), "below Pa");
-        assert!(compute_max_il(sp(130), sp(80), sp(125), lv()).is_none(), "above Pb");
+        assert!(
+            compute_max_il(sp(70), sp(80), sp(125), lv()).is_none(),
+            "below Pa"
+        );
+        assert!(
+            compute_max_il(sp(130), sp(80), sp(125), lv()).is_none(),
+            "above Pb"
+        );
     }
 
     #[test]
@@ -446,8 +493,14 @@ mod tests {
     #[test]
     fn il_in_range_increases_away_from_entry() {
         let (a0, a1) = entry(100, 80, 125);
-        assert!(il(120, 80, 125, a0, a1) > il(110, 80, 125, a0, a1), "upward");
-        assert!(il(84, 80, 125, a0, a1) > il(92, 80, 125, a0, a1), "downward");
+        assert!(
+            il(120, 80, 125, a0, a1) > il(110, 80, 125, a0, a1),
+            "upward"
+        );
+        assert!(
+            il(84, 80, 125, a0, a1) > il(92, 80, 125, a0, a1),
+            "downward"
+        );
     }
 
     #[test]
@@ -456,7 +509,10 @@ mod tests {
         let il_1 = il(115, 80, 125, a0, a1);
         let (a0_2, a1_2) = amounts_at(sp(100), sp(80), sp(125), lv() * U256::from(2u8));
         let il_2 = il_at(sp(115), sp(80), sp(125), lv() * U256::from(2u8), a0_2, a1_2);
-        assert!(close(il_2, il_1 * U256::from(2u8), 100), "IL not linear: {il_1} {il_2}");
+        assert!(
+            close(il_2, il_1 * U256::from(2u8), 100),
+            "IL not linear: {il_1} {il_2}"
+        );
     }
 
     // ─── Task 2.6 — compute_il below Pa (4) ─────────────────────────────
@@ -474,7 +530,10 @@ mod tests {
         let il_79 = il(79, 80, 125, a0, a1);
         let il_70 = il(70, 80, 125, a0, a1);
         let il_60 = il(60, 80, 125, a0, a1);
-        assert!(il_60 > il_70 && il_70 > il_79, "IL must grow as price falls below Pa");
+        assert!(
+            il_60 > il_70 && il_70 > il_79,
+            "IL must grow as price falls below Pa"
+        );
     }
 
     #[test]
@@ -482,8 +541,10 @@ mod tests {
         // Fully token0 below Pa ⇒ V_lp(P) = amount0(Pa)·P, linear in price.
         let vlp_30 = v_lp(sp(30), sp(80), sp(125), lv());
         let vlp_60 = v_lp(sp(60), sp(80), sp(125), lv());
-        assert!(close(vlp_60, vlp_30 * U256::from(2u8), 10_000),
-            "below-Pa V_lp not linear: vlp30={vlp_30} vlp60={vlp_60}");
+        assert!(
+            close(vlp_60, vlp_30 * U256::from(2u8), 10_000),
+            "below-Pa V_lp not linear: vlp30={vlp_30} vlp60={vlp_60}"
+        );
     }
 
     #[test]
@@ -509,15 +570,26 @@ mod tests {
         let il_130 = il(130, 80, 125, a0, a1);
         let il_160 = il(160, 80, 125, a0, a1);
         let il_200 = il(200, 80, 125, a0, a1);
-        assert!(il_200 > il_160 && il_160 > il_130, "IL must grow as price rises above Pb");
+        assert!(
+            il_200 > il_160 && il_160 > il_130,
+            "IL must grow as price rises above Pb"
+        );
     }
 
     #[test]
     fn il_above_pb_vlp_constant() {
         // Fully token1 above Pb ⇒ V_lp(P) = amount1(Pb), constant in price.
         let cap = amount1_boundary(sp(80), sp(125), lv());
-        assert_eq!(v_lp(sp(130), sp(80), sp(125), lv()), cap, "V_lp must equal amount1(Pb)");
-        assert_eq!(v_lp(sp(300), sp(80), sp(125), lv()), cap, "V_lp must be constant");
+        assert_eq!(
+            v_lp(sp(130), sp(80), sp(125), lv()),
+            cap,
+            "V_lp must equal amount1(Pb)"
+        );
+        assert_eq!(
+            v_lp(sp(300), sp(80), sp(125), lv()),
+            cap,
+            "V_lp must be constant"
+        );
     }
 
     #[test]

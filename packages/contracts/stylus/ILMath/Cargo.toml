@@ -37,6 +37,10 @@ export-abi = ["stylus-sdk/export-abi"]
 [profile.release]
 codegen-units = 1
 strip = true
-lto = true
+lto = true # fat LTO — also drops host-only dead code (integer_sqrt/sqrt_price_x96/abs_diff)
 panic = "abort"
-opt-level = "z"
+# opt-level 3 (speed), not "z" (size): ILMath is a tiny compute kernel far under the
+# 24 KB cap, so trade a little WASM size for fewer instructions per call → lower ink/gas
+# (the FairValueOracle's single biggest gas drop came from opt-level 3 + inline; see
+# docs/STYLUS_FAIRVALUE_BENCHMARK.md §4).
+opt-level = 3
