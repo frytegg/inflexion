@@ -1,0 +1,154 @@
+[
+  {
+    "type": "function",
+    "name": "swaps",
+    "stateMutability": "view",
+    "inputs": [{ "name": "swapId", "type": "uint256" }],
+    "outputs": [
+      { "name": "tokenId", "type": "uint256" },
+      { "name": "lp", "type": "address" },
+      { "name": "mm", "type": "address" },
+      { "name": "V0", "type": "uint128" },
+      { "name": "maxIL", "type": "uint128" },
+      { "name": "collateral", "type": "uint128" },
+      { "name": "premium", "type": "uint128" },
+      { "name": "model", "type": "uint8" },
+      { "name": "settlement", "type": "uint8" },
+      { "name": "createdAt", "type": "uint64" },
+      { "name": "expiry", "type": "uint64" },
+      { "name": "amount0Entry", "type": "uint128" },
+      { "name": "amount1Entry", "type": "uint128" },
+      { "name": "liquidity", "type": "uint128" },
+      { "name": "status", "type": "uint8" }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "MarketRegistered",
+    "anonymous": false,
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true },
+      { "name": "token0", "type": "address", "indexed": false },
+      { "name": "token1", "type": "address", "indexed": false },
+      { "name": "fee", "type": "uint24", "indexed": false },
+      { "name": "durationSeconds", "type": "uint32", "indexed": false },
+      { "name": "oracleToken", "type": "address", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "MarketDeactivated",
+    "anonymous": false,
+    "inputs": [{ "name": "marketId", "type": "bytes32", "indexed": true }]
+  },
+  {
+    "type": "event",
+    "name": "TreasurySet",
+    "anonymous": false,
+    "inputs": [{ "name": "treasury", "type": "address", "indexed": true }]
+  },
+  {
+    "type": "event",
+    "name": "NoncesCancelled",
+    "anonymous": false,
+    "inputs": [
+      { "name": "mm", "type": "address", "indexed": true },
+      { "name": "nonces", "type": "uint256[]", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "SwapCreated",
+    "anonymous": false,
+    "inputs": [
+      { "name": "swapId", "type": "uint256", "indexed": true },
+      { "name": "lp", "type": "address", "indexed": true },
+      { "name": "mm", "type": "address", "indexed": true },
+      { "name": "tokenId", "type": "uint256", "indexed": false },
+      { "name": "V0", "type": "uint128", "indexed": false },
+      { "name": "maxIL", "type": "uint128", "indexed": false },
+      { "name": "premium", "type": "uint128", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "SwapSettled",
+    "anonymous": false,
+    "inputs": [
+      { "name": "swapId", "type": "uint256", "indexed": true },
+      { "name": "realisedIL", "type": "uint256", "indexed": false },
+      { "name": "payout", "type": "uint128", "indexed": false },
+      { "name": "settlementPrice", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "SwapRouted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "swapId", "type": "uint256", "indexed": true },
+      { "name": "pathB", "type": "bool", "indexed": false },
+      { "name": "premiumA", "type": "uint256", "indexed": false },
+      { "name": "premiumB", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "SwapPriced",
+    "anonymous": false,
+    "inputs": [
+      { "name": "swapId", "type": "uint256", "indexed": true },
+      { "name": "path", "type": "uint8", "indexed": false },
+      { "name": "fairPremium", "type": "uint256", "indexed": false },
+      { "name": "baseLoadWad", "type": "uint256", "indexed": false },
+      { "name": "utilSkewWad", "type": "uint256", "indexed": false },
+      { "name": "dispSkewWad", "type": "uint256", "indexed": false },
+      { "name": "totalLoadWad", "type": "uint256", "indexed": false },
+      { "name": "sigmaRefWad", "type": "uint256", "indexed": false },
+      { "name": "cappedAtMaxIL", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "QuoteFilled",
+    "anonymous": false,
+    "inputs": [
+      { "name": "swapId", "type": "uint256", "indexed": true },
+      { "name": "mm", "type": "address", "indexed": true },
+      { "name": "quoteId", "type": "bytes32", "indexed": true },
+      { "name": "nonce", "type": "uint256", "indexed": false },
+      { "name": "loadBps", "type": "uint16", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "CvammConfigured",
+    "anonymous": false,
+    "inputs": [
+      { "name": "convexityVault", "type": "address", "indexed": false },
+      { "name": "fairValueOracle", "type": "address", "indexed": false },
+      { "name": "volOracle", "type": "address", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "CvammFrozen",
+    "anonymous": false,
+    "inputs": []
+  },
+  {
+    "type": "event",
+    "name": "CvammEnabledSet",
+    "anonymous": false,
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true },
+      { "name": "enabled", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "LoadParamsSet",
+    "anonymous": false,
+    "inputs": []
+  }
+]
