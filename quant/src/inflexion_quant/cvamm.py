@@ -1,8 +1,7 @@
 """Single-asset cvAMM calibration engine (P1) — the launch pricing primitives.
 
-Promoted from the verified scratch sims (``_scratch_cvamm_sim.py`` +
-``_scratch_fairvalue_closedform_check.py``), wired to the repo's own ``il.py`` as
-the single source of truth. Produces the cvAMM-block deliverables that the
+Promoted from the verified scratch sim (``_scratch_fairvalue_closedform_check.py``),
+wired to the repo's own ``il.py`` as the single source of truth. Produces the cvAMM-block deliverables that the
 on-chain ``FairValueOracle`` + ``ConvexityVault`` read from ``params.json`` —
 **no pricing primitive is hardcoded** (CLAUDE.md invariant 6 / the audit failure).
 
