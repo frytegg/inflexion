@@ -1,0 +1,551 @@
+/**
+ * `DataClient` — the public DATA surface (§3.4 of the access-layer architecture).
+ *
+ * ─── THE SDK ↔ API/SUBGRAPH BOUNDARY (read this before adding a method) ───────
+ *
+ * The architecture splits the data-moat surfaces into TWO classes:
+ *
+ *   (1) HISTORY / AGGREGATE  → served by the SUBGRAPH, consumed via the public
+ *       cached API. These are NOT live RPC reads — the contracts store *current*
+ *       state only and emit events for the rest. The subgraph + API do NOT exist
+ *       yet (empty stubs — the single real blocker, §8.1). So every method here
+ *       that needs history returns a typed `Degraded<T>` whose `reason` is
+ *       `'no-history-source'` and whose `endpoint` names the FUTURE API route it
+ *       will call once wired. It NEVER throws and NEVER fabricates data.
+ *
+ *   (2) THE ONE LIVE EXCEPTION — the CURRENT pool LOAD SURFACE. This is a live,
+ *       uncached read: exactly the same multicall the MM `getMarketPricing` does
+ *       (fairPremium + inventory + sigmaRef + loadParams, finished with the
+ *       CvammPricing TS port), fanned out across a set of markets. It is reachable
+ *       TODAY from public getters (§4), so `getCurrentLoadSurface` is implemented
+ *       here against live RPC. The HISTORICAL evolution of this same surface
+ *       (`getLoadSurfaceHistory`) is class (1) — subgraph/API.
+ *
+ * This boundary is deliberate: the SDK is "instant freshness + transactions"; the
+ * API is "frictionless cached public read over the subgraph". `DataClient` is the
+ * only SDK module that is *mostly* a thin forward-declaration of the API — it
+ * exists now so callers can code against stable typed shapes and get graceful
+ * degradation until the API ships, at which point the same degraded path becomes
+ * the tested fallback when the API/subgraph is unreachable or stale.
+ *
+ * GRACEFUL DEGRADATION is a first-class property here: an absent API, an absent
+ * rich event (`QuoteFilled`/`SwapPriced` are pre-redeploy), a reverting oracle on
+ * one market in the live surface — all return typed degraded results, never throw.
+ *
+ * Pricing rule (inherited from CLAUDE.md / §2): the live surface reads the fair
+ * value from the on-chain `FairValueOracle` closed form — NEVER reimplements the
+ * Φ-sum. It MAY re-evaluate the deterministic `pure` load stack client-side (the
+ * CvammPricing TS port, parity-tested against the deployed lib) — that is the only
+ * permitted duplication.
+ */
+import type { Address, Hex, PublicClient } from 'viem'
+
+import { core as coreAddrs, stylus as stylusAddrs } from './addresses.js'
+import { convexityVaultAbi, fairValueOracleAbi, inflexionCoreAbi, volOracleAbi } from './abis.js'
+import { decodeLoadParams } from './decode.js'
+import { loadComponents, premiumFromLoad, regimeOf } from './math.js'
+import type { Degraded, LoadParams, MarketConfig, MarketPricing } from './types.js'
+
+// ─── Future API routes (the SDK ↔ API contract, named here so callers can read
+//     them and so the Integrate phase wires the same strings) ──────────────────
+
+/** The public API routes the history/aggregate methods will forward to once the
+ *  subgraph + API ship. Stated here verbatim as the SDK-side half of the contract. */
+export const DATA_API_ROUTES = {
+  /** PUB-1: clearing-load surface time series (subgraph `MarketStateSnapshot[]`). */
+  loadSurface: '/data/load-surface',
+  /** PUB-5: pool-vs-MM load spread + MM win-rate (subgraph `SwapPriced`/`QuoteFilled`). */
+  quoteCompetition: '/data/quote-competition',
+  /** PUB-5 (latent half): off-chain `/quote` + `previewPremium` telemetry. */
+  demandRequests: '/data/demand-requests',
+  /** PUB-2 / DEP-8: per-tranche NAV day-by-day (subgraph `PoolDaySnapshot[]`). */
+  navHistory: '/pool/nav-history',
+  /** PUB-4 / Signal 5: protocol-wide net-gamma supply (off-chain Greeks over open set). */
+  netGamma: '/data/net-gamma',
+} as const
+
+export type DataApiRoute = (typeof DATA_API_ROUTES)[keyof typeof DATA_API_ROUTES]
+
+// ─── Degraded envelope specialisation for the API-backed methods ──────────────
+
+/** Extra metadata every API-backed degraded result carries: the future endpoint
+ *  + the query that WOULD be sent, so a caller can wire the API later with zero
+ *  re-derivation, and a UI can show "coming from <route>" today. */
+export interface ApiPending {
+  /** Always false here — the API/subgraph is not wired yet. */
+  available: false
+  /** Typed reason (always `'no-history-source'` for these — the source is absent). */
+  reason: 'no-history-source'
+  /** The FUTURE public API route this method forwards to once the API ships. */
+  endpoint: DataApiRoute
+  /** The query params that will be sent to `endpoint` (echoed back for the caller). */
+  query: Record<string, string>
+  /** Human-readable note (the maturity / build-gap disclaimer). */
+  detail: string
+}
+
+/** A history/aggregate result: the rich `T` once the API is wired, else `ApiPending`. */
+export type ApiBacked<T> = ({ available: true } & T) | ApiPending
+
+// ─── Live "current pool load surface" types (the ONE non-degraded method) ─────
+
+/** Per-market geometry inputs for the live fair-premium read. If omitted for a
+ *  market, a neutral reference geometry is used (the LOAD multiplier is geometry-
+ *  independent; only `fairPremium`/`poolPremium` scale with a/b/maxIL — see note). */
+export interface SurfaceGeometryInput {
+  /** a = (Pa/P0)² (WAD). */
+  aWad: bigint
+  /** b = (Pb/P0)² (WAD). */
+  bWad: bigint
+  /** MaxIL (USDC raw) — the cap the pool premium is clamped to. */
+  maxIL: bigint
+}
+
+/** A single market's live pricing row, or a typed "could not price" envelope.
+ *  Discriminate on `available`: the oracle can revert per-market (stale feed /
+ *  sequencer down) or the market can be unknown/inactive. */
+export type SurfaceRow =
+  | ({ available: true } & MarketPricing)
+  | {
+      available: false
+      marketId: Hex
+      reason: 'oracle-degraded' | 'market-unknown'
+      detail: string
+    }
+
+/** The live load surface across a set of markets (one multicall + per-row decode). */
+export interface LoadSurface {
+  /** Per-market rows (degraded rows are inlined, never dropped — caller sees gaps). */
+  rows: SurfaceRow[]
+  /** Block the surface was read at (for the caller's freshness accounting). */
+  blockNumber?: bigint
+  /** Verbatim: this is a LIVE uncached read; the historical surface is the API. */
+  note: string
+}
+
+export interface CurrentLoadSurfaceArgs {
+  /** Markets to read. Each is a marketId; optional per-market geometry override. */
+  markets: ReadonlyArray<{ marketId: Hex; geometry?: SurfaceGeometryInput }>
+}
+
+// ─── Neutral reference geometry (used when a market supplies none) ────────────
+// The pool LOAD stack (baseLoad+util+disp) is geometry-INDEPENDENT — it is a
+// function of (σ_ref, util, conc) only. So for a load *surface* the geometry only
+// affects the absolute `fairPremium`/`poolPremium` dollar figures, not the load %.
+// A centered a<1<b with a $1k MaxIL gives a well-formed in-range fairPremium read;
+// callers wanting dollar-accurate premiums pass real geometry per market.
+const REF_A_WAD = 810_000_000_000_000_000n // a = 0.81  (Pa/P0 = 0.9)
+const REF_B_WAD = 1_210_000_000_000_000_000n // b = 1.21  (Pb/P0 = 1.1)
+const REF_MAXIL = 1_000_000_000n // $1,000 (6-dec) reference cap
+
+/** Detect the OracleManager / FairValueOracle "not priceable" revert set. The FVO
+ *  reads the last-poked σ_ref and computes fairPremium; if the underlying oracle is
+ *  stale / sequencer-down / σ_ref uninitialised the call reverts. We classify ALL
+ *  call failures here as oracle-degraded (the surface row is inlined, not thrown). */
+function isOracleDegraded(_err: unknown): boolean {
+  // Conservative: any failure of the fairPremium leg is treated as degraded so a
+  // single bad market never throws the whole surface. (The precise revert-string
+  // set tightens post-redeploy when typed errors land.)
+  return true
+}
+
+/**
+ * DataClient — thin typed wrappers for the public data surfaces.
+ *
+ * - ONE live method (`getCurrentLoadSurface`) — multicall over public getters.
+ * - The rest forward-declare the FUTURE API/subgraph routes and return typed
+ *   `ApiPending` results today (graceful degradation; never throw).
+ */
+export class DataClient {
+  constructor(
+    private readonly client: PublicClient,
+    private readonly opts: {
+      coreAddress?: Address
+      convexityVaultAddress?: Address
+      fairValueOracleAddress?: Address
+      volOracleAddress?: Address
+    } = {},
+  ) {}
+
+  private get core(): Address {
+    return this.opts.coreAddress ?? coreAddrs.inflexionCore
+  }
+  private get convexityVault(): Address {
+    return this.opts.convexityVaultAddress ?? coreAddrs.convexityVault
+  }
+  private get fvo(): Address {
+    return this.opts.fairValueOracleAddress ?? stylusAddrs.fairValueOracle
+  }
+  private get vol(): Address {
+    return this.opts.volOracleAddress ?? coreAddrs.volOracle
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // (2) THE ONE LIVE SURFACE — current pool load across markets.
+  //     Same read set as MM `getMarketPricing`, fanned out. Live + uncached.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Read the CURRENT pool load surface across a set of markets — the live,
+   * uncached "price-to-beat" snapshot. This is the only `DataClient` method that
+   * hits live RPC instead of the (not-yet-built) API; the historical evolution of
+   * the same surface is `getLoadSurfaceHistory` (API-backed, degraded today).
+   *
+   * Read set per market (one multicall over all markets + a shared loadParams):
+   *   - `InflexionCore.markets(marketId)`            → config (oracleToken, duration)
+   *   - `FairValueOracle.fairPremium(token,a,b,T,maxIL)` → (premium, fairRate, σ_ref)
+   *   - `ConvexityVault.inventory()`                 → (total, locked, free, util, conc)
+   *   - `InflexionCore.loadParams()`                 → load-stack params (read ONCE)
+   * then the load stack (baseLoad/util/disp/total) is finished client-side via the
+   * CvammPricing TS port and `poolPremium = ceil(fairPremium·(1+totalLoad))` capped.
+   *
+   * Per-market graceful degradation: an unknown/inactive market or a reverting
+   * oracle yields an inlined degraded `SurfaceRow`, never a thrown call.
+   *
+   * NOTE: the on-chain `loadComponents` view is coded-but-not-deployed; the per-
+   * component skews come from the parity-tested TS port until the single redeploy,
+   * at which point this method can switch to the rich on-chain call with no shape
+   * change (the `MarketPricing` fields are identical).
+   */
+  async getCurrentLoadSurface(args: CurrentLoadSurfaceArgs): Promise<LoadSurface> {
+    const note =
+      'LIVE uncached pool-load surface (one multicall over public getters); the ' +
+      'historical evolution is served by the subgraph/API via getLoadSurfaceHistory.'
+
+    if (args.markets.length === 0) {
+      return { rows: [], note }
+    }
+
+    // ── 1. Shared reads: loadParams + inventory (one read each, market-agnostic) ──
+    // These are pool-wide and immutable-ish; read once and reuse across rows.
+    let params: LoadParams
+    let inv: { util: bigint; conc: bigint }
+    try {
+      const [loadParamsTuple, inventory] = await Promise.all([
+        this.client.readContract({
+          address: this.core,
+          abi: inflexionCoreAbi,
+          functionName: 'loadParams',
+          args: [],
+        }),
+        this.client.readContract({
+          address: this.convexityVault,
+          abi: convexityVaultAbi,
+          functionName: 'inventory',
+          args: [],
+        }),
+      ])
+      params = decodeLoadParams(loadParamsTuple)
+      inv = { util: inventory[3], conc: inventory[4] }
+    } catch {
+      // Pool-wide reads failed (no RPC / core unreachable) → every row degrades.
+      const rows: SurfaceRow[] = args.markets.map((m) => ({
+        available: false,
+        marketId: m.marketId,
+        reason: 'oracle-degraded',
+        detail: 'pool-wide loadParams()/inventory() read failed (RPC unreachable?)',
+      }))
+      return { rows, note }
+    }
+
+    // ── 2. Per-market configs (multicall — markets are independent) ──
+    const cfgCalls = args.markets.map((m) => ({
+      address: this.core,
+      abi: inflexionCoreAbi,
+      functionName: 'markets' as const,
+      args: [m.marketId] as const,
+    }))
+    const cfgResults = await this.client.multicall({ contracts: cfgCalls, allowFailure: true })
+
+    // Build the set of priceable markets + their fairPremium calls.
+    type Pending = {
+      idx: number
+      marketId: Hex
+      config: MarketConfig
+      geometry: SurfaceGeometryInput
+    }
+    const rows: SurfaceRow[] = new Array<SurfaceRow>(args.markets.length)
+    const priceable: Pending[] = []
+
+    for (let i = 0; i < args.markets.length; i++) {
+      const m = args.markets[i]!
+      const cfgRes = cfgResults[i]
+      if (cfgRes === undefined || cfgRes.status !== 'success') {
+        rows[i] = {
+          available: false,
+          marketId: m.marketId,
+          reason: 'market-unknown',
+          detail: 'markets(marketId) read failed',
+        }
+        continue
+      }
+      const cfg: MarketConfig = {
+        marketId: m.marketId,
+        token0: cfgRes.result[0],
+        token1: cfgRes.result[1],
+        fee: cfgRes.result[2],
+        durationSeconds: cfgRes.result[3],
+        oracleToken: cfgRes.result[4],
+        token0Decimals: cfgRes.result[5],
+        token1Decimals: cfgRes.result[6],
+        oracleDecimals: cfgRes.result[7],
+        active: cfgRes.result[8],
+      }
+      // An unregistered marketId returns the zero tuple; treat zero oracleToken /
+      // inactive as unknown so the row is honestly degraded (not a $0 fair price).
+      if (
+        cfg.oracleToken === '0x0000000000000000000000000000000000000000' ||
+        cfg.durationSeconds === 0
+      ) {
+        rows[i] = {
+          available: false,
+          marketId: m.marketId,
+          reason: 'market-unknown',
+          detail: 'market not registered (zero config tuple)',
+        }
+        continue
+      }
+      const geometry = m.geometry ?? { aWad: REF_A_WAD, bWad: REF_B_WAD, maxIL: REF_MAXIL }
+      priceable.push({ idx: i, marketId: m.marketId, config: cfg, geometry })
+    }
+
+    // ── 3. fairPremium per priceable market (multicall; oracle can revert per row) ──
+    if (priceable.length > 0) {
+      const fpCalls = priceable.map((p) => ({
+        address: this.fvo,
+        abi: fairValueOracleAbi,
+        functionName: 'fairPremium' as const,
+        args: [
+          p.config.oracleToken,
+          p.geometry.aWad,
+          p.geometry.bWad,
+          BigInt(p.config.durationSeconds),
+          p.geometry.maxIL,
+        ] as const,
+      }))
+      const fpResults = await this.client.multicall({ contracts: fpCalls, allowFailure: true })
+
+      for (let j = 0; j < priceable.length; j++) {
+        const p = priceable[j]!
+        const fp = fpResults[j]
+        if (fp === undefined || fp.status !== 'success') {
+          rows[p.idx] = {
+            available: false,
+            marketId: p.marketId,
+            reason: 'oracle-degraded',
+            detail:
+              fp !== undefined && fp.status === 'failure' && isOracleDegraded(fp.error)
+                ? 'FairValueOracle.fairPremium reverted (stale feed / sequencer down / σ_ref uninitialised)'
+                : 'FairValueOracle.fairPremium call failed',
+          }
+          continue
+        }
+        const fairPremium = fp.result[0]
+        const fairRateWad = fp.result[1]
+        const sigmaRefWad = fp.result[2]
+
+        // Finish the load stack client-side (CvammPricing TS port, parity-tested).
+        const load = loadComponents(sigmaRefWad, inv.util, inv.conc, params)
+        const poolPremiumUncapped = premiumFromLoad(fairPremium, load.totalLoadWad)
+        const poolPremium =
+          poolPremiumUncapped > p.geometry.maxIL ? p.geometry.maxIL : poolPremiumUncapped
+
+        const pricing: MarketPricing = {
+          marketId: p.marketId,
+          fairPremium,
+          fairRateWad,
+          sigmaRefWad,
+          poolPremium,
+          maxIL: p.geometry.maxIL,
+          load,
+          util: inv.util,
+          conc: inv.conc,
+          regime: regimeOf(sigmaRefWad, params),
+        }
+        rows[p.idx] = { available: true, ...pricing }
+      }
+    }
+
+    // Best-effort block number for freshness (non-fatal if it fails).
+    let blockNumber: bigint | undefined
+    try {
+      blockNumber = await this.client.getBlockNumber()
+    } catch {
+      blockNumber = undefined
+    }
+
+    return blockNumber === undefined ? { rows, note } : { rows, blockNumber, note }
+  }
+
+  /** Read the σ_ref the load surface was/ would be priced against for one token —
+   *  a live convenience used to annotate the surface. Returns a typed degraded
+   *  result if the VolOracle is uninitialised for the token (never throws). */
+  async getSurfaceSigmaRef(
+    token: Address,
+  ): Promise<Degraded<{ sigmaRefWad: bigint; regime: ReturnType<typeof regimeOf> }>> {
+    try {
+      const [sigmaRefWad, loadParamsTuple] = await Promise.all([
+        this.client.readContract({
+          address: this.vol,
+          abi: volOracleAbi,
+          functionName: 'sigmaRef',
+          args: [token],
+        }),
+        this.client.readContract({
+          address: this.core,
+          abi: inflexionCoreAbi,
+          functionName: 'loadParams',
+          args: [],
+        }),
+      ])
+      const params = decodeLoadParams(loadParamsTuple)
+      return { available: true, sigmaRefWad, regime: regimeOf(sigmaRefWad, params) }
+    } catch {
+      return {
+        available: false,
+        reason: 'VolOracle.sigmaRef reverted (token not initialised) — poke it first',
+      }
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // (1) HISTORY / AGGREGATE SURFACES — subgraph-backed via the public API.
+  //     The subgraph + API do NOT exist yet (§8.1 — the single real blocker), so
+  //     each returns a typed `ApiPending` naming the FUTURE route + the query it
+  //     will send. Wiring the API later means: replace the body with a fetch to
+  //     `endpoint?<query>` — the shape and the route are already the contract.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * PUB-1 — clearing-load surface time series (the alpha signal): util/conc time-
+   * buckets + `totalLoadWad` per bucket, per-fill realized load reconstructed.
+   *
+   * History/aggregate → API (`GET /data/load-surface`). Degraded today: the
+   * subgraph indexes `MarketStateSnapshot` and joins `SwapPriced`/`QuoteFilled`
+   * (the rich per-fill load events ship at the redeploy). For the CURRENT (non-
+   * historical) load surface, use `getCurrentLoadSurface` (live).
+   */
+  async getLoadSurfaceHistory(args: {
+    marketId: Hex
+    from?: number
+    to?: number
+    bucket?: '1h' | '1d'
+  }): Promise<ApiPending> {
+    return this.pending(DATA_API_ROUTES.loadSurface, {
+      marketId: args.marketId,
+      ...(args.from !== undefined ? { from: String(args.from) } : {}),
+      ...(args.to !== undefined ? { to: String(args.to) } : {}),
+      bucket: args.bucket ?? '1d',
+    })
+  }
+
+  /**
+   * PUB-5 (Signal 2) — pool-vs-MM load SPREAD + MM win-rate / win-depth.
+   *
+   * History/aggregate → API (`GET /data/quote-competition`). Degraded today: needs
+   * the redeploy's `SwapPriced` (mechanical pool baseline = the price-to-beat) +
+   * `QuoteFilled.loadBps` (behavioral MM load) joined per swap, plus the off-chain
+   * engine quote-competition telemetry for the dynamic half. The maturity caveat
+   * (structural at launch; dynamic only with ≥3 competing MMs) is carried verbatim.
+   */
+  async getQuoteCompetition(args: {
+    marketId?: Hex
+    from?: number
+    to?: number
+  }): Promise<ApiPending> {
+    return this.pending(DATA_API_ROUTES.quoteCompetition, {
+      ...(args.marketId !== undefined ? { marketId: args.marketId } : {}),
+      ...(args.from !== undefined ? { from: String(args.from) } : {}),
+      ...(args.to !== undefined ? { to: String(args.to) } : {}),
+    })
+  }
+
+  /**
+   * PUB-5 (Signal 4 latent half) — demand requests including UNFILLED interest
+   * (geometries LPs priced but did not buy).
+   *
+   * History/aggregate → API (`GET /data/demand-requests`). Degraded today AND by
+   * design: this data NEVER reaches the chain (I7 — an unchosen quote touches no
+   * nonce/capacity). It is OFF-CHAIN engine/relayer telemetry, surfaced by the API.
+   * There is no live RPC fallback — the realized half is on-chain (subgraph), the
+   * latent half is only ever telemetry.
+   */
+  async getDemandRequests(args: {
+    marketId?: Hex
+    from?: number
+    to?: number
+  }): Promise<ApiPending> {
+    return this.pending(DATA_API_ROUTES.demandRequests, {
+      ...(args.marketId !== undefined ? { marketId: args.marketId } : {}),
+      ...(args.from !== undefined ? { from: String(args.from) } : {}),
+      ...(args.to !== undefined ? { to: String(args.to) } : {}),
+    })
+  }
+
+  /**
+   * PUB-2 / DEP-8 — per-tranche NAV day-by-day stress history.
+   *
+   * History/aggregate → API (`GET /pool/nav-history`). Degraded today: the
+   * subgraph computes `PoolDaySnapshot` from `Deposited`/`Withdrawn`/
+   * `PremiumAccrued`/`SettlementReleased`/`JuniorLoss`. Carries claim (B): depositor
+   * capital is NOT guaranteed — NAV history is a depositor-risk surface, distinct
+   * from the qualified claim (A) "LPs are always paid (no bad debt, FULL, I1)".
+   */
+  async getNavHistory(args: { from?: number; to?: number; bucket?: '1d' }): Promise<ApiPending> {
+    return this.pending(
+      DATA_API_ROUTES.navHistory,
+      {
+        ...(args.from !== undefined ? { from: String(args.from) } : {}),
+        ...(args.to !== undefined ? { to: String(args.to) } : {}),
+        bucket: args.bucket ?? '1d',
+      },
+      // Claim (B) disclosure folded into the detail — NEVER merged with claim (A).
+      'depositor NAV history (claim B: depositor capital is NOT guaranteed — ' +
+        'junior is first-loss, senior is systemic-tail exposed).',
+    )
+  }
+
+  /**
+   * PUB-4 (Signal 5) — protocol-wide NET CONVEXITY / GAMMA supply: total gamma the
+   * protocol is short (pool + all MMs) at what aggregate load, plus Σfree/Σlocked.
+   *
+   * History/aggregate → API (`GET /data/net-gamma`). Degraded today: OFF-CHAIN
+   * compute over the subgraph-tracked open swap set (`SwapCreated` opens,
+   * `SwapSettled` closes), summing per-swap Greeks finite-differenced from the
+   * deployed `ILMath.computeIL` / `FairValueOracle.fairRate` (§5.5 — no parallel
+   * model). NOT a contract event. Live SDK has no aggregator (needs the open set).
+   */
+  async getNetGamma(args: { marketId?: Hex } = {}): Promise<ApiPending> {
+    return this.pending(DATA_API_ROUTES.netGamma, {
+      ...(args.marketId !== undefined ? { marketId: args.marketId } : {}),
+    })
+  }
+
+  // ─── Internal: build the typed `ApiPending` envelope ──────────────────────────
+
+  private pending(
+    endpoint: DataApiRoute,
+    query: Record<string, string>,
+    extra?: string,
+  ): ApiPending {
+    const base =
+      `the subgraph + public API are not wired yet (build gap, ACCESS_LAYER §8.1); ` +
+      `this surface will be served by '${endpoint}'. Returning a typed degraded ` +
+      `result — the SDK never fabricates history.`
+    return {
+      available: false,
+      reason: 'no-history-source',
+      endpoint,
+      query,
+      detail: extra === undefined ? base : `${extra} ${base}`,
+    }
+  }
+}
+
+/** Convenience constructor matching the other surface modules' factory style. */
+export function makeDataClient(
+  client: PublicClient,
+  opts?: ConstructorParameters<typeof DataClient>[1],
+): DataClient {
+  return new DataClient(client, opts ?? {})
+}
