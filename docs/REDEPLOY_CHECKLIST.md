@@ -48,6 +48,35 @@ From the access-layer verification (`docs/ACCESS_LAYER_ARCHITECTURE.md`): CvammP
 
 The SDK `LpClient.previewPremium` now fires the best-effort `POST ${engineBaseUrl}/telemetry/preview` ping (fire-and-forget; swallows every error — never blocks/fails the preview). Combined with the engine's `TelemetrySink` (`DEMAND_LOG`/`COMPETITION_LOG`), Signals 2 & 4's dynamic halves are captured **from the first interaction, before the API exists**. **Set `DEMAND_LOG` + `COMPETITION_LOG` on the engine NOW** (see `docs/ENGINE_TELEMETRY.md`) — anything not captured before the redeploy is lost forever (I7). This is independent of the contract redeploy.
 
+## Subgraph completion (pre-deploy — needs `graph build` on the home PC)
+
+Bounded gap from the P4.c build (`docs/ACCESS_LAYER_ARCHITECTURE.md` §6 note #6):
+`handleSwapCreated` does **not** derive `marketId` (the `SwapCreated`/`SwapPriced`/
+`QuoteFilled` events + `SwapRecord` all omit it), so `Swap.market` stays null, the
+per-market `Market` lifetime counters (`totalSwaps`/`totalV0`/`totalPremium`/
+`totalPayout`/`pathBFills`/`totalSettled`) stay zero-init, and `MarketStateSnapshot`
+is written by no handler. Effect: per-market volume/share (MM-11), the `/markets`
+counters, and the per-market `/data/load-surface` series are empty. The
+geometry-bucketed signals (S1/S2/S3/S4 via `BucketAggregate`/`GeometryDemandBucket`)
+and protocol-wide S5 are **unaffected**.
+
+Fix (do before `build:wasm`/`deploy`; verify with `graph build`, which is home-PC-only):
+
+1. In `handleSwapCreated`, derive `marketId =
+keccak256(abi.encodePacked(token0, token1, fee, uint32(expiry - createdAt)))` — the
+   `token0`/`token1`/`fee` are already decoded from the `NPM.positions(tokenId)` bind
+   done for the geometry buckets; use graph-ts `ethereum.encode` + `crypto.keccak256`.
+2. Set `Swap.market`, increment the `Market` lifetime counters, and write
+   `MarketStateSnapshot` from `ConvexityVault.CollateralLocked(marketId, …)` (which
+   **does** carry the `marketId`).
+3. _(optional, manifest-only)_ add UnderwriterVault/ILVault data sources if on-chain
+   Path-B MM-collateral / fee history is wanted (today MM PnL is reconstructed from
+   InflexionCore events, and live LP fees come from the SDK).
+
+Re-run `graph codegen` + `graph build` to confirm the AssemblyScript compiles before
+deploying. (CI only runs `graph codegen`; the WASM compile that catches AS bugs is
+home-PC-only.)
+
 ## Redeploy steps (run once, on WSL2)
 
 1. Size-pass `InflexionCore` back ≤ 24,576 B (above).
