@@ -88,6 +88,27 @@ library CvammPricing {
         return total > maxLoad ? maxLoad : total;
     }
 
+    /// @notice The load stack broken into its three components + the I10-clamped
+    ///         total (WAD). Same math as {totalLoadWad}, but returns the parts —
+    ///         it feeds the `SwapPriced` event (clearing-load data moat) and the
+    ///         SDK depositor/MM "two skews separately" surface (the component
+    ///         functions are otherwise `internal`/not externally callable).
+    /// @dev    `total` is the I10-clamped sum; the returned components are
+    ///         PRE-clamp, so `baseLoad + utilSkew + dispSkew` may exceed `total`.
+    function loadComponents(
+        uint256 sigmaRefWad,
+        uint256 uWad,
+        uint256 hWad,
+        LoadParams memory p
+    ) public pure returns (uint256 baseLoad, uint256 utilSkew, uint256 dispSkew, uint256 total) {
+        baseLoad = baseLoadWad(sigmaRefWad, p);
+        utilSkew = utilSkewWad(uWad, p);
+        dispSkew = dispSkewWad(hWad, p);
+        uint256 sum = baseLoad + utilSkew + dispSkew;
+        uint256 maxLoad = p.maxLoadBps * BPS_TO_WAD;
+        total = sum > maxLoad ? maxLoad : sum;
+    }
+
     /// @notice `premium = ceil(FairPremium · (1 + totalLoad))` (round up, F-#8).
     function premiumFromLoad(
         uint256 fairPremium,
