@@ -48,3 +48,27 @@ jobs:
       - name: Forge test
         working-directory: packages/contracts
         run: forge test -vvv
+
+  ts-build-test:
+    # Builds + tests the TypeScript workspace packages (engine, sdk, and — once
+    # added — subgraph/api). packages/contracts has no package.json so `pnpm -r`
+    # skips it (no forge here). RPC-gated SDK tests self-skip without an RPC.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.2 --activate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+      - name: Build TS packages
+        run: pnpm -r build
+      - name: Test TS packages
+        run: pnpm -r test
