@@ -20,6 +20,13 @@ list).
 | PARTIAL mode                       | ⏸️ Phase 15 (stretch — gated on quant; not in v1)                                           |
 | Stylus ILMath cross-check          | ⏸️ Task 2.11 (pending — home-PC track)                                                      |
 
+> **CI scope:** GitHub Actions (`.github/workflows/ci.yml`) runs only `forge fmt` +
+> `forge build` + `forge test`. It does **not** run `cargo` / `cargo stylus`, the
+> Node benchmark scripts, or the Python suite — so all **Stylus** and **quant**
+> validation is manual (local Nitro / WSL2). The Solidity `FairValueOracle` _is_
+> exercised in CI (it is what `forge test` compiles), which is why it is retained
+> as the revm-executable cross-check of the shipped Stylus oracle.
+
 ---
 
 ## 1. Invariants
@@ -173,6 +180,26 @@ oracle pinning, and aligns the code to spec §5.2/§5.4 (which already specified
 Roadmap hardening (not blocking): decimals are validated on-chain today; for any
 future **non-USD-quoted** pair the USD-stable = \$1 numéraire assumption (spec §19)
 must be revisited before listing.
+
+### 3.5 `r = 0` / zero-drift forward assumption (fairRate)
+
+`fairRate = E_Q[min(IL, MaxIL)] / MaxIL` is priced under risk-neutral GBM with the
+forward pinned at `F = P0` (martingale, `r = 0`, `q = 0`). A nonzero financing rate
+`r` or ETH staking yield `q` tilts the true risk-neutral forward to
+`F = P0·exp((r − q)·T)`, and the v3 IL payoff is asymmetric about `P0`, so the tilt
+is not strictly price-neutral. **Sized and found economically negligible at launch
+scope** (re-pricing `il.py` under a forward-tilted terminal across widths ±5–50% and
+7/30/90-day durations, σ = 0.6):
+
+- Worst **absolute** move: **+0.32 pts of MaxIL** (±20%, 90d, aggressive
+  `θ = r − q = −0.08`); worst **relative** move: **+0.7%**.
+- Worked $50k / ±10% / 30d position (MaxIL $1,280): premium moves ≤ **$1.30** even at
+  `θ = −0.08`; ≤ **$2.50** at 90d — at/below the $1 dust-floor resolution for typical
+  carry (`|θ| ≤ 0.04`) and well inside the load.
+
+Conclusion: `r = 0` is acceptable for the buildathon; revisit only for long-dated
+(≥ 90d) or high-carry pairs. _(Original red-team sizing; the scratch script that
+produced these figures has been removed — this paragraph is the retained record.)_
 
 ---
 
