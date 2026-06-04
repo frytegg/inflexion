@@ -1,0 +1,24 @@
+[
+  {
+    "type": "event",
+    "name": "Poked",
+    "anonymous": false,
+    "inputs": [
+      { "name": "token", "type": "address", "indexed": true },
+      { "name": "priceWad", "type": "uint256", "indexed": false },
+      { "name": "dtSeconds", "type": "uint256", "indexed": false },
+      { "name": "sigmaShortWad", "type": "uint256", "indexed": false },
+      { "name": "sigmaLongWad", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Initialized",
+    "anonymous": false,
+    "inputs": [
+      { "name": "token", "type": "address", "indexed": true },
+      { "name": "priceWad", "type": "uint256", "indexed": false },
+      { "name": "floorWad", "type": "uint256", "indexed": false }
+    ]
+  }
+]

@@ -1,0 +1,383 @@
+# Inflexion subgraph schema — the queryable store the public API reads.
+#
+# Mapped to the FIVE data-moat signals (docs/ACCESS_LAYER_ARCHITECTURE.md §5–6).
+# Every signal is reconstructable as a CURRENT SNAPSHOT (latest aggregate row)
+# AND a HISTORICAL SERIES (per-fill rows + time-bucketed snapshots).
+#
+# Honest-framing reminders baked into the design:
+#   - NO `impliedVol` field anywhere — inverting fairRate is circular (dropped).
+#   - The MM `loadBps` (Path B) is the single NON-CIRCULAR load datum; the pool
+#     `totalLoadWad` (Path A) is the mechanical baseline / price-to-beat.
+#   - Cap-bound fills (`cappedAtMaxIL == true`) carry ZERO load information and are
+#     excluded from the load aggregates (Signals 1/2/3) — see BucketAggregate.
+#   - The DYNAMIC halves of Signals 2 & 4 (quote competition, latent demand) are
+#     OFF-CHAIN engine telemetry, served by the API — NOT subgraph entities.
+#   - Signal 5 net-gamma Greeks are OFF-CHAIN compute over the active-swap set the
+#     subgraph tracks (`Swap.isActive`); NetGammaSnapshot is written back by the API.
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Market directory (from MarketRegistered + cvAMM config events)
+# ───────────────────────────────────────────────────────────────────────────────
+
+type Market @entity(immutable: false) {
+  "marketId = keccak256(token0, token1, fee, durationSeconds)"
+  id: ID!
+  token0: Bytes!
+  token1: Bytes!
+  fee: Int!
+  durationSeconds: Int!
+  "Coarse duration bucket derived from durationSeconds (hour|day|week|month|longer)."
+  durationBucket: String!
+  oracleToken: Bytes!
+  "Active per MarketRegistered/MarketDeactivated."
+  active: Boolean!
+  "Path-A cvAMM rail enabled (from CvammEnabledSet); null until first set."
+  cvammEnabled: Boolean
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  "Lifetime counters (denormalised for cheap directory reads)."
+  totalSwaps: Int!
+  totalSettled: Int!
+  totalV0: BigInt!
+  totalPremium: BigInt!
+  totalPayout: BigInt!
+  pathBFills: Int!
+  swaps: [Swap!]! @derivedFrom(field: "market")
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Swap — full lifecycle: SwapCreated → SwapPriced → QuoteFilled → SwapSettled.
+# The atomic record every per-fill signal joins on.
+# ───────────────────────────────────────────────────────────────────────────────
+
+enum SwapStatus {
+  ACTIVE
+  SETTLED
+}
+
+enum SwapPath {
+  UNKNOWN
+  POOL_A
+  MM_B
+}
+
+type Swap @entity(immutable: false) {
+  "swapId (decimal string)."
+  id: ID!
+  market: Market
+  status: SwapStatus!
+  "Open-set membership for Signal 5 (true between SwapCreated and SwapSettled)."
+  isActive: Boolean!
+
+  # ── SwapCreated ──
+  lp: Bytes!
+  "Counterparty: for Path A this is the ConvexityVault; for Path B the MM EOA."
+  mm: Bytes!
+  tokenId: BigInt!
+  v0: BigInt!
+  maxIL: BigInt!
+  premium: BigInt!
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  expiryTimestamp: BigInt
+  "expiry − createdAt (seconds); null until derivable."
+  durationSeconds: Int
+
+  # ── Decoded geometry (NPM.positions at the SwapCreated block) ──
+  tickLower: Int
+  tickUpper: Int
+  liquidity: BigInt
+  "log(Pb/Pa) proxy → tick span; coarse width bucket (tight|medium|wide|full|unknown)."
+  widthBucket: String!
+  "min(P0−Pa, Pb−P0)/P0 proxy from ticks; coarse distance bucket (at-edge|near|mid|deep|unknown)."
+  distanceBucket: String!
+  "hour|day|week|month|longer|unknown (from durationSeconds)."
+  durationBucket: String!
+  geometryDecoded: Boolean!
+
+  # ── SwapPriced (mechanical baseline; emitted on every create path) ──
+  path: SwapPath!
+  priced: Boolean!
+  fairPremium: BigInt
+  baseLoadWad: BigInt
+  utilSkewWad: BigInt
+  dispSkewWad: BigInt
+  "Pool mechanical load (price-to-beat). For Path B the on-chain field is the MM load in WAD."
+  poolLoadWad: BigInt
+  "σ_ref the swap was priced against (also backfills the SigmaPoint series between pokes)."
+  sigmaRefWad: BigInt
+  "Cap-bound fills carry zero load info — excluded from load aggregates."
+  cappedAtMaxIL: Boolean!
+
+  # ── QuoteFilled (Path B — the NON-CIRCULAR MM load choice) ──
+  quoteId: Bytes
+  nonce: BigInt
+  "MM's actor-chosen load (bps). The single non-circular load datum (Signal 1/2/3)."
+  mmLoadBps: Int
+
+  # ── SwapRouted (routed-only convenience: both candidate premiums) ──
+  routed: Boolean!
+  routedPathB: Boolean
+  premiumA: BigInt
+  premiumB: BigInt
+
+  # ── Derived (Signal 2) ──
+  "poolLoadWad − mmLoadBps(WAD). Only meaningful on a Path-B win; null otherwise."
+  spreadWad: BigInt
+  "premiumA − premiumB on a routed Path-B win (win-depth)."
+  winDepth: BigInt
+
+  # ── SwapSettled ──
+  realisedIL: BigInt
+  payout: BigInt
+  settlementPrice: BigInt
+  settledAtBlock: BigInt
+  settledAtTimestamp: BigInt
+  "MM PnL once settled = premium − payout."
+  pnlForMm: BigInt
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# BucketAggregate — Signals 1 (realized clearing load) & 3 (term structure slope).
+# Keyed by (widthBucket × distanceBucket × durationBucket). NON-CAPPED fills only.
+# The 7/30/90d rows of one (width, distance) pair give the term-structure slope.
+# ───────────────────────────────────────────────────────────────────────────────
+
+type BucketAggregate @entity(immutable: false) {
+  "id = `${widthBucket}-${distanceBucket}-${durationBucket}`"
+  id: ID!
+  widthBucket: String!
+  distanceBucket: String!
+  durationBucket: String!
+
+  "Path-A (pool) fills counted in this bucket (mechanical baseline)."
+  countPoolFills: Int!
+  "Path-B (MM) fills counted in this bucket (behavioral)."
+  countMMFills: Int!
+  "Path-B wins (path == MM_B) for the win-rate."
+  countMMWins: Int!
+  "countMMWins / (countPoolFills + countMMFills) computed by the API; counts are canonical here."
+  totalNonCappedFills: Int!
+
+  "Running sums over NON-CAPPED fills → API derives means/medians (subgraph has no median)."
+  sumMMLoadBps: BigInt!
+  sumPoolLoadWad: BigInt!
+  sumSpreadWad: BigInt!
+  "σ_ref reference accumulator (Signal 1 normalises load over σ_ref)."
+  sumSigmaRefWad: BigInt!
+  "Lowest σ_ref observed in the bucket (regime floor)."
+  sigmaRefFloor: BigInt
+  v0Volume: BigInt!
+
+  lastFillTimestamp: BigInt!
+  lastFillSwap: Swap
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# GeometryDemandBucket — REALIZED half of Signal 4 (moneyness / demand skew).
+# Keyed by the same geometry triple, fed from SwapCreated (+ geometry decode).
+# The LATENT half (unfilled interest) is OFF-CHAIN telemetry, served by the API.
+# ───────────────────────────────────────────────────────────────────────────────
+
+type GeometryDemandBucket @entity(immutable: false) {
+  id: ID!
+  widthBucket: String!
+  distanceBucket: String!
+  durationBucket: String!
+  realizedFillCount: Int!
+  realizedV0: BigInt!
+  firstSeen: BigInt!
+  lastSeen: BigInt!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# NetGammaSnapshot — Signal 5 (net convexity / gamma supply), protocol-wide.
+# The subgraph maintains the live counts/sums over the active-swap set; the Greeks
+# fields are written back by the API/GreeksEngine (off-chain finite-difference of
+# the deployed ILMath / FairValueOracle). null aggGamma/aggVega until the API fills.
+# ───────────────────────────────────────────────────────────────────────────────
+
+type NetGammaSnapshot @entity(immutable: false) {
+  "Per time bucket (e.g. day index) — id = `${bucketStart}`."
+  id: ID!
+  bucketStart: BigInt!
+  activeSwapCount: Int!
+  totalV0: BigInt!
+  totalMaxIL: BigInt!
+  "Off-chain Greeks sums (written back by the API); null until computed."
+  aggGammaWad: BigInt
+  aggVegaWad: BigInt
+  "Σ (per-swap load × V0) / Σ V0 — populated by the API."
+  volumeWeightedLoadWad: BigInt
+}
+
+# Singleton live counters for the active-swap set (Signal 5 current snapshot).
+type ProtocolState @entity(immutable: false) {
+  "Always 'global'."
+  id: ID!
+  activeSwapCount: Int!
+  totalActiveV0: BigInt!
+  totalActiveMaxIL: BigInt!
+  cumulativeSwaps: Int!
+  cumulativeSettled: Int!
+  nextNetGammaBucket: BigInt!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Depositor — per address per tranche (ConvexityVault deposit/withdraw flow).
+# Carries the claim-(B) "capital not guaranteed" framing in the API.
+# ───────────────────────────────────────────────────────────────────────────────
+
+type Depositor @entity(immutable: false) {
+  "id = `${address}-${tranche}` (tranche 0 = senior, 1 = junior)."
+  id: ID!
+  address: Bytes!
+  tranche: Int!
+  shares: BigInt!
+  "Cumulative assets deposited / withdrawn (running, for realized-yield reconstruction)."
+  totalDeposited: BigInt!
+  totalWithdrawn: BigInt!
+  "Outstanding withdrawal request, if any."
+  pendingWithdrawShares: BigInt!
+  pendingUnlockAt: BigInt
+  firstSeen: BigInt!
+  lastUpdated: BigInt!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# MarketMaker — Signal 2 per-MM win-rate + PnL aggregate (MM-10/MM-11).
+# ───────────────────────────────────────────────────────────────────────────────
+
+type MarketMaker @entity(immutable: false) {
+  "MM address."
+  id: ID!
+  fills: Int!
+  exposureV0: BigInt!
+  exposureMaxIL: BigInt!
+  cumulativePremium: BigInt!
+  cumulativePayout: BigInt!
+  "cumulativePremium − cumulativePayout."
+  pnl: BigInt!
+  "Path-B wins (a SwapPriced with path == MM_B and this mm)."
+  cumulativeWinCount: Int!
+  "Total quotes attributed via QuoteFilled."
+  cumulativeQuoteFillCount: Int!
+  firstSeen: BigInt!
+  lastSeen: BigInt!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SigmaPoint — per (token, Poked) σ_ref series, with SwapPriced backfill.
+# `poke` is a no-op (no Poked) when dt < minSampleInterval → carry σ_ref from
+# SwapPriced.sigmaRefWad so the series has no gaps between pokes.
+# ───────────────────────────────────────────────────────────────────────────────
+
+enum SigmaSource {
+  POKE
+  INITIALIZED
+  SWAP_PRICED_BACKFILL
+}
+
+type SigmaPoint @entity(immutable: true) {
+  "id = `${token}-${blockNumber}-${logIndex}`."
+  id: ID!
+  token: Bytes!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  priceWad: BigInt
+  dtSeconds: BigInt
+  sigmaShortWad: BigInt
+  sigmaLongWad: BigInt
+  "σ_ref carried forward; from Poked windows, Initialized floor, or SwapPriced backfill."
+  sigmaRefWad: BigInt!
+  source: SigmaSource!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Pool snapshots — DEP-8/DEP-9, PUB-2: NAV/util/premium time series (claim B).
+# ───────────────────────────────────────────────────────────────────────────────
+
+type PoolDaySnapshot @entity(immutable: false) {
+  "id = day index (timestamp / 86400)."
+  id: ID!
+  dayStart: BigInt!
+  seniorAssets: BigInt!
+  juniorAssets: BigInt!
+  totalLocked: BigInt!
+  "utilWad = totalLocked / (seniorAssets + juniorAssets); written from the lock stream."
+  utilWad: BigInt!
+  concWad: BigInt!
+  premiumAccrued: BigInt!
+  payouts: BigInt!
+  juniorLoss: BigInt!
+  seniorLoss: BigInt!
+}
+
+type PoolHourSnapshot @entity(immutable: false) {
+  "id = hour index (timestamp / 3600)."
+  id: ID!
+  hourStart: BigInt!
+  seniorAssets: BigInt!
+  juniorAssets: BigInt!
+  totalLocked: BigInt!
+  utilWad: BigInt!
+  concWad: BigInt!
+  premiumAccrued: BigInt!
+  payouts: BigInt!
+  juniorLoss: BigInt!
+  seniorLoss: BigInt!
+}
+
+# Singleton running pool state (latest NAV), the source the snapshots checkpoint.
+type PoolState @entity(immutable: false) {
+  "Always 'global'."
+  id: ID!
+  seniorAssets: BigInt!
+  juniorAssets: BigInt!
+  totalLocked: BigInt!
+  concWad: BigInt!
+  cumulativePremiumAccrued: BigInt!
+  cumulativePayouts: BigInt!
+  cumulativeJuniorLoss: BigInt!
+  cumulativeSeniorLoss: BigInt!
+  lastUpdated: BigInt!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# MarketStateSnapshot — PUB-1 load surface + volume/share per (market × bucket).
+# ───────────────────────────────────────────────────────────────────────────────
+
+type MarketStateSnapshot @entity(immutable: false) {
+  "id = `${marketId}-${dayStart}`."
+  id: ID!
+  market: Market!
+  dayStart: BigInt!
+  lockedByMarket: BigInt!
+  utilWad: BigInt
+  concWad: BigInt
+  sigmaRefWad: BigInt
+  baseLoadWad: BigInt
+  utilSkewWad: BigInt
+  dispSkewWad: BigInt
+  totalLoadWad: BigInt
+  fillCount: Int!
+  v0Volume: BigInt!
+  "Path-B share of fills in the bucket (count(path==MM_B) / fillCount), API-derived from counts."
+  pathBFills: Int!
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Nonce — (mm, nonce) → used/cancelled, for precise fill detection (MM-8).
+# ───────────────────────────────────────────────────────────────────────────────
+
+type Nonce @entity(immutable: false) {
+  "id = `${mm}-${nonce}`."
+  id: ID!
+  mm: Bytes!
+  nonce: BigInt!
+  filled: Boolean!
+  cancelled: Boolean!
+  "The swap that consumed it (from QuoteFilled), if filled."
+  swap: Swap
+  updatedAt: BigInt!
+}
