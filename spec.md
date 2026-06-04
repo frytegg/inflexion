@@ -18,14 +18,14 @@ Uniswap v3 LPs carry a structural short-gamma exposure — **impermanent loss (I
 **Three things make it novel (vNEXT — see §3.0 The Three Pillars):**
 
 1. **On-chain published fair value (Pillar 1).** The protocol computes and publishes `FairPremium = fairRate · MaxIL` **on-chain** via a `FairValueOracle`. `MaxIL` is pure geometry (frozen at creation, **identical across durations**); `fairRate = E_Q[min(IL, MaxIL)] / MaxIL` is an **S-curve in `σ²·T`** that carries _all_ the vol/time dependence. Theory anchors (cited, not re-derived): **Lipton–Lucic–Sepp 2025** (an IL-protection claim is statically replicable by a strip of vanilla options ⇒ priceable/hedgeable) and **Milionis–Moallemi–Roughgarden 2022** (LVR — the AMM's adverse-selection cost — has a closed form ∝ instantaneous variance, i.e. the theta of the replicating short option ⇒ a closed-form anchor). The protocol prices the **specific position geometry** (width + distance-to-edge + T), never a band midpoint.
-2. **The cvAMM (Pillar 2, the centrepiece).** A pooled passive underwriter (`ConvexityVault`, ERC-4626 over USDC) quotes **algorithmically on-chain** off `FairPremium` with inventory skews, posts collateral from the pool, and is **contractually capped at `FairPremium · (1 + maxLoad)` by invariant I10**. It solves cold-start (it always quotes), overcharge (capped in code), and intra-pair diversification.
-3. **The MM competition rail (Pillar 3).** Sophisticated MMs compete via EIP-712 signed quotes **below** the pool. The order flow they generate remains a data asset that does not exist anywhere today — a structural LP volatility surface, a DeFi risk-appetite index, and a convexity-supply book. Built passively from day one, free public API. This is the long-term moat (now secondary to the on-chain-pricing + cvAMM headline).
+2. **The cvAMM (Pillar 2, the centrepiece).** A pooled passive underwriter (`ConvexityVault`, ERC-4626 over USDC, **dual-tranche SENIOR/JUNIOR**) quotes **algorithmically on-chain** off `FairPremium` with inventory skews, posts collateral from the pool, and is **contractually capped at `FairPremium · (1 + maxLoad)` by invariant I10**. Depositors choose: **senior** (protected, base yield + a small premium slice) or **junior** (first-loss, captures most of the load, high APY). Both collateralize to MaxIL per-swap; the structural invariant `totalLocked ≤ juniorAssets` ensures junior absorbs all underwriting loss before senior is touched. It solves cold-start (it always quotes), overcharge (capped in code), intra-pair diversification, and depositor-viability (an honest risk dose). **Dual-tranche is LAUNCH (P3.1/P3.1b), not roadmap.**
+3. **The MM competition rail (Pillar 3).** Sophisticated MMs compete via EIP-712 signed quotes **below** the pool. The order flow they generate remains a data asset that does not exist anywhere today — the **five behavioral signals** (§12): realized clearing load over a transparent `σ_ref`, the pool-vs-MM spread, the term structure of convexity, demand/moneyness skew (realized + latent), and net gamma supply — **the first on-chain view into the microstructure of the DeFi LP volatility-risk premium**, not a circular implied-vol surface. Built passively from day one, free public API. This is the long-term moat (now secondary to the on-chain-pricing + cvAMM headline).
 
 `MaxIL` is still **the collateral unit**: counterparties (the pool on Path A, an MM on Path B) collateralize to MaxIL, and in **FULL mode the protocol cannot produce bad debt** — the covered payoff is capped at MaxIL by construction and MaxIL is locked. (The guarantee is exact under its stated assumptions: capped payoff, a solvent collateral asset, and oracle/settlement liveness — §3.2, §7.3, §16.5.)
 
-**What this is NOT — and specifically not Bancor (vNEXT — stated explicitly).** The cvAMM pays claims in **pre-locked USDC and mints nothing** (no token-inflation reinsurance, no death spiral). In FULL the pool **cannot become insolvent** (collateral = MaxIL ≥ payout) and **cannot be run** (withdrawal delay + locked/free accounting). Two separate claims, never merged: (1) **LPs are always paid** — no bad debt, FULL, code-enforced (invariant I1); (2) **depositors can lose principal in a crash** — the pool is a volatility seller and **capital is NOT guaranteed** (§7.3, §8). It is also not GammaSwap (perpetual vol trading needing active management), not Panoptic (options market for quants), and not "insurance" (no actuarial mutualization, no regulatory ambiguity).
+**What this is NOT — and specifically not Bancor (vNEXT — stated explicitly).** The cvAMM pays claims in **pre-locked USDC and mints nothing** (no token-inflation reinsurance, no death spiral). In FULL the pool **cannot become insolvent** (collateral = MaxIL ≥ payout) and **cannot be run** (withdrawal delay + locked/free accounting). Two separate claims, never merged: (1) **LPs are always paid** — no bad debt, FULL, code-enforced (invariant I1); (2) **depositors can lose principal in a crash** — the pool is a volatility seller and **capital is NOT guaranteed for both tranches** (junior first-loss; senior structurally protected from _underwriting_ loss only, never from systemic failure — §7.3, §7.5, §8). It is also not GammaSwap (perpetual vol trading needing active management), not Panoptic (options market for quants), and not "insurance" (no actuarial mutualization, no regulatory ambiguity).
 
-**Pitch sentence (vNEXT):** _"Inflexion is the first market for Uniswap LP convexity priced on-chain — MaxIL is the capital unit, a pooled cvAMM always quotes a code-capped fair price, and competing market makers undercut it. The resulting flow is a structural implied-volatility surface for Uniswap LPs."_
+**Pitch sentence (v4.0):** _"Inflexion is the first market for Uniswap LP convexity priced on-chain — MaxIL is the capital unit. A pooled cvAMM always quotes a code-capped fair price with dual-tranche structure (junior vol-seller, senior savings account), and competing market makers undercut it. The resulting flow is a structural DeFi volatility-risk-premium surface for Uniswap LPs — the first on-chain dataset of this market's microstructure."_
 
 ---
 
@@ -41,7 +41,7 @@ _(vNEXT: market-structure and pricing rows rewritten for the hybrid; `FairValueO
 | **Pricing**           | `premium = FairPremium · (1 + baseLoad + util_skew + dispersion_skew)`, computed **on-chain**, hard-capped at `FairPremium · (1 + maxLoad)` by **I10**. `FairPremium = fairRate · MaxIL` from `FairValueOracle`. | Returns a transparent, published, code-capped fair value; skews carry inventory state. No pricing primitive hardcoded — all from `quant/params.json` (cvAMM block).               |
 | **Fair-value oracle** | `FairValueOracle` publishes `FairPremium = fairRate · MaxIL` on-chain for the specific geometry; `fairRate` is the `E_Q[min(IL,MaxIL)]/MaxIL` S-curve in `σ²·T`.                                                 | Pillar 1; theory-anchored (Lipton–Lucic–Sepp 2025, Milionis–Moallemi–Roughgarden 2022). The first on-chain price for IL risk.                                                     |
 | **Volatility oracle** | `σ_ref = max(σ_short, σ_long, floor)`, EWMA of log-returns from Chainlink ticks. **Never** price off raw realized σ. Deribit DVOL = optional enrichment only.                                                    | Solvency-load-bearing for the I10 cap and depositor solvency — **not** for the FULL no-bad-debt invariant (which stays structural and oracle-independent) (§6.5).                 |
-| **Collateral models** | `FULL` (default, leverage 1 = collateral 100% of MaxIL); `PARTIAL` is a **leverage dial** on the **same** pool, gated on the quant model                                                                         | FULL is provably safe; PARTIAL (collateral < MaxIL + buffer) is capital-efficient but carries real bad-debt risk — build only once Monte Carlo says the numbers are safe (§8).    |
+| **Collateral models** | `FULL` (default, leverage 1 = collateral 100% of MaxIL; **LAUNCH with the dual-tranche `ConvexityVault`**); `PARTIAL` is a **leverage dial** on the **same** pool, gated on the quant model                      | FULL is provably safe; PARTIAL (collateral < MaxIL + buffer) is capital-efficient but carries real bad-debt risk — build only once Monte Carlo says the numbers are safe (§8).    |
 | **Settlement style**  | `EUROPEAN` only for the hack                                                                                                                                                                                     | Simplest, most hedgeable, FULL-compatible. `ASIAN`/`AMERICAN` reserved in the enum, deferred to roadmap                                                                           |
 | **Durations**         | 7d / 30d / 90d                                                                                                                                                                                                   | Three liquid maturities; T handled by market separation (one marketId per duration)                                                                                               |
 | **Premium unit**      | % of MaxIL                                                                                                                                                                                                       | MM/pool ROC is range-agnostic → no adverse selection on range width                                                                                                               |
@@ -60,21 +60,23 @@ This is the single most important section for execution. Build strictly in this 
 
 ### Launch scope (explicit)
 
-**ONE pool, ETH/USDC, all 9 marketIds (3 fee tiers × 3 durations 7/30/90d), FULL mode only.** If everything works and time remains: add BTC/USDC, then PARTIAL. The settlement core, MaxIL math, and invariants I1–I9 are already built and tested (see §17 and ROADMAP.md baseline).
+**ONE pool, ETH/USDC, all 9 marketIds (3 fee tiers × 3 durations 7/30/90d), FULL mode only.** The `ConvexityVault` is **dual-tranche from day one (LAUNCH, not roadmap)** — **SENIOR** (protected, base yield + a small premium slice) and **JUNIOR** (first-loss, high APY) coexist with structural senior protection `totalLocked ≤ juniorAssets` (P3.1/P3.1b). If everything works and time remains: add BTC/USDC, then PARTIAL. The settlement core, MaxIL math, and invariants I1–I9 are already built and tested (see §17 and ROADMAP.md baseline).
 
 ### Phase spine (P1 → P5)
 
 The build is sequenced quant-first because no cvAMM pricing primitive may be hardcoded (it must come from the quant — §1, §9, the audit failure):
 
-- **P1 — single-asset cvAMM quant.** `fairRate` S-curve, `baseLoad`, `maxLoad`, `util_skew` + `dispersion_skew` curves (single-asset-calibrated), diversification CVaR collapse (N=1→100), safe routable idle fraction, senior/junior cut, optimal pool-hedge fraction. Outputs feed the **new cvAMM params schema** (documented this turn in `quant/params.cvamm.schema.json`); they do **not** edit the frozen `params.json` this turn (§9).
+- **P1 — single-asset cvAMM quant (COMPLETE).** `fairRate` S-curve, `baseLoad`, `maxLoad`, `util_skew` + `dispersion_skew` curves (single-asset-calibrated), diversification CVaR collapse (N=1→100), safe routable idle fraction, senior/junior cut, optimal pool-hedge fraction. The heavy run is **done** (158 quant tests); the calibrated parameters live in `quant/params.cvamm.schema.json`, which the **live Arbitrum Sepolia deployment uses**. The frozen `params.json`/`params.py` were left untouched by design — the cvAMM block is its own schema file (§9).
 - **P2 — `FairValueOracle` + σ-EWMA volatility oracle.** On-chain `FairPremium = fairRate · MaxIL`; `σ_ref = max(σ_short, σ_long, floor)` from Chainlink ticks (§6.5). Builds on the shipped `OracleManager`.
-- **P3 — `ConvexityVault` + capped on-chain path + I10 + Path-B schema.** ERC-4626 pooled underwriter (one per pair, 9 markets, capital fungible); signature-free Path-A `createSwap` that prices on-chain and clamps at `maxLoad` (I10 by construction); Path-B `loadBps` schema (premium derived from on-chain `FairPremium`, `loadBps ≤ maxLoadBps`); EIP-1271 vault-signer wiring; routing to the cheaper of {pool, best MM quote}.
+- **P3 — `ConvexityVault` + capped on-chain path + I10 + Path-B schema + dual tranching (P3.1/P3.1b).** ERC-4626 pooled underwriter (one per pair, 9 markets, capital fungible); **dual-tranche SENIOR/JUNIOR with structural senior protection `totalLocked ≤ juniorAssets`** — separate senior/junior asset tracking, shares, and cooldown-gated deposit/withdrawal queues, plus premium distribution via `seniorPremiumShareBps` (from `params.json`); signature-free Path-A `createSwapPathA` that prices on-chain and clamps at `maxLoad` (I10 by construction); Path-B `loadBps` schema (premium derived from on-chain `FairPremium`, `loadBps ≤ maxLoadBps`); EIP-1271 vault-signer wiring; `createSwapRouted` to the cheaper of {pool, best MM quote}.
 - **P4 — engine / SDK / subgraph / API / frontend.** Path B scaled to **one real MM** (do not seed a fake book). cvAMM-first surfaces and the depositor door.
 - **P5 — spec finalization + roadmap retag.** This document; move multi-asset PARTIAL quant to `quant/legacy/`; retag the never-built multi-MM RFQ items.
 
 ### Roadmap / out-of-scope for launch
 
-`BTC/USDC` + multi-pair; cross-asset concentration skew; the **PARTIAL leverage dial**; **senior/junior tranches**; **productive-collateral integration** (idle-only, compliant form only — §7.4); **pool-level partial hedge** execution; **Panoptic hedge SDK** execution (read-only convexity analytics at launch — §11); `ASIAN`/`AMERICAN`; additional AMMs; Greek-decomposition tokens; correlation swaps; CDO tranching. See §8, §18.
+`BTC/USDC` + multi-pair; cross-asset concentration skew; the **PARTIAL leverage dial**; **productive-collateral integration** (idle-only, compliant form only — §7.4); **pool-level partial hedge** execution; **Panoptic hedge SDK** execution (read-only convexity analytics at launch — §11); `ASIAN`/`AMERICAN`; additional AMMs; Greek-decomposition tokens; correlation swaps; CDO tranching. See §8, §18.
+
+> **PROMOTED roadmap → LAUNCH:** **senior/junior tranching** is no longer a roadmap item. The dual-tranche `ConvexityVault` (separate senior/junior accounting, shares, withdrawal queues, structural junior-first-loss `totalLocked ≤ juniorAssets`, premium split via `seniorPremiumShareBps`) is **BUILT and DEPLOYED** (P3.1/P3.1b, §8.2). The only tranche-adjacent roadmap item that survives is the **pool-level partial hedge** (§8.3 — tail-tightening, not solvency).
 
 **Scalability mandate for launch code:** every place that branches on model or settlement style must read an enum, never a boolean. Settlement logic lives behind an `ISettlementModule` interface so `ASIAN`/`AMERICAN` are new modules, not edits to the core. The core never hard-codes "FULL" — it asks the collateral model for its required collateral. **No cvAMM/PARTIAL pricing constant is ever a literal** — all come from `quant/params.json` (cvAMM block).
 
@@ -101,15 +103,16 @@ FairPremium = fairRate · MaxIL
 - **Lipton, Lucic & Sepp (2025)** — an IL-protection claim is **statically replicable by a strip of vanilla options**, so it has a model-light fair value and a concrete hedge.
 - **Milionis, Moallemi & Roughgarden (2022), _Automated Market Making and Loss-Versus-Rebalancing_** — the AMM's adverse-selection cost (**LVR**) has a closed form proportional to instantaneous variance — equivalently the theta (time-decay) of the replicating short-option position — a closed-form anchor for the cost of short-gamma exposure.
 
-`fairRate` is **not a fitted surface and has no calibrated coefficients** — it has an **exact closed form**. The v3 payoff `min(IL, MaxIL)` is piecewise (a constant, a linear-in-`P`, and a `√P` arm, split by the two cap-crossing prices), and each arm integrated against the GBM density of `P_T` is a standard interval moment in the normal CDF `Φ`. So `FairPremium = E_Q[min(IL, MaxIL)]` is a finite **`Φ`-sum** (≈6–10 terms, Black–Scholes class) — no Monte Carlo, no lookup table, no fitted coefficients, evaluated live per quote. **Verified exact against the repo's own `il.py`** (closed form ≡ quadrature ≡ MC) to **~5×10⁻¹¹** across width × σ × T (`quant/_scratch_fairvalue_closedform_check.py`). The **only** residual approximation is the GBM (`r = 0`) assumption itself, which no on-chain formula removes; it is covered by the conservative `σ_ref` (§6.5) and the residual forward-vol premium is deliberately left as **MM alpha** (§10.1, §4.0 Path B). The Lipton–Lucic–Sepp (static replication) / Milionis–Moallemi–Roughgarden (LVR) results are the **theory anchors** for _why_ the claim is priceable and hedgeable — **not** the on-chain pricer (the exact `Φ`-sum is).
+`fairRate` is **not a fitted surface and has no calibrated coefficients** — it has an **exact closed form**. The v3 payoff `min(IL, MaxIL)` is piecewise (a constant, a linear-in-`P`, and a `√P` arm, split by the two cap-crossing prices), and each arm integrated against the GBM density of `P_T` is a standard interval moment in the normal CDF `Φ`. So `FairPremium = E_Q[min(IL, MaxIL)]` is a finite **`Φ`-sum** (≈6–10 terms, Black–Scholes class) — no Monte Carlo, no lookup table, no fitted coefficients, evaluated live per quote. The `Φ`-sum is **L-independent** (it depends only on `a = Pa/P0`, `b = Pb/P0`, `σ_ref`, `T`); `σ_ref` is the only stochastic input. **The `Φ`-sum is NEVER reimplemented off-chain (a CLAUDE.md hard rule):** the production pricer is the **Stylus `FairValueOracle`** (machine-precise to 6.7×10⁻¹⁵, `0x10E3…e882` on Arbitrum Sepolia); the Solidity `src/FairValueOracle.sol` is a revm-testable CI cross-check, **not** a second production oracle. The SDK reads the on-chain `FairPremium` and never approximates it — the data moat is the **five behavioral signals** (§12), never a back-solved/circular implied-vol surface. **Verified exact against the repo's own `il.py`** (closed form ≡ quadrature ≡ MC) to **~5×10⁻¹¹** across width × σ × T (`quant/_scratch_fairvalue_closedform_check.py`). The **only** residual approximation is the GBM (`r = 0`) assumption itself, which no on-chain formula removes; it is covered by the conservative `σ_ref` (§6.5) and the residual forward-vol premium is deliberately left as **MM alpha** (§10.1, §4.0 Path B). The Lipton–Lucic–Sepp (static replication) / Milionis–Moallemi–Roughgarden (LVR) results are the **theory anchors** for _why_ the claim is priceable and hedgeable — **not** the on-chain pricer (the exact `Φ`-sum is).
 
 ### Pillar 2 — The cvAMM (the centrepiece, Path A)
 
-A **pooled passive underwriter**: `ConvexityVault`, an ERC-4626 vault over USDC. It quotes **algorithmically on-chain** off `FairPremium` with inventory skews, posts collateral from the pool, and is **contractually capped at `FairPremium · (1 + maxLoad)` by invariant I10**. It is the default counterparty and is **always quoting**. It solves:
+A **pooled passive underwriter**: `ConvexityVault`, an ERC-4626 vault over USDC **with a dual-tranche SENIOR/JUNIOR structure (LAUNCH)**. It quotes **algorithmically on-chain** off `FairPremium` with inventory skews, posts collateral from the pool, and is **contractually capped at `FairPremium · (1 + maxLoad)` by invariant I10**. It is the default counterparty and is **always quoting**. Depositors choose a tranche: **senior** earns base yield + a small premium slice (`seniorPremiumShareBps`) with structural underwriting-loss protection; **junior** captures most of the load as a high-APY first-loss tranche. Per-swap collateral = MaxIL; the structural invariant `totalLocked ≤ juniorAssets` ensures junior absorbs all payouts before senior is touched (senior P(loss)=0 is the **P1.13 calibration** result, holding only while `u ≤ 1−sf`, **not** a structural guarantee — capital-not-guaranteed remains the umbrella for both tranches). It solves:
 
 - **cold-start** — there is always a price, with no MM present;
 - **overcharge** — the price is capped in code (I10), not by trust;
-- **intra-pair diversification** — one pool writes many positions whose exits do not all cluster at the same price.
+- **intra-pair diversification** — one pool writes many positions whose exits do not all cluster at the same price;
+- **depositor-viability** — each depositor picks an honest risk dose (senior savings account vs junior vol-seller).
 
 The cvAMM is the **floor of liquidity**.
 
@@ -202,7 +205,7 @@ fairRate   = E_Q[ min(IL, MaxIL) ] / MaxIL        // S-curve in σ²·T, the SPE
 FairPremium = fairRate · MaxIL                     // published on-chain by FairValueOracle
 ```
 
-`fairRate` is computed for the specific geometry (width + distance-to-edge + T) by the **exact closed form** (§3.0: a finite `Φ`-sum over the piecewise payoff; verified vs `il.py` to ~5×10⁻¹¹), using `σ_ref` read on-chain from the volatility oracle (§6.5) and MaxIL from `ILMath`. **There are no `fairRate` coefficients to calibrate or hardcode — the only stochastic input is `σ_ref`.** Lipton–Lucic–Sepp 2025 / Milionis–Moallemi–Roughgarden 2022 are theory anchors (§3.0), not the pricer. Where the v3.3 spec said "σ enters via continuous MM requoting," the pivot replaces this with **σ read on-chain from the vol oracle**.
+`fairRate` is computed for the specific geometry (width + distance-to-edge + T) by the **exact closed form** (§3.0: a finite `Φ`-sum over the piecewise payoff; verified vs `il.py` to ~5×10⁻¹¹), using `σ_ref` read on-chain from the volatility oracle (§6.5) and MaxIL from `ILMath`. **There are no `fairRate` coefficients to calibrate or hardcode — the only stochastic input is `σ_ref`.** `σ_ref` is read on-chain from `VolOracle` (a poke-based, time-aware EWMA of Chainlink log-returns; **never** raw realized σ; `poke` is a **no-op that emits no event when `dt < minSampleInterval`** — §6.5). `σ_ref` is load-bearing for the I10 cap + depositor solvency, **not** for the FULL no-bad-debt invariant (which stays structural and oracle-independent). Lipton–Lucic–Sepp 2025 / Milionis–Moallemi–Roughgarden 2022 are theory anchors (§3.0), not the pricer. Where the v3.3 spec said "σ enters via continuous MM requoting," the pivot replaces this with **σ read on-chain from the vol oracle**.
 
 **Layer 3 — the load/skew stack and the I10 cap (on-chain).**
 
@@ -282,11 +285,11 @@ _(vNEXT — restructured. §4.0 is new and leads with Path A; §4.1–§4.2 refr
 
 There are two parallel paths into the **same** on-chain settlement core. The settlement core (`settle`, the `min(IL, MaxIL)` cap, the MaxIL formula, invariants I1–I9) is **identical regardless of which path opened the swap** — every difference is in `createSwap` pricing/locking, **upstream of settle**.
 
-**Path A — cvAMM (default, on-chain, signature-free).** The LP calls `createSwap`; the contract reads `FairValueOracle.fairPremium(marketId, maxIL)` and the `ConvexityVault`'s inventory state (locked/free, dispersion), computes `premium = FairPremium · (1 + baseLoad + util_skew + dispersion_skew)` clamped at `FairPremium · (1 + maxLoad)` (**I10**), and locks `ConvexityVault` collateral. **No keeper, no signed quote, no validity clock, no off-chain relayer** on this path.
+**Path A — cvAMM (default, on-chain, signature-free).** The LP calls `createSwapPathA` (or `createSwapRouted`, which picks the cheaper rail); the contract reads `FairValueOracle.fairPremium(marketId, maxIL)` and the `ConvexityVault`'s inventory state (locked/free, dispersion), computes `premium = FairPremium · (1 + baseLoad + util_skew + dispersion_skew)` clamped at `FairPremium · (1 + maxLoad)` (**I10**), and locks `ConvexityVault` collateral from the available free pool (respecting the structural `totalLocked ≤ juniorAssets` constraint). The Path-A premium is then **split across tranches**: senior gets `premium × seniorPremiumShareBps / 10000`, junior gets the remainder (less the 1% treasury cut). **No keeper, no signed quote, no validity clock, no off-chain relayer** on this path.
 
 **Path B — MM signed quotes (parallel, optional).** An MM posts collateral and signs a quote **below** the pool price; the LP can take it instead. This path keeps the full signed-quote rail described in §4.3–§4.6 (`validUntil`, `priceBandBps`, bitmap nonces, the Fork-2 bearer-quote pickoff defense, invariant I9) — that machinery exists precisely to protect third-party-carried signed quotes and is **not** removed. The quote now carries a `loadBps` field; the contract **derives** the premium from the on-chain `FairPremium` as `FairPremium · (1 + loadBps)` and requires `loadBps ≤ maxLoadBps` (**I10** on Path B).
 
-**Routing.** `createSwap` routes the LP to the **cheaper of {pool price, best MM quote}**. The pool is the **floor of liquidity** (always quotes); the MMs are the **ceiling of price** (win only when they beat the capped pool). For launch we do **not** seed a fake MM book — Path A is the always-on liquidity, and a single real MM plugs in to demonstrate Path-B competition (§15).
+**Routing.** `createSwapRouted` routes the LP to the **cheaper of {pool price, valid MM quote}**. The pool is the **floor of liquidity** (always quotes); the MMs are the **ceiling of price** (win only when they beat the capped pool). An **absent / expired / stale / over-band / over-load / zero-price** MM quote **falls back to the pool — it never reverts**; a tie resolves to the pool. **Only the executed rail mutates nonce / capacity / lock** (so I7 holds — a quote that lost the route consumes nothing). For launch we do **not** seed a fake MM book — Path A is the always-on liquidity, and a single real MM plugs in to demonstrate Path-B competition (§15).
 
 **Implementation order (not a scope cut).** Build Path A first (the headline + always-on liquidity). Path B stays **present** in spec and contracts.
 
@@ -312,13 +315,14 @@ MMs run sophisticated models and **stream/cancel quotes continuously** (many upd
 
 ### 4.3 The signed quote (Path B; firm, no last-look)
 
-_(vNEXT: `loadBps` field added — premium is now derived from the on-chain `FairPremium`, not streamed as `premiumRateOfMaxIL`. The `SIGNED_QUOTE_TYPEHASH` string and `hashQuote` encoding change accordingly. **This is a pre-authorized EIP-712 verification change and is stated here explicitly.** Verification moves from `ECDSA.recover` to OZ `SignatureChecker.isValidSignatureNow` to support EIP-1271 contract signers — see §4.7.)_
+_(vNEXT: the quote carries `loadBps` — the MM's load over the protocol-published `FairPremium`; the premium is **derived on-chain** as `FairPremium · (1 + loadBps/1e4)` rather than streamed as a raw premium rate (a raw premium-rate field pre-P3.4). The `SIGNED_QUOTE_TYPEHASH` string and `hashQuote` encoding change accordingly. **This is a pre-authorized EIP-712 verification change and is stated here explicitly.** Verification moves from `ECDSA.recover` to OZ `SignatureChecker.isValidSignatureNow` to support EIP-1271 contract signers — see §4.7.)_
 
 ```solidity
 struct SignedQuote {
     address mm;                  // signer; must have collateral in UnderwriterVault (or be an EIP-1271 contract signer)
     bytes32 marketId;            // keccak(token0,token1,feeTier,durationSeconds)
-    uint16  loadBps;             // MM's load over on-chain FairPremium (replaces premiumRateOfMaxIL); require ≤ maxLoadBps (I10)
+    uint16  loadBps;             // MM's load over the protocol-published FairPremium; premium = FairPremium·(1+loadBps/1e4), capped at maxLoadBps (I10). (was a raw premium-rate field pre-P3.4.)
+                                 // On Path B the premium bypasses the tranche split and goes entirely to the MM (no senior/junior).
     uint16  minMaxILRatioBps;    // optional ratio-band filter (convenience only — no longer an asymmetry fix, §3.4)
     uint16  maxMaxILRatioBps;    // optional ratio-band filter
     uint128 quotePrice;          // oracle price at signing — anchor for the band check (Fork 2, §4.3.3)
@@ -333,7 +337,7 @@ struct SignedQuote {
 }
 ```
 
-> **vNEXT EIP-712 change (stated explicitly, pre-authorized).** `premiumRateOfMaxIL` is replaced by `loadBps`. The contract derives the MM premium as `premium = FairPremium · (1 + loadBps)` (rounded UP, F-#8) and requires `loadBps ≤ maxLoadBps` (invariant I10 on Path B). Because the struct changed, the `SIGNED_QUOTE_TYPEHASH` string and the `abi.encode(...)` in `hashQuote` are bumped accordingly. This is the only change to the EIP-712 schema; the verification recovery is also broadened to EIP-1271 (§4.7). Both are flagged here per CLAUDE.md's "do not silently change EIP-712 verification" rule.
+> **vNEXT EIP-712 change (stated explicitly, pre-authorized).** The quote carries `loadBps` — the MM's load over the protocol-published `FairPremium` (this replaced a raw premium-rate field pre-P3.4). The contract derives the MM premium as `premium = FairPremium · (1 + loadBps/1e4)` (rounded UP, F-#8) and requires `loadBps ≤ maxLoadBps` (invariant I10 on Path B). Because the struct changed, the `SIGNED_QUOTE_TYPEHASH` string and the `abi.encode(...)` in `hashQuote` are bumped accordingly. This is the only change to the EIP-712 schema; the verification recovery is also broadened to EIP-1271 (§4.7). Both are flagged here per CLAUDE.md's "do not silently change EIP-712 verification" rule.
 
 **Firm quotes, not last-look — but oracle-anchored (Fork 2 — Option B).** The MM cannot reject at settlement. "Last look" is more MM-friendly but undercuts trustlessness and enables the abuse pattern auditors flag — the hybrid keeps firm quotes + the oracle band and adds no last-look path. MM protection comes from three deterministic, on-chain mechanisms: (1) an **oracle-anchored price band** (§4.3.3) that auto-voids the quote if the live oracle has drifted beyond `priceBandBps` from `quotePrice` — kills the dominant pickoff attack (gap-on-stale-quote, including bearer-instrument leakage past off-chain cancel); (2) a **short `validUntil` window** (§4.3.1) — bounds the leakage interval; (3) **on-chain selective nonce invalidation** (§4.3.2). All three are deterministic — no MM discretion at fill, so this is _not_ last-look (no fading, no abuse vector).
 
@@ -415,7 +419,9 @@ Settlement is **non-custodial**, so the engine's power (Path B only) is strictly
 
 ### 4.6 Hackathon implementation of the engine (Path B)
 
-Do **not** build an exchange-grade matcher. Build a **thin relayer**: MM bots push signed quotes over WebSocket/REST → in-memory (Redis) store keyed by market → best-per-quote maintained → `/quote?tokenId&duration` returns the ranked best (compared against the on-chain pool price) + signed payload. Because the demo MM is a bot we control, this is ~a weekend, and it demos beautifully (watch the pool quote always-on, then one MM undercut as we move price/vol; the LP always sees the live cheapest price). **Do not seed a fake multi-MM book** — a single real MM demonstrates Path-B competition; the cvAMM removes cold-start by always quoting.
+Do **not** build an exchange-grade matcher. Build a **thin relayer** (`@inflexion/engine`, BUILT — P4.c): MM bots push signed quotes over WebSocket/REST → in-memory (Redis) store keyed by market → best-per-quote maintained → `/quote?tokenId&duration` returns the ranked best (compared against the on-chain pool price) + signed payload. Because the demo MM is a bot we control, this is ~a weekend, and it demos beautifully (watch the pool quote always-on, then one MM undercut as we move price/vol; the LP always sees the live cheapest price). **Do not seed a fake multi-MM book** — a single real MM demonstrates Path-B competition; the cvAMM removes cold-start by always quoting.
+
+**Day-one telemetry (do NOT skip — retroactively unreconstructable).** The engine logs every `/quote` request and WS update to append-only telemetry sinks (`DEMAND_LOG` / `COMPETITION_LOG`, `packages/engine/src/telemetry.ts`) **from the first interaction** — critical for the moat's dynamic/latent halves (Signals 2 & 4, §12). **Set both env vars on the engine NOW, before the redeploy** — anything not captured before the on-chain `SwapPriced`/`QuoteFilled` events go live is lost forever (`docs/REDEPLOY_CHECKLIST.md`, `docs/ENGINE_TELEMETRY.md`).
 
 ### 4.7 EIP-1271 vault-signer (vNEXT — new; stated change to verification)
 
@@ -505,8 +511,10 @@ PHASE 3 — EFFECTS (state, no external calls)
 PHASE 4 — INTERACTIONS (external last)
   USDC.transferFrom(lp, this, premium)               // USDC first: if it reverts, NFT never moved
   nftManager.safeTransferFrom(lp, ilVault, tokenId)  // NFT last
-  _distributePremium(premium, path)                  // Path A: underwriter share → ConvexityVault (depositor yield) + treasury;
-                                                      //         Path B: MM 99% / treasury 1% (unchanged)
+  _distributePremium(premium, path)                  // Path A: tranche split — senior gets premium*seniorPremiumShareBps/10000,
+                                                      //         junior gets the remainder, treasury takes 1% of the total
+                                                      //         (seniorPremiumShareBps is a governance param from params.json).
+                                                      //         Path B: MM 99% / treasury 1% (entirely to the MM, no tranche split)
   emit SwapCreated(...)
 ```
 
@@ -639,7 +647,9 @@ The cvAMM and `FairValueOracle` need an on-chain volatility estimate to compute 
 - **Mandatory conservatism caveat.** **Never price off raw realized σ.** Realized volatility _understates_ risk right before a regime change — a stale-σ regime jump is exactly where the in-flight book bleeds, and it is the single biggest model risk. The `max(σ_short, σ_long, floor)` construction is the conservative guard: it cannot fall below the slower estimate or the floor, so it does not collapse to a deceptively calm number just before a jump. This caveat is **mandatory** and is not optional engineering.
 - **Do not chase on-chain implied vol.** There is no deep on-chain options market; Deribit holds >90% of ETH options off-chain. Depending on an on-chain IV oracle would reintroduce removed fragility. **Deribit DVOL is an optional published enrichment only — never depended on** by any solvency-relevant path.
 
-**Load-bearing scope (precise, mandatory).** `σ_ref` (and `FairValueOracle`) is **solvency-load-bearing for the I10 cap and for depositor solvency** — a wrong σ mis-prices the load and can underpay the pool's depositors. It is **NOT** load-bearing for the **FULL no-bad-debt invariant (I1)**, which stays **structural and oracle-independent**: in FULL, collateral = MaxIL ≥ payout by construction regardless of what σ was. So a vol-oracle fault can cost depositors money (bad pricing) but can **never** create LP bad debt in FULL. These are two different guarantees and the spec never merges them.
+**Load-bearing scope (precise, mandatory).** `σ_ref` (and `FairValueOracle`) is **solvency-load-bearing for the I10 cap and for depositor solvency** — a wrong σ mis-prices the load and can underpay the pool's depositors. **What "depositor solvency" means here:** a wrong / too-low `σ_ref` makes the pool **under-charge load**, so premium income no longer covers realized payouts and **NAV compresses**. That underwriting loss hits the waterfall in order — **junior absorbs it first** (the structural `totalLocked ≤ juniorAssets` makes junior the first-loss buffer), **senior is protected WHILE junior buffers** and takes loss only in the tail if junior is fully exhausted. It is **NOT** load-bearing for the **FULL no-bad-debt invariant (I1)**, which stays **structural and oracle-independent**: in FULL, collateral = MaxIL ≥ payout by construction regardless of what σ was — so a wrong σ **cannot violate I1**. A vol-oracle fault can cost depositors money (bad pricing — junior first, then senior in the tail) but can **never** create LP bad debt in FULL. These are **TWO SEPARATE GUARANTEES, never merged**: (A) LPs are always paid in FULL (structural, code-enforced I1); (B) depositors can lose principal (volatility sellers in a crash, **CAPITAL NOT GUARANTEED**). Both are true; neither implies the other.
+
+**Dual-tranche implication.** A `σ_ref` failure does **not** break the structural senior protection (`totalLocked ≤ juniorAssets`) or the junior-first-loss waterfall — those are mechanical and oracle-independent. It may cause **bad pricing that compresses NAV across both tranches** (a depositor-viability issue), not an LP-solvency breach.
 
 ---
 
@@ -673,11 +683,12 @@ Locked USDC otherwise sits idle, forcing underwriters to demand a higher premium
 
 Lifecycle example (Path B): Bob deposits $50k once; posts quotes on 3 markets (no collateral in payload); Alice matches (MaxIL $2,400) → `lockCollateral(Bob, 2400)`, available $47,600; at settlement (IL $800) → Alice gets $800, Bob gets $1,600 back, available rises.
 
-### 7.3 `ConvexityVault` — the cvAMM pooled underwriter (vNEXT — new; Path A; ERC-4626)
+### 7.3 `ConvexityVault` — the cvAMM pooled underwriter (LAUNCH; Path A; ERC-4626; dual-tranche)
 
-The centrepiece of Pillar 2. A **pooled passive underwriter** built as an OpenZeppelin **ERC-4626** vault over USDC (OZ ERC-4626 is already vendored in `lib/`).
+The centrepiece of Pillar 2. A **pooled passive underwriter** built as a USDC ERC-4626-style vault (OZ ERC-4626 base is already vendored in `lib/`), **dual-tranche SENIOR/JUNIOR from launch (deployed `0xB8dF0204Ec18834AF16652Cc8ec5D39BD403a2D2` on Arbitrum Sepolia)**.
 
-- **One vault per pair, 9 markets inside it.** `marketId = keccak(token0, token1, fee, durationSeconds)`. For ETH/USDC that is **3 fee tiers × 3 durations (7/30/90d) = 9 marketIds**. **One** `ConvexityVault` holds pooled USDC and **quotes a separate price into each of the 9 markets** — same capital, 9 products, like one insurer's treasury backing 9 product lines. **Capital is fungible across the 9**; each written position locks its MaxIL on demand. This maximizes intra-pair diversification (different widths/durations/entries do not all exit at the same price) and capital efficiency vs 9 separate silos.
+- **One vault per pair, 9 markets, DUAL-TRANCHE SENIOR/JUNIOR.** `marketId = keccak(token0, token1, fee, durationSeconds)`. For ETH/USDC that is **3 fee tiers × 3 durations (7/30/90d) = 9 marketIds**. **One** `ConvexityVault` holds **fungible pooled USDC (both tranches)** and **quotes a separate price into each of the 9 markets** — same capital, 9 products, like one insurer's treasury backing 9 product lines. **Capital is fungible across the 9**; each written position locks its MaxIL on demand. This maximizes intra-pair diversification (different widths/durations/entries do not all exit at the same price) and capital efficiency vs 9 separate silos. Depositors choose a tranche: **senior** (base yield + a small premium slice `seniorPremiumShareBps`, structurally protected from underwriting loss) or **junior** (captures most of the load, high APY, first-loss).
+- **Structural senior protection (the key invariant).** `totalLocked ≤ juniorAssets` is enforced at **every `lockCollateral`**. Since every payout ≤ its MaxIL = its locked amount, `Σ payouts ≤ totalLocked ≤ juniorAssets`, so the junior-first-loss waterfall absorbs **all underwriting loss** before senior is ever touched (`payout ≤ locked ≤ junior`). This is the code form of the roadmap's "enforce `u ≤ 1−sf`", made **adaptive to the actual junior buffer** (safer than a fixed ratio). `sf = 0.60` (P1.13) is the TARGET tranche ratio for UX/incentives, not the hard cap. Separate per-tranche shares (`seniorBalanceOf`/`juniorBalanceOf`), assets (`seniorAssets`/`juniorAssets`), and cooldown-gated withdrawal queues (`seniorWithdraw`/`juniorWithdraw`) are all on-chain. **In FULL, senior is structurally safe from _underwriting_ loss but NOT from systemic failure** (USDC depeg, oracle/settlement fault, contract bug). **CAPITAL IS NOT GUARANTEED** for either tranche — this is a volatility-selling product (§7.5).
 - **Algorithmic on-chain quoting.** Off `FairPremium` (Pillar 1) with the `util_skew` + `dispersion_skew` inventory skews (§3.5), **capped by I10** (`premium ≤ FairPremium·(1+maxLoad)`, by construction). It exposes its inventory state (locked/free, dispersion) to `createSwap` (Path-A pricing) and `lockCollateral`/`releaseAndDistribute` to `settle`.
 - **Cannot be run; cannot (in FULL) be insolvent.** A **withdrawal delay** + locked/free accounting (free vs locked, like the MM vault) means depositors cannot run the pool, and in FULL the pool's locked collateral always equals MaxIL ≥ payout. The pool can have a **bad month**, but in FULL it **cannot be insolvent and cannot be run** (see the not-Bancor argument, §0).
 - **EIP-1271 owner of collateral.** The vault owns its collateral directly and can act as an on-chain signer where needed (§4.7) — no keeper EOA can drain pooled capital. Path A is signature-free at the point of sale.
@@ -695,22 +706,24 @@ The depositor-viability levers (§10, Inefficiency 3) include putting **idle** p
 
 ### 7.5 Single-asset depositor disclosure (vNEXT — new; verbatim)
 
-The cvAMM depositor surface (and `docs.inflexion.xyz`) **must** carry this disclosure. The tone is mandatory; **the numbers are PLACEHOLDER pending the P1 single-asset quant** (§9) — the earlier multi-asset figures are materially optimistic for one pair and must not be reused.
+The cvAMM depositor surface (and `docs.inflexion.xyz`) **must** carry this disclosure at every depositor entry point. The tone is mandatory.
 
 > **"You earn the volatility risk premium in calm markets and absorb losses in crashes. In FULL the pool cannot become insolvent and cannot be run, but YOUR CAPITAL IS NOT GUARANTEED."**
 
 **Two claims, never merged:**
 
-1. **LPs are always paid** — no bad debt, FULL, code-enforced (invariant I1).
-2. **Depositors can lose principal in a crash** — capital is NOT guaranteed; this is a volatility-selling product.
+1. **LPs are always paid** — no bad debt in FULL, code-enforced (invariant I1, qualified: capped payoff `≤ MaxIL` + locked collateral + solvent USDC + oracle/settlement liveness). LPs cannot be short-paid.
+2. **Depositors can lose principal** — both senior and junior, **CAPITAL IS NOT GUARANTEED**. Senior is **structurally protected from _underwriting_ loss only** (junior-first waterfall absorbs all payouts while `locked ≤ junior`) but is **NOT** protected from systemic failure (USDC depeg, oracle/settlement fault, contract bug — a 50%+ ETH crash compresses NAV across both tranches). Junior is **first-loss and unhedged** — captures most of the load (high APY) and bears the entire underwriting tail. **Choose your risk dose: senior = a convexity savings account** (low variance, base yield, underwriting-loss protected); **junior = a pure vol-selling tranche** (high variance, first-loss, high APY).
 
-**Do not call it stable or modest APY.** It is a vol-selling product: high variance, mono-factor on a single pair (§8, Inefficiency 3). Numbers go in only after the P1 single-asset quant produces the depositor loss distribution.
+**Real P1.13 single-asset numbers (bare-pool, `u = 0.40`)** (source: the P1.13 heavy run — `quant/HEAVY_CALIBRATION.md` + `quant/cvamm_heavy_results.json`). 3y geometric CAGR **122% median / 50% p10 / 247% p90**; **P(losing month) 26.5%**; 1-in-100 month **−20.1%**; worst month **−26.8%**; P(3y drawdown > 50%) **2.7%**. **Senior** (`sf = 0.60`): **P(loss) = 0 / worst 0%** (the calibration result, holding jointly with `u ≤ 1−sf`); **junior** worst **−67%**. These are the real heavy-run single-asset figures (jump-diffusion / GARCH / crash-correlation + 2020–25 backtest), not the materially-optimistic multi-asset v3.3 numbers, which must not be reused.
+
+**Do not call it stable or modest APY.** It is a vol-selling product: high variance, mono-factor on a single pair (§8, Inefficiency 3).
 
 ---
 
 ## 8. Collateral Leverage Dial — FULL (launch) / PARTIAL (roadmap)
 
-_(vNEXT — reframed. FULL vs PARTIAL is a **leverage dial on the ONE `ConvexityVault`**, not a second pool. The v3.3 separate-`InsuranceVault`-product framing is retired; the safety stack remains ROADMAP and still sources every constant from `params.json` — hardcoding is the audit failure. Two depositor-viability/tail concepts (senior/junior tranching, pool-level partial hedge) are added as roadmap concepts. The depositor disclosure is the new single-asset version, §7.5.)_
+_(v4.0 — reframed. FULL vs PARTIAL is a **leverage dial on the ONE `ConvexityVault`**, not a second pool. The v3.3 separate-`InsuranceVault`-product framing is retired; the PARTIAL safety stack remains ROADMAP and still sources every constant from `params.json` — hardcoding is the audit failure. **Senior/junior tranching is LAUNCH (dual-tranche in `ConvexityVault`, P3.1/P3.1b, §8.2).** The **pool-level partial hedge** (§8.3) is the one tail concept that stays roadmap. The depositor disclosure is the single-asset version, §7.5.)_
 
 **FULL vs PARTIAL is a leverage setting on one pool, not two pools.**
 
@@ -723,14 +736,14 @@ _(vNEXT — reframed. FULL vs PARTIAL is a **leverage dial on the ONE `Convexity
 
 A PARTIAL position posts collateral `c < MaxIL` and the pool's own buffer absorbs the tail `(IL − c)⁺`. Economically the pool is then **short deep-OTM puts on the IL of a correlated single-pair book** — premium income in calm regimes, principal at risk in correlated crashes (positions clustered at the same edge all hit MaxIL together). The whole safety stack (convex floor, progressive leverage tax, circuit breakers, Dutch-auction forced early settlement, first-loss, exposure caps) exists to bound that tail and is **roadmap** — design preserved in `quant/legacy/`, all constants from `params.json`.
 
-### 8.2 Senior / junior tranching (concept; roadmap)
+### 8.2 Senior / junior tranching (LAUNCH, DUAL-TRANCHE; structural invariant)
 
-A single-pair unhedged pool is intrinsically a **high-variance mono-factor vol seller — no engineering makes a vol seller low-risk.** The honest depositor-viability answer is to let each depositor pick a risk dose:
+A single-pair unhedged pool is intrinsically a **high-variance mono-factor vol seller — no engineering makes a vol seller low-risk.** The honest depositor-viability answer is to let each depositor pick a risk dose, and this is **BUILT at launch (P3.1/P3.1b), not roadmap:**
 
-- **Senior tranche** — hedged, base yield + a small slice of the load, low tail. A "convexity savings account."
-- **Junior tranche** — unhedged, **first loss**, captures most of the load, high APY. The pure vol-selling tranche.
+- **Senior tranche** — base yield + a small slice of the load (`seniorPremiumShareBps`), structurally protected from underwriting loss, low tail. A "convexity savings account."
+- **Junior tranche** — **first loss**, captures most of the load, high APY. The pure vol-selling tranche.
 
-The cut point between them is sized by the quant (the old PARTIAL waterfall machinery is reused for this — §9). Concept in spec; ROADMAP.
+**LIVE at launch.** The `ConvexityVault` enforces the structural invariant `totalLocked ≤ juniorAssets` at **every `lockCollateral`**, ensuring the junior tranche absorbs all underwriting loss (`payout ≤ locked ≤ junior`) before senior is touched — the **code form of the roadmap's "enforce `u ≤ 1−sf`", made adaptive to the actual junior buffer** (safer than a fixed ratio). **The algebra:** with `sf = 0.60` the junior fraction is `1 − sf = 0.40`, so `totalLocked ≤ juniorAssets` is exactly `u = totalLocked/totalAssets ≤ 0.40 = 1 − sf` — the utilization bound under which the P1.13 senior-P(loss)=0 calibration holds. Separate per-tranche deposit/withdrawal queues (cooldown-gated), shares, and accounting are on-chain; `seniorPremiumShareBps` (from `params.json`) directs the senior premium share. **Senior protection is calibrated, not guaranteed:** `sf = 0.60` is a target UX/incentive ratio (P1.13); P(senior loss) = 0 holds **only while `u ≤ 1−sf`** (jointly with the utilization cap), and **never** against systemic failure — capital-not-guaranteed is the umbrella for both tranches (§7.5). **Roadmap:** the pool-level partial hedge (§8.3) tightens the junior tail; the PARTIAL leverage dial applies on junior capital.
 
 ### 8.3 Pool-level partial hedge (concept; roadmap)
 
@@ -740,7 +753,7 @@ The pool buys back a **fraction of its aggregate tail convexity** (a long-option
 
 ## 9. The Quantitative Model
 
-_(vNEXT: the method (jumpy/correlated underlying + waterfall + stress) and the "derived, not guessed" framing stay, but the deliverables now include the cvAMM/FairValue primitives, all **single-asset** calibrated. The cross-asset correlation `k ≈ 1.0` is **dead** for a single-pair book. The new cvAMM params block is **documented this turn in a NEW schema file** (`quant/params.cvamm.schema.json`); `params.json`/`params.py` are **not edited this turn** (pydantic `extra='forbid'` + a roundtrip test gate them). Old multi-asset PARTIAL outputs move to `quant/legacy/`.)_
+_(vNEXT: the method (jumpy/correlated underlying + waterfall + stress) and the "derived, not guessed" framing stay, but the deliverables now include the cvAMM/FairValue primitives, all **single-asset** calibrated. The cross-asset correlation `k ≈ 1.0` is **dead** for a single-pair book. **P1 is COMPLETE** (158 quant tests; the heavy run done): the calibrated cvAMM params live in the schema file `quant/params.cvamm.schema.json`, which the live Arbitrum Sepolia deployment uses; the frozen `params.json`/`params.py` were deliberately left untouched (pydantic `extra='forbid'` + a roundtrip test gate them — the new cvAMM block is its own file). Old multi-asset PARTIAL outputs move to `quant/legacy/`.)_
 
 A standalone, parallelizable deliverable (`quant/`) that **derives every cvAMM and PARTIAL parameter** and doubles as a flagship pitch artifact ("we did not guess our risk parameters — we derived them from Monte Carlo under fat-tailed, single-pair vol regimes, anchored to Lipton–Lucic–Sepp 2025 and Milionis–Moallemi–Roughgarden 2022").
 
@@ -753,7 +766,7 @@ A standalone, parallelizable deliverable (`quant/`) that **derives every cvAMM a
 
 ### 9.1 Open quantitative questions — the 10 cvAMM deliverables (single-asset, P1)
 
-All single-asset; none inherits the dead cross-asset `k`. All feed the **new cvAMM params schema** (`quant/params.cvamm.schema.json`), not the frozen `params.json` this turn.
+All single-asset; none inherits the dead cross-asset `k`. **P1 is COMPLETE** — the heavy run is done, all ten deliverables are calibrated, and the figures feed the **cvAMM params schema** (`quant/params.cvamm.schema.json`), which the live Arbitrum Sepolia deployment consumes. (The frozen `params.json`/`params.py` were left untouched by design — the new cvAMM block lives in its own schema file.)
 
 1. **`fairRate` S-curve** — `E_Q[min(IL,MaxIL)]/MaxIL` surface in `σ²·T` for the specific geometry; calibrated to the il.py MC and the two theory anchors.
 2. **`σ_ref` estimator** — `σ_short`/`σ_long` EWMA windows, the floor, sampling cadence (with the mandatory never-raw-realized caveat).
@@ -763,10 +776,10 @@ All single-asset; none inherits the dead cross-asset `k`. All feed the **new cvA
 6. **`maxLoadBps`** — the I10 clamp ceiling; `baseLoad + util_skew + dispersion_skew ≤ maxLoad` by construction; applies to both paths, upstream of settle.
 7. **Safe routable idle fraction** — productive-collateral cap (compliant form only — §7.4; Aave-for-locked is BLOCKED).
 8. **Optimal pool-hedge fraction** — the tail lever (§8.3), from real-measure crash sims.
-9. **Senior/junior cut point** — the tranche boundary (§8.2), from the (legacy) waterfall + `var_cvar`.
-10. **Single-asset depositor loss distribution** — the placeholder-replacing numbers for the §7.5 disclosure (re-uses legacy `var_cvar`/`ruin_probability`). Until produced, all depositor numbers are PLACEHOLDER and the multi-asset figures are not reused.
+9. **Senior/junior cut point (LAUNCHED with an adaptive boundary)** — the structural `totalLocked ≤ juniorAssets` invariant enforces the boundary adaptively in real time. The P1.13 target ratio `sf = 0.60` (senior fraction) is a UX/incentive target, not a hard cap. The quant's role is to **validate** the adaptive boundary and **size the risk metrics** (CVaR, ruin probability) under the current split for monitoring — not to compute a fixed cut point.
+10. **Single-asset depositor loss distribution** — **PRODUCED** by the P1.13 heavy run (real-measure jump-diffusion / GARCH / crash-correlation + 2020–25 backtest; `quant/HEAVY_CALIBRATION.md`). The real single-asset figures now live in the §7.5 disclosure (3y CAGR 122%/50%/247%, P(losing month) 26.5%, worst month −26.8%, P(3y DD>50%) 2.7%; senior P(loss)=0, junior worst −67%); the materially-optimistic multi-asset v3.3 figures are not reused.
 
-**Outputs feed the build:** the documented cvAMM params schema (this turn), then a future `params.json` schema bump (minor, per the module's semver note) consumed by deploy scripts and contract constructors, plus charts (the `fairRate` S-curve, the overcharge gap, the depositor loss distribution) for the deck and `docs.inflexion.xyz`.
+**Outputs feed the build:** the calibrated cvAMM params schema `quant/params.cvamm.schema.json` — whose blocks are: `fair_premium_surface` + `sigma_ref` (the Φ-sum / σ_ref estimator), `base_load_by_regime` (baseLoad bps keyed by σ_ref regime band — calm 2000 / normal 3000 / stressed 5000), `util_skew` (knee/slope/power/cap convex curve in `locked/(locked+free)`) and `dispersion_skew` (slope/power/cap in coverage-HHI concentration), `max_load_bps` (the I10 ceiling, on-chain dynamic form `maxLoad = 1/fairRate − 1`), `tranche_cut` (the senior cut `sf = 0.60`, junior first-loss), `productive_collateral`, `pool_hedge_fraction`, and `disclosure` (the §7.5 depositor figures). The schema is consumed by the live Sepolia deploy scripts and contract constructors; a future `params.json` schema bump (minor, per the module's semver note) is the migration path. Plus charts (the `fairRate` S-curve, the overcharge gap, the depositor loss distribution) for the deck and `docs.inflexion.xyz`.
 
 ---
 
@@ -812,7 +825,7 @@ This section is honest about the binding constraint and shows we know how to att
 
 _(vNEXT: the SDK becomes **convexity-aware** — adds READ-ONLY `bookGamma`/`bookVega`/`replicationStrip`/`suggestGammaHedge` mirroring the existing informational delta helpers; adds a cvAMM **depositor** surface; `getLPStructuralIV` is renamed to the convexity-premium index (F-#12); Panoptic execution is ROADMAP only and explicitly not-for-solvency.)_
 
-The SDK is demand-side critical: it is how MMs price, stream, and **hedge**, how cvAMM depositors interact with the pool, and tighter underwriter books are what create LP liquidity (§10).
+The SDK is demand-side critical: it is how MMs price, stream, and **hedge**, how cvAMM depositors interact with the pool, and tighter underwriter books are what create LP liquidity (§10). **The access layer is BUILT (P4.c):** `@inflexion/sdk` (`createInflexionSdk` — LP / Depositor / MM / Hedge / Data surfaces on a registry-driven foundation, reading pricing from the **on-chain `FairValueOracle`** with graceful-degradation fallbacks; the MM "load to beat" is the pool `totalLoadWad`-in-bps; a read-only hedge suggestion engine), `@inflexion/engine` (the thin Path-B quote relayer + shared EIP-712 quote helpers + day-one telemetry sinks), `@inflexion/subgraph` (The Graph; entities for the five signals), and `@inflexion/api` (a read-only cached REST facade + OpenAPI). The frontend (`apps/web`) is NEXT.
 
 ### 11.1 LP surface (simple)
 
@@ -853,19 +866,25 @@ For the hack: ship the SDK + an **example MM bot** (`examples/mm-bot.ts`) that s
 ### 11.3 cvAMM depositor surface (vNEXT — new)
 
 ```ts
-vault.deposit(usdc) // → ERC-4626 shares
-vault.withdraw(shares) // subject to the withdrawal delay / queue
-vault.nav() // net asset value per share
-vault.lockedFree() // locked vs free accounting (drives util_skew + the run defense)
+vault.deposit(Tranche, usdc) // → senior or junior shares (SENIOR | JUNIOR)
+vault.requestWithdrawal(Tranche, shares) // enter the cooldown-gated queue
+vault.withdraw(Tranche) // execute after the cooldown elapses
+vault.nav() // total NAV (both tranches)
+vault.seniorAssets() / vault.juniorAssets() // per-tranche NAV
+vault.seniorBalanceOf(user) / vault.juniorBalanceOf(user) // per-user per-tranche shares
+vault.convertToAssets(Tranche, shares) // NAV per share, per tranche
+vault.lockedFree() // pool-wide locked vs free (drives util_skew + the run defense)
+vault.lockedByMarket(marketId) // per-market locked collateral (HHI / dispersion)
 vault.skewState(marketId) // current util_skew / dispersion_skew inputs
 ```
 
-The depositor surface must carry the **CAPITAL-NOT-GUARANTEED** disclosure (§7.5) at every entry point.
+The depositor surface is **tranche-aware from day one** and must carry the **CAPITAL-NOT-GUARANTEED** dual-claim disclosure (§7.5) at every entry point, with explicit per-tranche risk framing (senior = structurally protected from underwriting loss; junior = first-loss, unhedged).
 
 ### 11.4 Data-consumer surface
 
 ```ts
-getConvexityPremiumIndex(market) // vNEXT: renamed from getLPStructuralIV (F-#12) — observed clearing load over σ_ref
+getConvexityPremiumIndex(market) // renamed from getLPStructuralIV (F-#12) — observed clearing load over σ_ref
+// (Signal 1: realized clearing load over σ_ref, bucketed by geometry; behavioral MM loadBps vs mechanical pool load — NOT a circular implied-vol)
 getRiskAppetiteIndex(market)
 getConvexityDepth(market)
 ```
@@ -874,18 +893,34 @@ getConvexityDepth(market)
 
 ## 12. The Data Surfaces — The Moat
 
-_(vNEXT: Surface 1 is reframed. The protocol now **publishes** the on-chain clearing load over a **transparent `σ_ref`**, so Surface 1 becomes "observed clearing load over a transparent `σ_ref`" rather than "back-solved `σ_LP` from an opaque rate." Surfaces 2–3 and the moat-not-paywall framing stay.)_
+_(v4.0: the moat is reframed as **FIVE BEHAVIORAL SIGNALS**, not three surfaces. The circular "invert `fairRate` for an implied-vol surface" claim is **DROPPED** — `charged/MaxIL = fairRate(σ_ref)·(1+load)` only recovers our own `σ_ref` + dealer load, not a market IV. The signals are actor-driven and non-circular. Honest framing: we sell the **architecture** of the moat — structures from day one, dynamics mature with volume. Some signals depend on the redeploy-pending events `SwapPriced`/`QuoteFilled` — the on-chain moat dataset BEGINS at the single redeploy (`docs/REDEPLOY_CHECKLIST.md`).)_
 
-The flow is a byproduct that is itself a product. Built passively from day one; exposed as free public APIs (The Graph + REST). Revenue is protocol fees; **data is the moat, not a paywall.**
+The flow is a byproduct that is itself a product — **the first view into the microstructure of the DeFi LP volatility-risk premium**. Built passively from day one; exposed as free public APIs (The Graph + REST). Revenue is protocol fees; **data is the moat, not a paywall.**
+
+**The five behavioral signals (actor-driven, non-circular).**
+
+1. **Realized clearing LOAD over a transparent `σ_ref`** — bucketed by `width × distance-to-edge × duration` (exclude cap-bound fills, which carry zero load info). The pool load is mechanical; the MM load (`QuoteFilled.loadBps`) is the behavioral choice. **Timeline (honest):** `SwapPriced`/`QuoteFilled` are **redeploy-pending** (§13), so today's pre-event stack serves Signal 1's **live half** via the SDK multicall (read `FairPremium` + `σ_ref` + the live pool load components) + day-one engine telemetry; the **FULL on-chain Signal 1** (per-fill `SwapPriced.totalLoadWad` + `σ_ref` recorded at each fill) and the on-chain moat dataset **BEGIN at the single redeploy**.
+2. **Pool-vs-MM load spread + MM win-rate** — a forward-vol read from MM behavior (the MM prices implied/forward vol; the pool prices backward `σ_ref`). Dynamic with ≥3 MMs.
+3. **Term structure of convexity** — MM `loadBps` slope across 7/30/90d per range (behavioral; the Path-A load is duration-independent / mechanical, so the slope is an MM signal).
+4. **Moneyness / demand skew** — realized on-chain **plus** the LATENT / unfilled half via off-chain engine telemetry (`DEMAND_LOG`).
+5. **Net convexity / gamma supply** — off-chain Greeks summed over the active set (`@inflexion/api` GreeksEngine over the subgraph).
+
+**Honest framing (mandatory).** We sell the **architecture** of the moat: the structures exist from day one; the **dynamic / latent halves** (signals 2 and 4) are captured by day-one engine telemetry (`DEMAND_LOG` / `COMPETITION_LOG`) and mature with volume (≥3 MMs). The on-chain half of signals 1/2/3/5 depends on the **redeploy-pending** `SwapPriced` / `QuoteFilled` events — the on-chain moat dataset **begins at the single redeploy**.
 
 ```
-SURFACE 1 — LP Convexity-Premium Index   (vNEXT — observed clearing load over a transparent σ_ref)
-  Source  : the on-chain clearing premium per (market × geometry) AND the published FairPremium / σ_ref
-  Primary : publish the OBSERVED CLEARING LOAD = premium / FairPremium − 1 over the transparent on-chain σ_ref.
-            Because σ_ref is published on-chain (§6.5), this is a well-defined, transparent quantity — NOT a
-            back-solved, non-identifiable σ_LP. (Replaces the v3.3 "back-solved σ_LP from an opaque rate" framing.)
+SURFACE 1 — LP Convexity-Premium Index   (v4.0 — Signal 1: observed clearing load over a transparent σ_ref)
+  Source  : the redeploy-pending SwapPriced event (totalLoadWad, sigmaRefWad, cappedAtMaxIL) per fill,
+            and QuoteFilled.loadBps for the MM choice; bucketed by geometry (width × distance-to-edge × duration).
+  Primary : publish the OBSERVED CLEARING LOAD over the transparent on-chain σ_ref.
+            - POOL load  = SwapPriced.totalLoadWad (the MECHANICAL load stack — circular if inverted; the baseline).
+            - MM load    = QuoteFilled.loadBps     (a BEHAVIORAL actor choice — NON-circular; the real signal).
+            Because σ_ref is published on-chain (§6.5) and SwapPriced records both pool mechanics + σ at each fill,
+            the clearing load is well-defined — NOT a back-solved, non-identifiable σ_LP. The circular
+            "invert fairRate for an implied-vol surface" claim is DROPPED (charged/MaxIL = fairRate(σ_ref)·(1+load)
+            only recovers our own σ_ref + dealer load). EXCLUDE cap-bound fills (SwapPriced.cappedAtMaxIL == true) —
+            they carry zero load info.
   Caveat  : the load is still CONTAMINATED by liquidity / SC-risk / capital-lock / inventory-skew premia.
-            Trade the SPREAD (load vs implied/forward vol), not the level.
+            Trade the SPREAD (MM − pool, vs implied/forward vol), not the level.
   Buyers  : quant funds, vol-arb desks, options-protocol integrations
 
 SURFACE 2 — DeFi Convexity Risk-Appetite Index
@@ -907,23 +942,39 @@ Honest limits to put in the docs: the clearing load is **contaminated** (liquidi
 
 ## 13. Contract Architecture & Stack
 
-_(vNEXT: `FairValueOracle`, `VolOracle`, and `ConvexityVault` are added to the architecture. The ILMath "~10× cheaper" claim is **corrected** to the measured reality (Task 2.12: ~5.3× MORE expensive cached for this small kernel). Invariants **I1–I9 are KEEP verbatim** (settle-path, untouched). New invariant **I10** is added — by construction, upstream of settle, does not touch settle/MaxIL/I1–I9.)_
+_(v4.0: `FairValueOracle` (Stylus production), `VolOracle`, and the dual-tranche `ConvexityVault` are deployed (`deployments/arbitrum-sepolia.json`). The ILMath "~10× cheaper" claim is **corrected**: Solidity ILMath is **production**; the Stylus ILMath port is a **rejected benchmark artifact** (P3 closed). Invariants **I1–I9 are KEEP verbatim** (settle-path, untouched). New invariant **I10** is added — by construction, upstream of settle, does not touch settle/MaxIL/I1–I9.)_
 
 ```
-ILMath (Stylus/Rust)   computeMaxIL, computeIL — pure fixed-point math; Arbitrum-native. Reference impl.
-                       (vNEXT: the v3.3 "~10x cheaper than Solidity" claim is WRONG — Task 2.12 measured Stylus at
-                       ~5.3x MORE expensive cached for this small kernel; see docs/MATH.md §7. Stylus is kept as the
-                       production IL impl for its math fidelity / future kernel growth, not a current gas win.)
-VolOracle.sol          (vNEXT NEW) σ_ref = max(σ_short, σ_long, floor), EWMA of Chainlink-tick log-returns (§6.5)
-FairValueOracle.sol    (vNEXT NEW) FairPremium = fairRate·MaxIL; fairRate S-curve in σ²·T for the specific geometry (Pillar 1)
-OracleManager.sol      Chainlink + sequencer + TWAP deviation; getPrice (entry) / getSettlementPrice (settle)
-ConvexityVault.sol     (vNEXT NEW) ERC-4626 USDC cvAMM pool (Path A); one per pair / 9 markets; util+dispersion skews;
-                       I10-capped; EIP-1271 owner of collateral; lockCollateral/releaseAndDistribute; locked/free
-UnderwriterVault.sol   per-MM pool (deposited/locked/available) — Path B capital; lockCollateral/releaseAndDistribute
-ILVault.sol            ERC-721 custody; reads NonfungiblePositionManager; claimFees passthrough
-InflexionCore.sol      state machine; Path A (on-chain capped pricing) + Path B (EIP-712/1271 SignedQuote);
-                       routes to cheaper; enforces I1–I10; CEI settlement
-GreekDisplay.sol       read-only δ/γ/ν/θ + convexity-premium index + 3 surfaces (zero funds, zero state)
+ILMath (Solidity, PRODUCTION, Arbitrum Sepolia 0xC203…)
+                       computeMaxIL, computeIL — pure fixed-point math, exact for the IL convexity proof; Arbitrum-native.
+                       This is THE on-chain contract that computes IL at settlement (the settle-path math).
+                       (P3 CLOSED: the Stylus/Rust port (packages/contracts/stylus/ILMath) is a REJECTED benchmark
+                       artifact — NOT deployed, kept only for the gas record. The v3.3 "~10x cheaper" claim was
+                       inverted: Task 2.12 measured Stylus at ~5.3x MORE expensive cached for this tiny kernel (the
+                       call floor cannot amortize a small workload — the opposite of the compute-heavy FairValueOracle).
+                       Stylus ILMath stays only as a revm-testable CI cross-check. On-chain IL computation is Solidity;
+                       do NOT deploy the Stylus port.)
+VolOracle.sol          (deployed 0xE79…) σ_ref = max(σ_short, σ_long, floor), poke-based time-aware EWMA of
+                       Chainlink-tick log-returns; never raw realized σ; poke is a no-op (no event) when dt<minSampleInterval (§6.5)
+FairValueOracle (Stylus, PRODUCTION, 0x10E3…e882 Arbitrum Sepolia)
+                       FairPremium = fairRate·MaxIL; fairRate = exact finite Φ-sum in σ²·T for the specific geometry,
+                       L-INDEPENDENT (depends only on a=Pa/P0, b=Pb/P0, σ_ref, T), machine-precise to 6.7e-15 (Pillar 1).
+                       REFERENCE/CI: Solidity src/FairValueOracle.sol is a revm-testable cross-check (NOT a second
+                       production oracle). NEVER reimplement the Φ-sum off-chain or as a Solidity fallback.
+OracleManager.sol      (deployed 0x584…) Chainlink + sequencer + TWAP deviation; getPrice (entry) / getSettlementPrice (settle)
+ConvexityVault.sol     (P3.1/P3.1b, deployed 0xB8d…) USDC ERC-4626 cvAMM pool (Path A); one per pair / 9 markets
+                       (fungible capital). **DUAL-TRANCHE SENIOR/JUNIOR from launch** — structural protection
+                       totalLocked ≤ juniorAssets ⇒ junior absorbs all underwriting loss; separate seniorAssets/
+                       juniorAssets, seniorBalanceOf/juniorBalanceOf, cooldown-gated withdrawal queues; premium split
+                       via seniorPremiumShareBps. Capped algorithmic on-chain pricing (util + dispersion skews);
+                       I10-capped at FairPremium·(1+maxLoad); EIP-1271 owner of collateral (no keeper drains it);
+                       lockCollateral/releaseAndDistribute; lockedByMarket (HHI) + locked/free run defense.
+UnderwriterVault.sol   (deployed 0xa26…) per-MM pool (deposited/locked/available) — Path B capital; lockCollateral/releaseAndDistribute
+ILVault.sol            (deployed 0x047…) ERC-721 custody; reads NonfungiblePositionManager; claimFees passthrough
+InflexionCore.sol      (deployed 0x15b7…A96d) state machine; createSwapPathA (Path A) + createSwap (Path B EIP-712/1271
+                       SignedQuote) + createSwapRouted (cheaper-of, fallback-to-pool); enforces I1–I10; CEI settlement
+GreekDisplay.sol       read-only δ/γ/ν/θ + convexity-premium index + the data signals (zero funds, zero state)
+Libraries (deployed)   TickMath, CvammPricing (loadComponents — public), SwapMath, QuoteVerification, Gaussian
 — Roadmap (PARTIAL leverage dial) —
 LiquidationManager.sol Dutch-auction forced early settlement; Chainlink Automation target (PARTIAL only)
 
@@ -931,7 +982,17 @@ Interfaces: IILMath, IPositionManager, ICollateralModel, ISettlementModule, IYie
             IFairValueOracle, IVolOracle   (scalability seams)
 ```
 
-Key Arbitrum One addresses: NonfungiblePositionManager `0xC36442b4a4522E871399CD717aBDD847Ab11FE88`; v3 Factory `0x1F98431c8aD98523631AE4a59f267346ea31F984`; WETH `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1`; native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`. (EIP-1271 via OZ `SignatureChecker` and the ERC-4626 base are **already vendored** in `lib/` — no new external dependency.)
+Key Arbitrum One addresses: NonfungiblePositionManager `0xC36442b4a4522E871399CD717aBDD847Ab11FE88`; v3 Factory `0x1F98431c8aD98523631AE4a59f267346ea31F984`; WETH `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1`; native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`. (EIP-1271 via OZ `SignatureChecker` and the ERC-4626 base are **already vendored** in `lib/` — no new external dependency.) The live Arbitrum Sepolia registry is `deployments/arbitrum-sepolia.json`.
+
+**REDEPLOY-PENDING (coded on `main`, NOT live in the deployed bytecode).** Three additions are coded but await a **single redeploy** (`docs/REDEPLOY_CHECKLIST.md`); the live demo runs the pre-event stack:
+
+- `QuoteFilled(uint256 indexed swapId, address indexed mm, bytes32 indexed quoteId, uint256 nonce, uint16 loadBps)` — emitted in `_executePathB` (MM fill attribution; today `isQuoteFilled` is `precision:'coarse'`).
+- `SwapPriced(uint256 indexed swapId, uint8 path, uint256 fairPremium, uint256 baseLoadWad, uint256 utilSkewWad, uint256 dispSkewWad, uint256 totalLoadWad, uint256 sigmaRefWad, bool cappedAtMaxIL)` — emitted on all create paths (the clearing-load data moat, signals 1/2/3/5).
+- `CvammPricing.loadComponents()` (public pure) — returns base/util/disp/total separately for the SDK depositor/MM/data surfaces.
+
+The **on-chain moat dataset begins at this redeploy**, and precise MM fill attribution activates then.
+
+**SIZE CONSTRAINT (the redeploy blocker).** After the events, `InflexionCore` is **+213 B over the EIP-170 limit (24,789 B vs 24,576 B)**. `forge build` / `forge test` (revm) are unaffected and CI is green, but **the redeploy WILL fail until this is reduced** (lower `optimizer_runs`, move the `SwapPriced` emit into a public library function, or further library extraction). A size-pass is therefore a **critical P5 step** before the frontend ships.
 
 ```
 Repo (pnpm monorepo)
@@ -957,7 +1018,7 @@ Dev: local **Nitro** node (forks Arbitrum mainnet state → real Uniswap v3 + Ch
 - **I7 — capacity authority (F-#6):** `Σ V0` filled against a quote ≤ its `maxNotionalV0`; a cancelled nonce-bit cannot fill; the same `quoteId` cannot over-consume under concurrent fills.
 - **I8 — settlement liveness (Fork 1 fix):** for any swap, `settle()` succeeds by `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD` under any price path — the lone-spike check never permanently locks funds. Fuzz: drive arbitrary price paths through `T` (including gaps, spikes, glitches) and assert `settle` eventually succeeds within the bound.
 - **I9 — oracle-anchored band enforcement (Fork 2 fix):** `createSwap` reverts iff `absBps(P_live, quote.quotePrice) > quote.priceBandBps`. Fuzz: synthesize stale quotes + arbitrary oracle gaps ⇒ band-exceeding fills always revert; within-band fills always succeed; no stale-quote fill ever exceeds the MM's chosen band. _(Applies to Path B; Path A has no signed quote and prices off the live `FairValueOracle` directly.)_
-- **I10 — price cap (vNEXT — new; by construction; upstream of settle):** `premium ≤ FairPremium · (1 + maxLoadBps)` on **both** paths. On Path A this is enforced by the clamp `baseLoad + util_skew + dispersion_skew ≤ maxLoad`; on Path B by `require(loadBps ≤ maxLoadBps)` with premium derived from the on-chain `FairPremium`. **I10 is enforced in `createSwap` pricing (PHASE 1/2), strictly UPSTREAM of `settle` — it does NOT touch `settle`, the MaxIL formula, or I1–I9.** Fuzz: drive `FairPremium`, the skews, and `loadBps` across their ranges and assert the charged premium never exceeds `FairPremium · (1 + maxLoadBps)`.
+- **I10 — price cap (LAUNCH; by construction; upstream of settle):** `premium ≤ FairPremium · (1 + maxLoadBps)` on **both** paths. On Path A this is enforced by the **mechanical, deterministic clamp** `baseLoad + util_skew + dispersion_skew ≤ maxLoad` (no MM discretion, no graceful degradation — it holds for **all sequences of states and all price paths**, FULL and PARTIAL both); on Path B by `require(loadBps ≤ maxLoadBps)` with premium derived from the on-chain `FairPremium`. Both are in **PHASE 1 (pricing, READ)**, strictly **UPSTREAM of `settle`**. **I10 does NOT touch `settle`, the MaxIL formula, or I1–I9** (the no-bad-debt proof is structural: collateral = MaxIL ≥ payout, orthogonal to the premium cap, whereas I1 also depends on oracle/settlement liveness while I10 is always-true by code). **Neither the tranche premium split (senior/junior on Path A) nor the structural `totalLocked ≤ juniorAssets` junior-first-loss constraint affects I10 or settle semantics** — both are orthogonal to the cap and the settlement core. Fuzz: drive `FairPremium`, the skews, and `loadBps` across their ranges and assert the charged premium never exceeds `FairPremium · (1 + maxLoadBps)`.
 
 ```solidity
 // I3 + I4, stated explicitly (handler fuzzes sqrtP_T over the whole range)
@@ -999,10 +1060,17 @@ _(vNEXT: the landing is **three doors** mapping cleanly to the three actors — 
                  "Fees earned $Y vs premium $Z → net cost of protection $(Z−Y)";
                  "IL to date: $W — fully covered" + countdown + Claim fees. Settled: payout, NFT returned.
 
-/vault (LAUNCH)  cvAMM depositor door. Deposit USDC → shares; NAV; locked/free gauge; util_skew/dispersion_skew state;
-                 historical load earned vs claims paid; withdrawal queue/cooldown;
-                 PROMINENT single-asset risk disclosure modal (§7.5): "CAPITAL IS NOT GUARANTEED — this is a
-                 vol-selling product." (Numbers PLACEHOLDER pending P1 quant.)
+/vault (LAUNCH)  cvAMM depositor door — TWO TRANCHE SUB-DOORS:
+                 SENIOR ("Convexity Savings Account")        | JUNIOR ("Pure Vol-Selling Tranche")
+                 Deposit USDC → senior shares                | Deposit USDC → junior shares (choose your risk dose)
+                 Yield: base + small premium slice           | Yield: most of the load (high APY)
+                 Structurally protected from underwriting loss | First-loss, unhedged
+                 Risk: NOT protected from systemic failure    | Risk: capital NOT guaranteed
+                 Shared: NAV; per-tranche assets; locked/free + util_skew/dispersion_skew gauge; historical load
+                 earned vs claims paid; separate cooldown-gated withdrawal queues; rebalance senior ↔ junior by regime.
+                 PROMINENT dual-claim disclosure modal (§7.5): "Senior is structurally safe from *underwriting* loss
+                 in FULL; CAPITAL IS NOT GUARANTEED on systemic failure (USDC depeg, oracle fault, contract bug).
+                 Junior is first-loss and unhedged. This is a volatility-selling product." (P1.13 numbers, §7.5.)
 
 /underwrite (MM) Cockpit (power users): deposit/withdraw capital (available/locked gauge);
                  quoting panel (per market: loadBps over FairPremium, band, capacity, validity) with live book preview;
@@ -1010,9 +1078,11 @@ _(vNEXT: the landing is **three doors** mapping cleanly to the three actors — 
                  implied-vs-realized variance; gamma/delta hedge suggestions; CapitalLow alerts.
                  (Roadmap: PARTIAL leverage controls, first-loss/junior stake, liquidation feed.)
 
-/markets         The 3 surfaces, visualized (Recharts):
-                 Surface 1 = convexity-premium / clearing-load over σ_ref (NOT "IV"); risk-appetite regime gauge +
-                 time series; convexity-supply depth per market. "Free public data — consume via API →"
+/markets         The five behavioral signals, visualized (Recharts):
+                 Signal 1 = convexity-premium / clearing-load over σ_ref (NOT "IV"; behavioral MM loadBps vs mechanical
+                 pool load); Signal 2 = pool-vs-MM spread + MM win-rate; Signal 3 = term structure (7/30/90d);
+                 Signal 4 = demand/moneyness skew (realized + latent); Signal 5 = net gamma supply.
+                 "Free public data — consume via API →" (the on-chain half activates at the redeploy — §13.)
 ```
 
 ### 14.2 Demo-critical UI touches
@@ -1033,7 +1103,7 @@ The protocol is sophisticated; docs are how non-finance people _get it_ and how 
 2. LP guide        manual flow + SDK one-liner; what's covered / the MaxIL cap; the on-chain FairPremium + routing.
 3. MM guide        run a quoting bot; the SDK quoter + delta AND gamma hedging + replication strip;
                    why MMs matter (export risk + forward vol); "uptime, not volume".
-4. Data / API      REST + GraphQL + SDK reference; the 3 surfaces; the contamination caveats; curl + TS examples.
+4. Data / API      REST + GraphQL + SDK reference; the five behavioral signals; the contamination caveats; curl + TS examples.
 5. Protocol / security  math derivation (§3), the no-bad-debt proof + the not-Bancor argument, the cap,
                    FairValue + σ_ref oracle (load-bearing scope), the I10 cap, the trust model (§4.5),
                    the quant model (§9) with charts, the Inefficiency Ledger, invariants I1–I10, attack vectors,
@@ -1044,7 +1114,9 @@ The protocol is sophisticated; docs are how non-finance people _get it_ and how 
 
 ## 15. Testnet Demo Plan (Arbitrum Sepolia)
 
-_(vNEXT: the cvAMM always-on quote (Path A) is the headline that removes cold-start; **do NOT seed a fake MM book** — a SINGLE real MM plugs in to demo Path-B competition. The demo-oracle adapter and seconds-scale durations stay; the new `FairValueOracle`/`VolOracle`/`ConvexityVault` are in the demo deploy.)_
+_(v4.0: the cvAMM always-on quote (Path A) is the headline that removes cold-start; **do NOT seed a fake MM book** — a SINGLE real MM plugs in to demo Path-B competition. The demo-oracle adapter and seconds-scale durations stay; the `FairValueOracle`/`VolOracle`/`ConvexityVault` are in the demo deploy.)_
+
+**LIVE on Arbitrum Sepolia (deployed 2026-06-03; registry `deployments/arbitrum-sepolia.json`).** Stylus `FairValueOracle` `0x10E3…e882` (PRODUCTION), `InflexionCore` `0x15b7…A96d`, dual-tranche `ConvexityVault` `0xB8d…a2D2`, `VolOracle` `0xE79…947B`, Solidity `ILMath` `0xC203…DD9b`, plus `OracleManager` / `UnderwriterVault` / `ILVault` and libs `TickMath` / `CvammPricing` / `SwapMath` / `QuoteVerification`. The full **create → settle lifecycle is demonstrated** (Path A and Path B routing, swapIds 1–3): swap #2 Path-A cvAMM (premium $28.67 ≈ 2.5% of MaxIL $1,147.75, settled payout $1.83); swap #3 `createSwapRouted` picked the MM (Path B, `loadBps` 500) because it strictly beat the pool, locking the MM's own collateral. **A redeploy is pending** (the `SwapPriced`/`QuoteFilled` events + the `InflexionCore` size-pass — §13, `docs/REDEPLOY_CHECKLIST.md`) before the frontend ships (P4.c/P5).
 
 **The hard problem:** real expiries are 7–90 days; a demo is 3 minutes. Solve it with a **demo deployment** that compresses time and controls price, _without_ faking the trust story.
 
@@ -1067,7 +1139,7 @@ _(vNEXT: the cvAMM always-on quote (Path A) is the headline that removes cold-st
 4. Operator moves demo price → IL accrues → dashboard + Surface-1 update live.
 5. Settle the **near-expiry** pre-seeded swap → LP made whole, counterparty residual, NFT returned, tx links. **Trustless.**
 6. `/vault` — show pool NAV, locked/free, the skew state move, and the CAPITAL-NOT-GUARANTEED disclosure.
-7. Close on `/markets`: "every trade fed these three surfaces — the first on-chain LP convexity-premium data, priced on-chain."
+7. Close on `/markets`: "every trade feeds the five behavioral signals — the first on-chain view into the microstructure of the DeFi LP volatility-risk premium, priced on-chain." _(The full on-chain signal set activates at the single redeploy — §13.)_
 
 ### 15.3 Risk management for the demo
 
@@ -1096,15 +1168,15 @@ _"If you've ever provided liquidity on Uniswap and ended up with less than if yo
 ### 16.3 The technical depth (for technical judges)
 
 - **On-chain published fair value** (`FairPremium = fairRate·MaxIL`), theory-anchored (Lipton–Lucic–Sepp 2025; Milionis–Moallemi–Roughgarden 2022) — the first on-chain price for LP IL risk.
-- **The cvAMM**: a pooled ERC-4626 underwriter that prices algorithmically and is **contractually capped by invariant I10** (`premium ≤ FairPremium·(1+maxLoad)`, by construction) — overcharge is impossible by code.
+- **The cvAMM**: a pooled ERC-4626 underwriter that prices algorithmically and is **contractually capped by invariant I10** (`premium ≤ FairPremium·(1+maxLoad)`, by construction) — overcharge is impossible by code. **Dual-tranche from launch**: junior first-loss + high APY (vol seller), senior protected + low yield (savings account); the structural `totalLocked ≤ juniorAssets` ensures junior absorbs all underwriting loss before senior, and senior P(loss)=0 while the pool is under-utilized (`u ≤ 1−sf`, calibrated by the quant).
 - MaxIL as the **collateral unit** (range-agnostic ROC → no adverse selection) with the **`min(IL, MaxIL)` cap** that makes the no-bad-debt claim a _construction_, not a hope.
 - **Hybrid settlement**: signature-free on-chain pool (Path A) + EIP-712/1271 signed-quote MM rail (Path B) into one non-custodial settlement core — the matcher can't steal, forge, or force a stale quote, and Path A needs no matcher at all.
-- **Stylus/Rust** IL math (Arbitrum-native). _(Honest note: for this small kernel Stylus measured ~5.3× more expensive cached than Solidity — we keep it for math fidelity and future kernel growth, not as a current gas win.)_
+- **Stylus/Rust** `FairValueOracle` (the Arbitrum-native showcase, `0x10E3…e882`) — a compute-heavy, machine-precise Φ-sum (to 6.7×10⁻¹⁵) where Stylus reaches gas parity / precision Solidity cannot match; it is the **shipped** Stylus contract. _(Honest note: we **also** built a Stylus ILMath port, measured it ~5.3× more expensive cached for that tiny kernel — the call floor cannot amortize a small workload — and **ship Solidity ILMath** (`0xC203…`) for cost; the Stylus ILMath is a rejected benchmark kept only for the gas record (§13).)_
 - **The quant model**: cvAMM and PARTIAL parameters _derived_ from single-asset Monte Carlo — not guessed.
 
 ### 16.4 The moat (why it compounds)
 
-_"Every trade emits data that doesn't exist anywhere today: the first on-chain LP convexity-premium index (observed clearing load over a transparent on-chain σ), a DeFi risk-appetite index, and a convexity-supply book. Free public API from day one. We own the dataset because we create it."_
+_"Every trade emits data that doesn't exist anywhere today — the first view into the microstructure of the DeFi LP volatility-risk premium, as **five behavioral signals**: realized clearing load over a transparent on-chain σ, the pool-vs-MM spread (a forward-vol read), the term structure of convexity, demand/moneyness skew (realized + latent), and net gamma supply. Free public API from day one. We sell the **architecture** of the moat — the structures exist now; the dynamics mature with volume. We own the dataset because we create it."_
 
 ### 16.5 The honesty slide (wins technical credibility)
 
@@ -1133,7 +1205,7 @@ _(vNEXT: this in-spec mirror is replaced by a pointer to ROADMAP.md, the task so
 - **P4** — engine (Path B, one real MM) / SDK (convexity-aware + depositor) / subgraph / API / frontend (three doors).
 - **P5** — spec finalization (this document) + roadmap retag (deprioritize the never-built multi-MM RFQ items) + move multi-asset PARTIAL quant to `quant/legacy/`.
 
-**Already built and verified (settle-path baseline, untouched):** `ILMath` (Sol + Stylus), `OracleManager`, `UnderwriterVault`, `ILVault`, `NoOpYieldAdapter`, `InflexionCore` (`createSwap`/`settle`, EIP-712, bitmap nonces, I9 band, I1–I9 tested), `TickMath`. **Time is not the constraint — order for correctness.**
+**Already built and verified (settle-path baseline, untouched):** `ILMath` (**Solidity = production, deployed**; the Stylus port is a rejected benchmark artifact, §13), `OracleManager`, `UnderwriterVault`, `ILVault`, `NoOpYieldAdapter`, `InflexionCore` (`createSwap`/`settle`, EIP-712, bitmap nonces, I9 band, I1–I9 tested), `TickMath`. **The full cvAMM stack (P1–P4) is BUILT and DEPLOYED on Arbitrum Sepolia** — Stylus `FairValueOracle`, `VolOracle`, dual-tranche `ConvexityVault`, the routed `createSwapPathA`/`createSwapRouted` paths, the access layer (`@inflexion/engine` / `sdk` / `subgraph` / `api`), with the events + size-pass redeploy pending (§13). The frontend (`apps/web` three doors) is NEXT. **Time is not the constraint — order for correctness.**
 
 ---
 
@@ -1146,7 +1218,7 @@ _(vNEXT: existing items stay; the new hybrid roadmap items are appended.)_
 - **Secondary liquidity & exits (F-#11):** novation; the writer side as a transferable "protection-writer" ERC-721; LP early-termination by forfeiting unused premium. The European/locked design currently gives neither side an exit.
 - Yield-on-collateral live adapters (idle-only, instantly-redeemable — sDAI / tokenized T-bills); ifUSDC composability.
 - Greek-decomposition tokens (δ/γ/θ/ν), correlation/dispersion swaps, LP-CDO tranching, v4-hook barrier/variance swaps, the ULREX unified data layer.
-- **vNEXT hybrid roadmap:** **BTC/USDC + multi-pair**; **cross-asset concentration skew** (when multi-pair exists); the **PARTIAL leverage dial** (§8); **senior/junior tranches** (§8.2); **productive-collateral integration** (idle-only, compliant — §7.4; Aave-for-locked BLOCKED); **pool-level partial hedge** execution (§8.3); **Panoptic hedge SDK** execution (read-only convexity analytics at launch — §11; APPROXIMATE, not-for-solvency).
+- **v4.0 hybrid roadmap:** **BTC/USDC + multi-pair**; **cross-asset concentration skew** (when multi-pair exists); the **PARTIAL leverage dial** (§8); **productive-collateral integration** (idle-only, compliant — §7.4; Aave-for-locked BLOCKED); **pool-level partial hedge** execution (§8.3); **Panoptic hedge SDK** execution (read-only convexity analytics at launch — §11; APPROXIMATE, not-for-solvency). _(Senior/junior tranching is **no longer here** — it was promoted to LAUNCH, dual-tranche `ConvexityVault`, §8.2.)_
 
 ---
 
@@ -1165,7 +1237,7 @@ _(vNEXT: existing entries stay; an "Open quantitative questions (cvAMM, single-a
 
 ### 19.1 Open quantitative questions (cvAMM, single-asset, P1 — vNEXT)
 
-All single-asset; all feed `quant/params.cvamm.schema.json`; none inherits the dead cross-asset `k`. (Mirrors the 10 deliverables, §9.1.)
+**P1 is COMPLETE** — all of these are now calibrated by the heavy run and feed `quant/params.cvamm.schema.json` (the live Sepolia deploy consumes it); none inherits the dead cross-asset `k`. The list is kept as the resolved-deliverable index (mirrors the 10 deliverables, §9.1).
 
 - `σ_short` / `σ_long` EWMA window calibration + floor + cadence (with the never-raw-realized caveat).
 - `baseLoad` / `maxLoad` sizing from the lone-writer-CVaR-vs-diversified overcharge gap.
@@ -1174,17 +1246,19 @@ All single-asset; all feed `quant/params.cvamm.schema.json`; none inherits the d
 - Diversification CVaR collapse target N (per-contract CVaR 100% → ~78.7% as N: 1→100).
 - Senior/junior cut point; optimal pool-hedge fraction.
 - Safe routable idle fraction (compliant productive collateral; Aave-for-locked BLOCKED).
-- Single-asset depositor loss distribution (placeholder-replacing numbers for §7.5).
+- Single-asset depositor loss distribution — **PRODUCED** (P1.13 heavy run done; `quant/HEAVY_CALIBRATION.md`); the real figures are in the §7.5 disclosure.
 
 ---
 
-_Spec v4.0 — hackathon build doc (the hybrid pivot). The first market for Uniswap v3 IL risk, and the first to price it on-chain. Three pillars: (1) on-chain published FairValue (`FairPremium = fairRate·MaxIL`, theory-anchored to Lipton–Lucic–Sepp 2025 + Milionis–Moallemi–Roughgarden 2022); (2) the cvAMM — a pooled ERC-4626 passive underwriter (Path A) that quotes algorithmically on-chain off FairPremium with util/dispersion skews, capped by invariant I10; (3) the retained MM competition rail (Path B, EIP-712/1271 signed quotes — floor-of-liquidity + ceiling-of-price). One vault per pair / 9 markets, fungible capital. FULL (default, leverage 1, no bad debt) vs PARTIAL (leverage dial, roadmap). σ_ref = max(σ_short, σ_long, floor), EWMA of Chainlink ticks — load-bearing for the I10 cap + depositor solvency, NOT for the FULL no-bad-debt invariant (which stays structural and oracle-independent). Not Bancor; capital NOT guaranteed; LPs always paid (I1). coverage = min(IL, MaxIL); progressive-disclosure three-door UX; Stylus ILMath; scalable enums/interfaces for ASIAN/AMERICAN/PARTIAL._
+_Spec v4.0 — FINALIZED (the hybrid cvAMM, reconciled to the built + deployed reality on Arbitrum Sepolia). The first market for Uniswap v3 IL risk, and the first to price it on-chain. Three pillars: (1) on-chain published FairValue (`FairPremium = fairRate·MaxIL`, an exact L-independent Φ-sum, **Stylus production `0x10E3…e882`** / Solidity CI cross-check; theory-anchored to Lipton–Lucic–Sepp 2025 + Milionis–Moallemi–Roughgarden 2022); (2) the cvAMM — a pooled ERC-4626 passive underwriter (Path A), **dual-tranche SENIOR/JUNIOR from launch** (`ConvexityVault`, structural `totalLocked ≤ juniorAssets`), quoting algorithmically on-chain off FairPremium with util/dispersion skews, capped by invariant I10; (3) the retained MM competition rail (Path B, EIP-712/1271 signed quotes — floor-of-liquidity + ceiling-of-price; `createSwapRouted` falls back to the pool, never reverts). One vault per pair / 9 markets, fungible capital. FULL (default, leverage 1, no bad debt) vs PARTIAL (leverage dial, roadmap). σ_ref = max(σ_short, σ_long, floor), poke-based EWMA of Chainlink ticks — load-bearing for the I10 cap + depositor solvency, NOT for the FULL no-bad-debt invariant (which stays structural and oracle-independent). Not Bancor; capital NOT guaranteed for both tranches; LPs always paid (I1, qualified: capped payoff + solvent USDC + oracle/settlement liveness + no rehypothecation breach). coverage = min(IL, MaxIL); progressive-disclosure three-door UX; **Solidity ILMath production** (the Stylus ILMath port is a rejected benchmark); the data moat is **five behavioral signals** (not a circular implied-vol surface); scalable enums/interfaces for ASIAN/AMERICAN/PARTIAL._
 
 ---
 
 ### Changelog
 
-_v4.0 — THE HYBRID PIVOT (this revision)._ Reorganized the protocol around **three pillars** (§3.0): on-chain published FairValue (`FairValueOracle`, §3.0/§3.3/§13), the cvAMM pooled underwriter (`ConvexityVault`, ERC-4626, §7.3), and the retained MM competition rail (Path B). **Architecture:** two parallel paths into one untouched settlement core — Path A (cvAMM, on-chain, signature-free, default) + Path B (MM signed quotes, parallel, optional); `createSwap` routes to the cheaper of {pool, best MM quote} (§4.0). **New on-chain components:** `VolOracle` (`σ_ref = max(σ_short, σ_long, floor)`, EWMA of Chainlink ticks, mandatory never-raw-realized caveat, §6.5) and `FairValueOracle` (`FairPremium = fairRate·MaxIL`, §3.3) — both **load-bearing for the I10 cap + depositor solvency, NOT for the FULL no-bad-debt invariant**, which stays structural and oracle-independent. **New pricing:** `premium = FairPremium·(1+baseLoad+util_skew+dispersion_skew)`, hard-capped by **new invariant I10** (`premium ≤ FairPremium·(1+maxLoad)`, by construction, **upstream of settle**, does NOT touch settle/MaxIL/I1–I9, §13). **Two new single-asset-calibrated skews** (util + dispersion, §3.5). **No geometry asymmetry** — v3 params are public, both paths price the specific position; §3.4 rewritten and the F-#9 caveat retired; Surface 1 reframed to observed clearing load over a transparent `σ_ref` (§12). **Capital:** one `ConvexityVault` per pair backing 9 marketIds with fungible capital; FULL vs PARTIAL is a **leverage dial on one pool**, not two pools (§8); senior/junior tranching (§8.2) and pool-level partial hedge (§8.3) added as roadmap concepts; the **not-Bancor argument** and the **single-asset depositor disclosure (CAPITAL NOT GUARANTEED, placeholder numbers)** stated verbatim (§0, §7.5). **Inefficiency Ledger** added (§10.1). **SDK** made convexity-aware (read-only `bookGamma`/`bookVega`/`replicationStrip`/`suggestGammaHedge`) + a cvAMM depositor surface (§11). **EIP-712/1271 changes stated explicitly (pre-authorized):** `SignedQuote.premiumRateOfMaxIL → loadBps` (premium derived from on-chain FairPremium); verification broadened to OZ `SignatureChecker` for the EIP-1271 vault-signer (§4.3/§4.7). **CLAUDE.md hard-rule flags (encoded, never silently broken):** "Aave for locked collateral" is **BLOCKED** — only the compliant idle-only/instantly-redeemable form is encoded (§7.2/§7.4); no cvAMM/PARTIAL constant is hardcoded — all come from the quant (the new cvAMM block is documented in `quant/params.cvamm.schema.json` this turn; `params.json`/`params.py` untouched, §9). **Doc fixes (sourced from shipped code):** §3.2 MaxIL/V0 table corrected to the `il.py` geometric values (±5% 1.27% / ±10% 2.56% / ±20% 5.23% / ±50% 13.76%; was ~4.2× too low); the ILMath "~10× cheaper" claim corrected to the measured ~5.3× more-expensive-cached reality (Task 2.12, §13/§16.3); `SwapRecord.sqrtP0X96` removed to match shipped code (Task 5.12, §5.1). **Scope:** launch = ONE ETH/USDC pool, 9 marketIds, FULL only; BTC/USDC + multi-pair + PARTIAL + tranches + productive collateral + pool hedge + Panoptic exec are roadmap (§2, §18). **Settlement core, MaxIL formula, and invariants I1–I9 are UNTOUCHED — every change is upstream of settle.**
+_v4.0 — FINALIZED (P5: audit + reconcile against the built + deployed system)._ This pass reconciled the v4.0 pivot draft to what was actually **BUILT and DEPLOYED** on Arbitrum Sepolia (registry `deployments/arbitrum-sepolia.json`), making the spec specific enough to anchor the public docs (`apps/docs`). Reconciled items: (a) **senior/junior tranching promoted roadmap → LAUNCH** everywhere (dual-tranche `ConvexityVault` `0xB8d…`, structural `totalLocked ≤ juniorAssets`, separate per-tranche assets/shares/cooldown-gated queues, premium split via `seniorPremiumShareBps` — §0/§1/§2/§3.0/§7.3/§8/§8.2/§9.1/§11.3/§14.1/§16.3/§18); (b) the invariant set is now **I1–I10** — I10 refined as a **mechanical, deterministic clamp upstream of settle**, orthogonal to tranching and the no-bad-debt proof (§13); (c) the **data moat reframed to the FIVE BEHAVIORAL SIGNALS** with the honest "architecture, dynamics mature with volume" framing, and the **circular implied-vol-inversion claim DROPPED** (§3.0/§11.4/§12/§16.4); (d) oracle ship-decision pinned: **Stylus `FairValueOracle` = production** (`0x10E3…e882`, exact L-independent Φ-sum, 6.7e-15), Solidity = CI cross-check (never reimplement off-chain), and **Stylus ILMath = rejected benchmark** (P3 closed; ~5.3× more expensive cached) with **Solidity ILMath = production** `0xC203…` (§3.0/§3.3/§13/§16.3); (e) `loadBps` + the three create paths (`createSwapPathA` / `createSwap` / `createSwapRouted` — fallback-to-pool, never revert; only the executed rail mutates nonce/capacity/lock, I7) made explicit (§4.0/§4.3/§13); (f) the **access layer** (`@inflexion/engine` / `sdk` / `subgraph` / `api`) documented as built, with day-one telemetry capture (§4.6/§11/§12/§13); (g) **redeploy-pending events** (`SwapPriced`/`QuoteFilled`) + `CvammPricing.loadComponents()` + the `InflexionCore` +213 B EIP-170 size-pass flagged wherever the moat data layer or MM fill attribution depend on them (§4.6/§12/§13/§15); (h) the **real P1.13 single-asset disclosure numbers** added (bare-pool `u=0.40`: 122%/50%/247% 3y CAGR, P(losing month) 26.5%, worst month −26.8%, P(3y DD>50%) 2.7%; senior P(loss)=0/worst 0%; junior worst −67%) with the **two-never-merged claims** distinguishing senior (underwriting-loss protection only, not systemic) from junior (first-loss) — §7.5. VolOracle poke semantics (no-op/no event when `dt<minSampleInterval`) documented (§3.3/§6.5/§13). The §15 demo plan retagged to LIVE (full create→settle lifecycle, swapIds 1–3). **No contract, `params.json`, or `params.py` was edited; settle / MaxIL / I1–I9 untouched.** The no-bad-debt clause is preserved exactly: it holds ONLY under capped payoff + solvent USDC + oracle/settlement liveness + no rehypothecation breach.
+
+_v4.0 — THE HYBRID PIVOT (pivot draft)._ Reorganized the protocol around **three pillars** (§3.0): on-chain published FairValue (`FairValueOracle`, §3.0/§3.3/§13), the cvAMM pooled underwriter (`ConvexityVault`, ERC-4626, §7.3), and the retained MM competition rail (Path B). **Architecture:** two parallel paths into one untouched settlement core — Path A (cvAMM, on-chain, signature-free, default) + Path B (MM signed quotes, parallel, optional); `createSwap` routes to the cheaper of {pool, best MM quote} (§4.0). **New on-chain components:** `VolOracle` (`σ_ref = max(σ_short, σ_long, floor)`, EWMA of Chainlink ticks, mandatory never-raw-realized caveat, §6.5) and `FairValueOracle` (`FairPremium = fairRate·MaxIL`, §3.3) — both **load-bearing for the I10 cap + depositor solvency, NOT for the FULL no-bad-debt invariant**, which stays structural and oracle-independent. **New pricing:** `premium = FairPremium·(1+baseLoad+util_skew+dispersion_skew)`, hard-capped by **new invariant I10** (`premium ≤ FairPremium·(1+maxLoad)`, by construction, **upstream of settle**, does NOT touch settle/MaxIL/I1–I9, §13). **Two new single-asset-calibrated skews** (util + dispersion, §3.5). **No geometry asymmetry** — v3 params are public, both paths price the specific position; §3.4 rewritten and the F-#9 caveat retired; Surface 1 reframed to observed clearing load over a transparent `σ_ref` (§12). **Capital:** one `ConvexityVault` per pair backing 9 marketIds with fungible capital; FULL vs PARTIAL is a **leverage dial on one pool**, not two pools (§8); senior/junior tranching (§8.2) and pool-level partial hedge (§8.3) added as roadmap concepts; the **not-Bancor argument** and the **single-asset depositor disclosure (CAPITAL NOT GUARANTEED, placeholder numbers)** stated verbatim (§0, §7.5). **Inefficiency Ledger** added (§10.1). **SDK** made convexity-aware (read-only `bookGamma`/`bookVega`/`replicationStrip`/`suggestGammaHedge`) + a cvAMM depositor surface (§11). **EIP-712/1271 changes stated explicitly (pre-authorized):** `SignedQuote.premiumRateOfMaxIL → loadBps` (premium derived from on-chain FairPremium); verification broadened to OZ `SignatureChecker` for the EIP-1271 vault-signer (§4.3/§4.7). **CLAUDE.md hard-rule flags (encoded, never silently broken):** "Aave for locked collateral" is **BLOCKED** — only the compliant idle-only/instantly-redeemable form is encoded (§7.2/§7.4); no cvAMM/PARTIAL constant is hardcoded — all come from the quant (the new cvAMM block is documented in `quant/params.cvamm.schema.json` this turn; `params.json`/`params.py` untouched, §9). **Doc fixes (sourced from shipped code):** §3.2 MaxIL/V0 table corrected to the `il.py` geometric values (±5% 1.27% / ±10% 2.56% / ±20% 5.23% / ±50% 13.76%; was ~4.2× too low); the ILMath "~10× cheaper" claim corrected to the measured ~5.3× more-expensive-cached reality (Task 2.12, §13/§16.3); `SwapRecord.sqrtP0X96` removed to match shipped code (Task 5.12, §5.1). **Scope:** launch = ONE ETH/USDC pool, 9 marketIds, FULL only; BTC/USDC + multi-pair + PARTIAL + tranches + productive collateral + pool hedge + Panoptic exec are roadmap (§2, §18). **Settlement core, MaxIL formula, and invariants I1–I9 are UNTOUCHED — every change is upstream of settle.**
 
 _v3.3 Fork-2 resolution._ Quote-validity hardening shipped (§4.3.3, Option B): each signed quote carries `quotePrice` + `priceBandBps`; on-chain `createSwap` auto-voids the quote if the live oracle has drifted beyond the band — deterministic, **not last-look**. Kills the dominant stale-quote pickoff vector for bearer-instrument quotes. `validUntil` tightened: default **8s**, band **[5s, 15s]** (was [5s, 60s]). New invariant **I9** (band enforcement).
 
