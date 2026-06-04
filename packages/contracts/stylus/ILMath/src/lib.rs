@@ -46,12 +46,17 @@ impl ILMath {
         sqrt_pb_x96: U256,
         liquidity: u128,
     ) -> Result<U256, ILMathError> {
-        math::compute_max_il(sqrt_price_x96, sqrt_pa_x96, sqrt_pb_x96, U256::from(liquidity))
-            .ok_or(ILMathError::PositionOutOfRange(PositionOutOfRange {
-                sqrt_price_x96,
-                sqrt_pa_x96,
-                sqrt_pb_x96,
-            }))
+        math::compute_max_il(
+            sqrt_price_x96,
+            sqrt_pa_x96,
+            sqrt_pb_x96,
+            U256::from(liquidity),
+        )
+        .ok_or(ILMathError::PositionOutOfRange(PositionOutOfRange {
+            sqrt_price_x96,
+            sqrt_pa_x96,
+            sqrt_pb_x96,
+        }))
     }
 
     /// Realized IL at settlement price `P_T` = `max(0, V_hold − V_lp)`

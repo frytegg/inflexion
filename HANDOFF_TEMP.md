@@ -46,7 +46,19 @@ by MaxIL, swap status = SETTLED, payout = `min(realisedIL, MaxIL)` (likely small
 
 ---
 
-## B. Try to optimize the Stylus ILMath (`stylus/ILMath/src/math.rs`)
+## B. Try to optimize the Stylus ILMath (`stylus/ILMath/src/math.rs`) — ✅ DONE (2026-06-04)
+
+**Outcome.** Applied levers 1 (U256 fast-path in `mul_div`), 3 (`opt-level=3` + `#[inline]`),
+and confirmed 4 (dead code stripped, WASM 13.4 KB). **Cached gas 25.5k → ~20.2k (−21%),
+ratio 5.33× → 4.18×.** Wei-identity preserved (host proptest 29/29 green; on Arbitrum
+Sepolia, Stylus == deployed Solidity `ILMath` to **0 wei** across all 3 fixtures). As
+predicted, a tiny kernel can't beat Solidity's ~4.8k cached floor — **decision: keep
+Solidity in production**; Stylus stays the benchmark artifact (latest deploy
+`0xe0528476aC37856D944dEd2811A7b1c2CC3c302C`, cached, NOT wired into core). Recorded in
+`ROADMAP.md` P2.12 + `stylus/ILMath/README.md`. **Only item A (the June-11 settle) remains
+before this file can be deleted.**
+
+<details><summary>Original brief (kept for reference)</summary>
 
 **Goal.** See whether the FairValueOracle optimization waterfall can drive the
 Stylus ILMath cached gas **below the Solidity ILMath (~4.8k)**. If yes, swap the
@@ -107,3 +119,5 @@ cd ../.. && STYLUS_ILMATH=<addr> DEPLOYER_PRIVATE_KEY=… LOCAL_RPC=… node scr
 `stylus/ILMath/README.md`. If Stylus < Solidity, deploy it and repoint
 `InflexionCore.ilMath`; else keep Solidity (production) and keep the crate as the
 documented benchmark artifact.
+
+</details>
