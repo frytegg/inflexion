@@ -3,8 +3,12 @@
 **Status:** build-ready specification. The SDK (`@inflexion/sdk`) is **built** against
 this document (LP / Depositor / MM / Data + Greeks/Hedge surfaces + the
 `createInflexionSdk` factory; foundation + the `CvammPricing` TS port). The subgraph
-(`@inflexion/subgraph`) and API (`@inflexion/api`) are **designed here, built next
-task**. The frontend is a separate workstream.
+(`@inflexion/subgraph`) and API (`@inflexion/api`) are now also **built** (§6/§7; see
+each section's "Build reconciliation" note for the deltas from the original design) and
+are CI-green offline (`graph codegen` typegen + `tsc` + `vitest`). They are **not yet
+deployed** — the subgraph manifest is regenerated and deployed, and the API
+`SUBGRAPH_URL` is pointed at it, at the single redeploy (`docs/REDEPLOY_CHECKLIST.md`).
+The frontend is a separate workstream.
 
 > **Build reconciliation (corrections applied while building the SDK — 2026-06).**
 > This document had several mappings that disagreed with the LIVE deployment; they are
@@ -577,7 +581,59 @@ when `dt < minSampleInterval`, so the subgraph reconstructs σ_ref between pokes
 
 ---
 
-## 6. Subgraph scope (designed, built next task)
+## 6. Subgraph scope (BUILT — `@inflexion/subgraph`)
+
+> **Build reconciliation (2026-06 — what was actually built vs designed below).**
+> The subgraph is now built (`packages/subgraph`). Deltas from the design that
+> follows:
+>
+> 1. **Three data sources, not six.** The built manifest indexes `InflexionCore`,
+>    `ConvexityVault`, and `VolOracle` — the contracts that carry every event the
+>    five moat signals + the NAV/σ_ref series need. `UnderwriterVault` and `ILVault`
+>    (Path-B MM collateral + NPM fees, §6.1 below) are NOT yet indexed: their use
+>    cases (MM-collateral history, "fees since creation") are served live by the SDK
+>    today and are non-blocking; adding their data sources is a manifest-only follow-up
+>    (no schema change). The Path-B MM PnL that MM-10 needs is fully reconstructed
+>    from `InflexionCore` `SwapCreated`/`SwapSettled`/`QuoteFilled` (the `MarketMaker`
+>    entity), so the MM dashboard does not depend on `UnderwriterVault`.
+> 2. **The manifest is templated, NOT hand-written.** `scripts/gen-manifest.mjs`
+>    reads `deployments/arbitrum-sepolia.json` and writes `subgraph.yaml` (addresses +
+>    `SUBGRAPH_START_BLOCK`). Re-run at the redeploy with the redeploy block. The
+>    committed `subgraph.yaml` defaults `startBlock: 0` (CI `graph codegen` ignores it).
+> 3. **CI-safe scripts.** `build` = `graph codegen` (OFFLINE typegen — validates
+>    schema + ABIs + mappings compile; no AssemblyScript download, no network). The
+>    full WASM build + deploy are separate home-PC scripts (`build:wasm`, `deploy`).
+>    There is intentionally **no `test` script** so `pnpm -r test` never invokes
+>    matchstick (which needs a download).
+> 4. **Extra entities beyond the design list:** `ProtocolState` (singleton live
+>    active-swap counters → Signal 5 current snapshot), `PoolState` (singleton running
+>    NAV the day/hour snapshots checkpoint), and `Nonce` carries explicit
+>    `filled`/`cancelled` booleans (disambiguating the on-chain `isNonceUsed`
+>    fill-or-cancel ambiguity for MM-8).
+> 5. **`distanceBucket` is geometry-only on-chain.** Without an oracle P0 in the
+>    handler, `distanceBucketFromTicks` reports `mid` for a well-formed range; the
+>    precise at-edge/near/deep classification is refined by the API when it joins the
+>    priced σ_ref (documented in `src/helpers.ts`).
+> 6. **Per-MARKET dimension is declared but NOT yet populated (the one real gap).**
+>    `SwapCreated`/`SwapPriced`/`QuoteFilled` carry NO `marketId` (correction #3:
+>    `SwapRecord` omits it), and the built `handleSwapCreated` recovers `expiry`/
+>    `createdAt` (for the duration bucket) but does **not** derive the `marketId` — so
+>    `Swap.market` is left `null`, the `Market` lifetime counters
+>    (`totalSwaps`/`totalV0`/`totalPremium`/`totalPayout`/`pathBFills`/`totalSettled`)
+>    stay at their zero-init, and the `MarketStateSnapshot` entity (PUB-1 per-market
+>    load-surface series, MM-11 per-market volume/share) is **declared in the schema
+>    but written by no handler.** The GEOMETRY-keyed aggregates that DON'T need a
+>    marketId — `BucketAggregate` (Signals 1/2/3) and `GeometryDemandBucket` (Signal 4)
+>    — ARE fully populated, so the geometry-bucketed moat signals are unaffected.
+>    Closing the per-market dimension is a bounded follow-up: derive
+>    `marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(duration)))`
+>    in `handleSwapCreated` (the tokens/fee come from the same `NPM.positions` decode
+>    already done for geometry; graph-ts `ethereum.encode` + `crypto.keccak256`), then
+>    increment the `Market` counters and write `MarketStateSnapshot` from
+>    `ConvexityVault.CollateralLocked(marketId, …)` (which DOES carry the marketId).
+>    Until then, the per-MARKET historical series falls back to the SDK live snapshot
+>    (`/pool/load-surface`) + the geometry-bucketed aggregates; the per-market HISTORY
+>    is the documented unserved item (§7.1 reconciliation + the build's gap list).
 
 **Indexer:** The Graph (hosted or decentralised). **Inputs:** the live Sepolia
 addresses in `deployments/arbitrum-sepolia.json`. **Start block:** the deployment block.
@@ -648,35 +704,71 @@ mmLoadBps` (Signal 2), `isActive` (open-set membership for Signal 5).
 
 ---
 
-## 7. API scope (designed, built next task)
+## 7. API scope (BUILT — `@inflexion/api`)
 
-**Runtime:** Node/TS service (Railway/Fly). **Reads:** the subgraph (GraphQL) for
-history/aggregates + a small set of cached live RPC reads for "current" endpoints.
-**Public, read-only, no wallet, no RPC key, cached** (per-route TTL).
+**Runtime:** Node/TS service (framework-free `node:http`, Railway/Fly). **Reads:** the
+subgraph (GraphQL) for history/aggregates + a small set of cached live RPC reads via
+**`@inflexion/sdk`** (the SDK owns pricing — the API never re-derives the fair rate /
+load stack) + the engine telemetry sinks (Signals 2 & 4 dynamic halves). **Public,
+read-only, no wallet, no RPC key, cached** (per-route TTL). Every endpoint returns a
+discriminated union `{ available:true, … } | { available:false, reason, detail, query? }`
+and **never throws**: subgraph-backed routes return a typed `pending` body (with the
+exact future GraphQL query embedded) until `SUBGRAPH_URL` is set at the redeploy; the
+live RPC + telemetry routes return real data NOW.
 
-### 7.1 Endpoints
+### 7.1 Endpoints (as built — `src/app.ts`)
 
-| Route                                              | Backed by                                              | TTL  |
-| -------------------------------------------------- | ------------------------------------------------------ | ---- |
-| `GET /markets`                                     | subgraph `Market[]`                                    | 60s  |
-| `GET /markets/{id}`                                | subgraph `Market` + cached `inventory`/`sigmaRef`      | 5s   |
-| `GET /pricing/preview?marketId&a&b&duration&maxIL` | cached RPC `fairRate` + load stack                     | 3s   |
-| `GET /markets/{id}/fair-premium-curve?durations`   | cached RPC `fairRate` grid                             | 30s  |
-| `GET /quote?marketId`                              | proxies engine `GET /quote` (best Path-B)              | 1s   |
-| `GET /pool/nav-history?from&to&bucket`             | subgraph `PoolDaySnapshot[]` (claim B)                 | 60s  |
-| `GET /pool/timeseries?metric&bucket`               | subgraph snapshots                                     | 60s  |
-| `GET /pool/state`                                  | cached `getVaultState` composite                       | 5s   |
-| `GET /mm/{address}/fills` , `/pnl`                 | subgraph `MarketMaker`+`Swap[]`                        | 30s  |
-| `GET /markets/{id}/volume` , `/share`              | subgraph `MarketStateSnapshot[]`                       | 30s  |
-| `GET /swaps/{swapId}`                              | subgraph `Swap` (+ cached `settlePreview` for live IL) | 5s   |
-| `GET /data/load-surface?marketId&from&to`          | subgraph `MarketStateSnapshot[]`                       | 60s  |
-| `GET /data/convexity-surface?duration`             | subgraph `ConvexitySurfacePoint[]`                     | 300s |
-| `GET /data/supply-depth?marketId`                  | subgraph aggregate                                     | 60s  |
-| `GET /sigma/{token}/history`                       | subgraph `SigmaPoint[]`                                | 60s  |
+| Route                                        | Backed by                                                                        | Live now?        | TTL  |
+| -------------------------------------------- | -------------------------------------------------------------------------------- | ---------------- | ---- |
+| `GET /health`                                | service metadata (subgraph/RPC/telemetry status)                                 | yes              | —    |
+| `GET /openapi.json`, `GET /docs`             | hand-authored OpenAPI 3.1 + Swagger-UI shell                                     | yes              | —    |
+| `GET /markets`                               | subgraph `Market[]`                                                              | subgraph-pending | 60s  |
+| `GET /markets/{id}`                          | subgraph `Market`                                                                | subgraph-pending | 5s   |
+| `GET /pool?marketIds=`                       | **SDK** `DepositorClient.getVaultState` composite (claim B)                      | yes (RPC)        | 5s   |
+| `GET /pool/load-surface?marketIds=`          | **SDK** `DataClient.getCurrentLoadSurface` multicall (price-to-beat)             | yes (RPC)        | 5s   |
+| `GET /pool/nav-history?bucket=day\|hour`     | subgraph `PoolDaySnapshot[]` / `PoolHourSnapshot[]` (claim B)                    | subgraph-pending | 60s  |
+| `GET /pricing/preview?marketId&a&b&maxIL`    | **SDK** `DataClient.getCurrentLoadSurface` (1 market; cached)                    | yes (RPC)        | 3s   |
+| `GET /swaps?status&mm&market&first`          | subgraph `Swap[]` (validated `where` filters; claim A)                           | subgraph-pending | 5s   |
+| `GET /swaps/{swapId}`                        | subgraph `Swap` (claim A)                                                        | subgraph-pending | 5s   |
+| `GET /data/load-surface?marketId`            | subgraph `MarketStateSnapshot[]` (Signal 1 series)                               | subgraph-pending | 60s  |
+| `GET /data/convexity-surface`                | subgraph `BucketAggregate[]` (Signals 1 & 2 structural, non-capped)              | subgraph-pending | 300s |
+| `GET /data/term-structure?width&distance`    | subgraph `BucketAggregate[]` across durations (Signal 3 slope)                   | subgraph-pending | 300s |
+| `GET /data/demand-requests?marketId&since`   | subgraph `GeometryDemandBucket[]` (realized) **+ telemetry DEMAND_LOG** (latent) | latent half live | —    |
+| `GET /data/quote-competition?marketId&since` | **telemetry COMPETITION_LOG** (Signal 2 dynamic)                                 | yes (telemetry)  | —    |
+| `GET /data/net-gamma`                        | subgraph `NetGammaSnapshot[]` + `ProtocolState` (Signal 5)                       | subgraph-pending | 60s  |
+| `GET /data/supply-depth`                     | subgraph active-swap set (`Swap` `isActive:true`; Signal 5 raw)                  | subgraph-pending | 60s  |
+| `GET /mm/{address}/fills`                    | subgraph `MarketMaker` + `Swap[]` (PnL = Σpremium−Σpayout; MM-10/MM-11)          | subgraph-pending | 30s  |
+| `GET /sigma/{token}/history`                 | subgraph `SigmaPoint[]` (incl. SwapPriced backfill; PUB-2)                       | subgraph-pending | 60s  |
 
-All `/pool/*`, `/data/*` (NAV/yield) responses carry the claim-(B) "capital not
-guaranteed" disclosure field; `/swaps/*` payout fields carry the qualified claim-(A)
-"no bad debt in FULL" disclosure field.
+**Reconciliation with the original design table (deltas):**
+
+- `/pool/state` → built as **`/pool`**; `/markets/{id}/volume`+`/share` and the separate
+  `/mm/{address}/pnl` are **folded into existing routes** (`/markets` carries per-market
+  `totalV0`/`totalPremium`/`totalPayout`/`pathBFills` lifetime counters; `/mm/{address}/fills`
+  returns the PnL aggregate inline). `/markets/{id}/fair-premium-curve` and the engine
+  `/quote` proxy are **deferred** (non-blocking: the SDK serves the live fair-premium
+  preview; the engine `/quote` is consumed directly by the SDK, not re-proxied).
+- **`/data/term-structure` (Signal 3) was ADDED** — it had no dedicated route in the
+  original table.
+- The "cached RPC" live endpoints are routed **through the SDK** (`DataClient` /
+  `DepositorClient`), not a bespoke RPC layer, so pricing has exactly one
+  implementation (CLAUDE.md hard rule).
+
+All `/pool*` (NAV/yield) responses carry the claim-(B) "capital not guaranteed"
+disclosure; `/swaps*` and `/mm/*` payout responses carry the qualified claim-(A) "no bad
+debt in FULL" disclosure; every `/data/*` moat surface carries the §5.0 maturity
+disclaimer.
+
+### 7.2 Config + graceful degradation (`src/server.ts`, `src/index.ts`)
+
+`buildDeps({ subgraphUrl?, rpcUrl?, demandLogPath?, competitionLogPath? })` wires env →
+deps. Each backing is independent: absent `SUBGRAPH_URL` ⇒ subgraph routes `pending`
+(`subgraph-not-deployed`); absent RPC ⇒ live routes `pending` (`rpc-unavailable`, never
+hits a default public node); absent telemetry sink ⇒ dynamic halves `pending`
+(`telemetry-sink-absent`). Env vars: `SUBGRAPH_URL`, `ARBITRUM_SEPOLIA_RPC`/`SEPOLIA_RPC`,
+`DEMAND_LOG`, `COMPETITION_LOG`, `PORT` (default 8088). Tests are fully OFFLINE: the
+subgraph client takes an injected `fetchImpl`, the telemetry reader an injected
+`readJsonl`, and the live surfaces an injected fake `DataClient`/`DepositorClient`.
 
 ---
 

@@ -1,0 +1,33 @@
+{
+  "name": "@inflexion/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "@inflexion/api — public, read-only, cached facade over the @inflexion/subgraph + a few live RPC reads (via @inflexion/sdk) + the engine telemetry sinks. No wallet, no RPC key for consumers. Exposes the five data-moat signals (current snapshot + historical series) with graceful degradation while the subgraph is not yet deployed.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./app": "./dist/app.js"
+  },
+  "bin": {
+    "inflexion-api": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@inflexion/sdk": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.2"
+  }
+}

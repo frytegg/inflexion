@@ -1,0 +1,76 @@
+[
+  {
+    "type": "event",
+    "name": "Deposited",
+    "anonymous": false,
+    "inputs": [
+      { "name": "who", "type": "address", "indexed": true },
+      { "name": "tranche", "type": "uint8", "indexed": true },
+      { "name": "assets", "type": "uint256", "indexed": false },
+      { "name": "shares", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "WithdrawRequested",
+    "anonymous": false,
+    "inputs": [
+      { "name": "who", "type": "address", "indexed": true },
+      { "name": "tranche", "type": "uint8", "indexed": true },
+      { "name": "shares", "type": "uint256", "indexed": false },
+      { "name": "unlockAt", "type": "uint64", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Withdrawn",
+    "anonymous": false,
+    "inputs": [
+      { "name": "who", "type": "address", "indexed": true },
+      { "name": "tranche", "type": "uint8", "indexed": true },
+      { "name": "assets", "type": "uint256", "indexed": false },
+      { "name": "shares", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "PremiumAccrued",
+    "anonymous": false,
+    "inputs": [
+      { "name": "amount", "type": "uint256", "indexed": false },
+      { "name": "toSenior", "type": "uint256", "indexed": false },
+      { "name": "toJunior", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "CollateralLocked",
+    "anonymous": false,
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false },
+      { "name": "totalLocked", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "SettlementReleased",
+    "anonymous": false,
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true },
+      { "name": "lp", "type": "address", "indexed": true },
+      { "name": "payout", "type": "uint256", "indexed": false },
+      { "name": "unlocked", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "JuniorLoss",
+    "anonymous": false,
+    "inputs": [
+      { "name": "payout", "type": "uint256", "indexed": false },
+      { "name": "juniorLoss", "type": "uint256", "indexed": false },
+      { "name": "seniorLoss", "type": "uint256", "indexed": false }
+    ]
+  }
+]
