@@ -15,3 +15,8 @@ packages/contracts/cache
 packages/contracts/out
 packages/contracts/broadcast
 **/*.sol
+# The Graph codegen output (regenerated; git-ignored).
+packages/subgraph/generated
+packages/subgraph/build
+# Auto-generated manifest (templated from the deployment registry by gen-manifest.mjs).
+packages/subgraph/subgraph.yaml

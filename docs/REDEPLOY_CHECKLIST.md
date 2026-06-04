@@ -54,5 +54,7 @@ The SDK `LpClient.previewPremium` now fires the best-effort `POST ${engineBaseUr
 2. `forge script script/Deploy.s.sol` — redeploy the Solidity stack (InflexionCore + the `CvammPricing` lib with `loadComponents`); the Stylus FairValueOracle (`0x10E3…`) is UNCHANGED — just `setCvamm` back to it.
 3. Re-`setLoadParams` (from the params schema), re-`registerMarket`, `setCvammEnabled`.
 4. Re-seed via `SeedDemo.s.sol` / `DemoLifecycle.s.sol`. The residual swap-#1 settle becomes moot.
-5. Update `deployments/arbitrum-sepolia.json` (addresses + deploy block); regenerate the subgraph manifest (addresses + `startBlock`) from it. The moat dataset begins at this block.
-6. Point the SDK/API/engine address config at the registry (no hardcoded addresses).
+5. Update `deployments/arbitrum-sepolia.json` (addresses + deploy block); regenerate the subgraph manifest (addresses + `startBlock`) from it: `SUBGRAPH_START_BLOCK=<deployBlock> pnpm --filter @inflexion/subgraph prepare:manifest`. The moat dataset begins at this block.
+6. Deploy the subgraph from the home PC (network/IPFS needed; NOT a CI step): `pnpm --filter @inflexion/subgraph build:wasm` then `pnpm --filter @inflexion/subgraph deploy`. CI only runs `graph codegen` (offline typegen); `graph build`/`graph deploy` are home-PC-only scripts.
+7. Point the API at the deployed subgraph: set `SUBGRAPH_URL=<studio query URL>` on the API service (plus `ARBITRUM_SEPOLIA_RPC` for the live surfaces and `DEMAND_LOG`/`COMPETITION_LOG` for the telemetry halves). Until `SUBGRAPH_URL` is set the subgraph-backed endpoints honestly return a typed `pending` body; the live + telemetry endpoints already serve real data.
+8. Point the SDK/engine address config at the registry (no hardcoded addresses).
