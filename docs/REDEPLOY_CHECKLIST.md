@@ -1,0 +1,43 @@
+# Single-redeploy checklist (the running gap list)
+
+> **Plan (decided 2026-06-04):** code contract changes now, do NOT redeploy per
+> change. Accumulate everything here as the SDK → subgraph builds reveal gaps,
+> then **redeploy the Solidity stack to Arbitrum Sepolia EXACTLY ONCE**, at the
+> milestone **after the subgraph is built, before the frontend**. The frontend
+> consumes the SDK/API (not the contracts), so it rarely reveals on-chain gaps —
+> by that point ~all are known. Re-verify this whole list before pulling the trigger.
+
+## Contract changes already coded (live on `main`, NOT yet deployed)
+
+- **`QuoteFilled(swapId, mm, quoteId, nonce, loadBps)`** — emitted in `_executePathB`. MM fill attribution (signals 1/2/3). _(coded)_
+- **`SwapPriced(swapId, path, fairPremium, baseLoadWad, utilSkewWad, dispSkewWad, totalLoadWad, sigmaRefWad, cappedAtMaxIL)`** — emitted on all three create paths (`_pricePathA*`/`_pricePathB` + `_emitPriced`). Clearing-load data moat (signals 1/2/3/5). _(coded)_
+- **`CvammPricing.loadComponents()`** (public) — returns base/util/disp/total separately. Feeds `SwapPriced` AND exposes the two skews on-chain for the SDK depositor/MM surface (the component fns are otherwise `internal`). _(coded)_
+
+The deployed Sepolia bytecode is unchanged until the redeploy; the live demo still runs the pre-event stack.
+
+## ⚠️ Size: `InflexionCore` is 213 B over EIP-170
+
+After the events, `InflexionCore` is **24,789 B vs the 24,576 B limit (+213 B)**. `forge build`/`forge test` are unaffected (revm doesn't enforce EIP-170; CI is green), but **the redeploy WILL fail to deploy until this is reduced.** Reclaim options for the redeploy size-pass (cheapest first):
+
+1. Lower `optimizer_runs` (currently 2000 → try 1500/1000) — global gas trade-off.
+2. Move the `SwapPriced` emit into a `public` library function (event + emit off-core).
+3. Further library extraction (the home-PC pattern that got core to 23.9 KB).
+
+## Off-chain surfaces required (engine + API, NOT events — gas + I7)
+
+- **Signal 4 latent demand** (unfilled/previewed-but-not-bought): engine logs every `/quote` + SDK `previewPremium` call → API `GET /data/demand-requests`.
+- **Signal 2 dynamic half** (quote competition / MM no-quote / widen-under-stress): same engine telemetry → API `GET /data/quote-competition`.
+- **Signal 5 net-gamma**: off-chain Greeks sum over the subgraph active-swap set (API/GreeksEngine) → `NetGammaSnapshot`.
+
+## Doc-correctness fixes pending (apply during the SDK build)
+
+From the access-layer verification (`docs/ACCESS_LAYER_ARCHITECTURE.md`): CvammPricing component skews were `internal` (now fixed on-chain via `loadComponents`); `regime` = σ_ref banded vs `loadParams.regimeCalm/Stressed` (NOT `sigmaComponents.binding`); `resolveMarket(swapId)` helper (SwapRecord omits marketId); LP oracle degraded-mode typed errors; MM streamable signal = geometry-independent inputs + pool `totalLoadWad`-in-bps (the "load to beat"); SwapPriced `cappedAtMaxIL` lets the moat exclude cap-bound fills; `SigmaPoint` backfill from `SwapPriced.sigmaRefWad` (poke is a no-op with no `Poked` event when `dt<minSampleInterval`).
+
+## Redeploy steps (run once, on WSL2)
+
+1. Size-pass `InflexionCore` back ≤ 24,576 B (above).
+2. `forge script script/Deploy.s.sol` — redeploy the Solidity stack (InflexionCore + the `CvammPricing` lib with `loadComponents`); the Stylus FairValueOracle (`0x10E3…`) is UNCHANGED — just `setCvamm` back to it.
+3. Re-`setLoadParams` (from the params schema), re-`registerMarket`, `setCvammEnabled`.
+4. Re-seed via `SeedDemo.s.sol` / `DemoLifecycle.s.sol`. The residual swap-#1 settle becomes moot.
+5. Update `deployments/arbitrum-sepolia.json` (addresses + deploy block); regenerate the subgraph manifest (addresses + `startBlock`) from it. The moat dataset begins at this block.
+6. Point the SDK/API/engine address config at the registry (no hardcoded addresses).
