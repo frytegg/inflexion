@@ -28,9 +28,11 @@
  * degradation until the API ships, at which point the same degraded path becomes
  * the tested fallback when the API/subgraph is unreachable or stale.
  *
- * GRACEFUL DEGRADATION is a first-class property here: an absent API, an absent
- * rich event (`QuoteFilled`/`SwapPriced` are pre-redeploy), a reverting oracle on
- * one market in the live surface — all return typed degraded results, never throw.
+ * GRACEFUL DEGRADATION is a first-class property here: an absent API, a not-yet-
+ * indexed rich event (`QuoteFilled`/`SwapPriced` are LIVE on-chain since the
+ * 2026-06-05 deploy but the subgraph that indexes them is not yet deployed), a
+ * reverting oracle on one market in the live surface — all return typed degraded
+ * results, never throw.
  *
  * Pricing rule (inherited from CLAUDE.md / §2): the live surface reads the fair
  * value from the on-chain `FairValueOracle` closed form — NEVER reimplements the
@@ -144,8 +146,8 @@ const REF_MAXIL = 1_000_000_000n // $1,000 (6-dec) reference cap
  *  call failures here as oracle-degraded (the surface row is inlined, not thrown). */
 function isOracleDegraded(_err: unknown): boolean {
   // Conservative: any failure of the fairPremium leg is treated as degraded so a
-  // single bad market never throws the whole surface. (The precise revert-string
-  // set tightens post-redeploy when typed errors land.)
+  // single bad market never throws the whole surface. (The deployed contracts use
+  // typed errors; this classifier can be tightened to match their exact selectors.)
   return true
 }
 
@@ -202,10 +204,12 @@ export class DataClient {
    * Per-market graceful degradation: an unknown/inactive market or a reverting
    * oracle yields an inlined degraded `SurfaceRow`, never a thrown call.
    *
-   * NOTE: the on-chain `loadComponents` view is coded-but-not-deployed; the per-
-   * component skews come from the parity-tested TS port until the single redeploy,
-   * at which point this method can switch to the rich on-chain call with no shape
-   * change (the `MarketPricing` fields are identical).
+   * NOTE: the on-chain `CvammPricing.loadComponents` IS deployed but is a
+   * DELEGATECALL-ONLY library — a direct eth_call to it reverts (Solidity guards
+   * deployed libraries; confirmed on the 2026-06-05 deploy) — so this method
+   * PERMANENTLY uses the parity-locked TS port (byte-equal to the deployed Solidity
+   * in math.parity.test.ts). The lib runs on-chain only via the core's delegatecall
+   * during pricing; switching this read to an on-chain call would revert.
    */
   async getCurrentLoadSurface(args: CurrentLoadSurfaceArgs): Promise<LoadSurface> {
     const note =
@@ -422,7 +426,8 @@ export class DataClient {
    *
    * History/aggregate → API (`GET /data/load-surface`). Degraded today: the
    * subgraph indexes `MarketStateSnapshot` and joins `SwapPriced`/`QuoteFilled`
-   * (the rich per-fill load events ship at the redeploy). For the CURRENT (non-
+   * (these rich per-fill load events are LIVE on-chain since the 2026-06-05 deploy;
+   * what is pending is the subgraph that indexes them). For the CURRENT (non-
    * historical) load surface, use `getCurrentLoadSurface` (live).
    */
   async getLoadSurfaceHistory(args: {
@@ -443,9 +448,10 @@ export class DataClient {
    * PUB-5 (Signal 2) — pool-vs-MM load SPREAD + MM win-rate / win-depth.
    *
    * History/aggregate → API (`GET /data/quote-competition`). Degraded today: needs
-   * the redeploy's `SwapPriced` (mechanical pool baseline = the price-to-beat) +
-   * `QuoteFilled.loadBps` (behavioral MM load) joined per swap, plus the off-chain
-   * engine quote-competition telemetry for the dynamic half. The maturity caveat
+   * the now-live `SwapPriced` (mechanical pool baseline = the price-to-beat) +
+   * `QuoteFilled.loadBps` (behavioral MM load) — both emitted on-chain since the
+   * 2026-06-05 deploy — joined per swap once the subgraph indexes them, plus the
+   * off-chain engine quote-competition telemetry for the dynamic half. The maturity caveat
    * (structural at launch; dynamic only with ≥3 competing MMs) is carried verbatim.
    */
   async getQuoteCompetition(args: {
