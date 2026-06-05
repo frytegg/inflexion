@@ -144,7 +144,7 @@ function uintBytesBE(value: i64, width: i32): ByteArray {
  * PARITY (load-bearing join key — subgraph == SDK == contract): the 20+20+3+4 = 47
  * byte tight-packed preimage here MUST stay identical to the SDK `computeMarketId`
  * (packages/sdk/src/resolveMarket.ts) and the on-chain keccak256(abi.encodePacked).
- * All three are pinned to the LIVE Arbitrum Sepolia demo marketId 0xd1aa1fad…5ca3
+ * All three are pinned to the LIVE Arbitrum Sepolia demo marketId 0x67c4bee1…9d69
  * (dWETH, dUSDC, fee 500, 604800s) by:
  *   - packages/contracts/test/MarketIdParity.t.sol  (on-chain side)
  *   - packages/sdk/src/marketid.parity.test.ts       (SDK / width-contract side)
