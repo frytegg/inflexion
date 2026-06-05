@@ -17,9 +17,11 @@
  *   - `VolOracle.sigmaRef(token)` for the σ_ref the load stack bands against
  *
  * The component skews (baseLoad / utilSkew / dispSkew / total) come from the
- * `math.ts` `CvammPricing` TS port (parity-tested against the deployed lib). The
- * rich on-chain `loadComponents` path activates at the single redeploy; until then
- * the port is the canonical source for the per-component decomposition.
+ * `math.ts` `CvammPricing` TS port (parity-locked byte-equal to the deployed lib in
+ * math.parity.test.ts). The on-chain `CvammPricing.loadComponents` IS deployed but
+ * is DELEGATECALL-ONLY — a direct eth_call to it reverts — so the TS port is the
+ * PERMANENT canonical source for the per-component decomposition; the lib runs
+ * on-chain only via the core's delegatecall during pricing.
  *
  * GRACEFUL DEGRADATION: every read that can fail returns a typed degraded result
  * rather than throwing. `instYieldWad` is `undefined` until a subgraph is wired.
