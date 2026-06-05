@@ -45,6 +45,7 @@ import {
   durationBucket,
   widthBucketFromTicks,
   distanceBucketFromTicks,
+  deriveMarketId,
   eventUid,
   nonceId,
 } from './helpers'
@@ -131,8 +132,13 @@ export function handleSwapCreated(event: SwapCreated): void {
   // No geometry is stored in any event; every geometry-bucketed signal (1, 3, 4)
   // needs it. Bind + try_positions so a revert (e.g. token burned) degrades to
   // 'unknown' buckets instead of failing the whole handler.
+  // We ALSO reuse token0/token1/fee from this same bind to derive the marketId
+  // (do NOT re-bind) — see the Market join block below.
   let width = UNKNOWN
   let distance = UNKNOWN
+  let token0: Address | null = null
+  let token1: Address | null = null
+  let fee = 0
   const npm = NonfungiblePositionManager.bind(NPM_ADDRESS)
   const res = npm.try_positions(event.params.tokenId)
   if (!res.reverted) {
@@ -142,6 +148,9 @@ export function handleSwapCreated(event: SwapCreated): void {
     s.liquidity = p.getLiquidity()
     width = widthBucketFromTicks(p.getTickLower(), p.getTickUpper())
     distance = distanceBucketFromTicks(p.getTickLower(), p.getTickUpper())
+    token0 = p.getToken0()
+    token1 = p.getToken1()
+    fee = p.getFee()
     s.geometryDecoded = true
   }
   s.widthBucket = width
@@ -168,11 +177,49 @@ export function handleSwapCreated(event: SwapCreated): void {
   }
   s.durationBucket = durationBucket(dur)
 
-  // ── Market join (best-effort: derive marketId via resolveMarket geometry) ──
-  // We cannot recompute keccak(token0,token1,fee,duration) cheaply in AS without
-  // the position's tokens; the Market link is set when a SwapPriced/SwapRouted or
-  // the market's own events let us join. Leave null here; the API joins by tokenId
-  // geometry where needed. (Most directory reads use Market's own counters.)
+  // ── Market join: derive marketId bit-for-bit as the on-chain contract does ──
+  // marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(duration)))
+  // (InflexionCore.sol registerMarket L355 / _prepareSwap L590 / _marketForSwap
+  // L1146 / _marketIdForSwap L1157). token0/token1/fee are reused from the NPM
+  // bind above (do NOT re-bind); duration = expiry − createdAt from the swap
+  // record (computed above as `dur`). Needs all four: the geometry decode AND the
+  // swap-record read must have succeeded. Tight-packed via deriveMarketId — NOT
+  // ethereum.encode (which ABI-pads). See helpers.deriveMarketId.
+  if (token0 !== null && token1 !== null && dur > 0) {
+    const marketId = deriveMarketId(token0 as Address, token1 as Address, fee, dur)
+    const marketKey = marketId.toHexString()
+    s.market = marketKey
+
+    // Load-or-create the Market and bump its lifetime counters. The directory
+    // fields (token0/fee/oracleToken/…) are owned by handleMarketRegistered;
+    // here we only touch the denormalised counters. A Market created here before
+    // its MarketRegistered lands is back-filled by that handler (it preserves
+    // counters when the entity already exists).
+    let m = Market.load(marketKey)
+    if (m == null) {
+      m = new Market(marketKey)
+      m.token0 = token0 as Address
+      m.token1 = token1 as Address
+      m.fee = fee
+      m.durationSeconds = dur
+      m.durationBucket = durationBucket(dur)
+      // Placeholders until MarketRegistered fills the authoritative directory.
+      m.oracleToken = Address.zero()
+      m.active = true
+      m.createdAtBlock = event.block.number
+      m.createdAtTimestamp = event.block.timestamp
+      m.totalSwaps = 0
+      m.totalSettled = 0
+      m.totalV0 = ZERO_BI
+      m.totalPremium = ZERO_BI
+      m.totalPayout = ZERO_BI
+      m.pathBFills = 0
+    }
+    m.totalSwaps = m.totalSwaps + 1
+    m.totalV0 = m.totalV0.plus(event.params.V0)
+    m.totalPremium = m.totalPremium.plus(event.params.premium)
+    m.save()
+  }
 
   s.save()
 
@@ -282,6 +329,17 @@ export function handleSwapPriced(event: SwapPriced): void {
     mm.cumulativeWinCount = mm.cumulativeWinCount + 1
     mm.save()
   }
+
+  // ── Per-market Path-B fill count ──
+  // Path is only known here (SwapCreated carries no path). The market link was
+  // set in handleSwapCreated; increment pathBFills on a Path-B (MM_B) clearing.
+  if (event.params.path == 1 && s.market !== null) {
+    const m = Market.load(s.market as string)
+    if (m != null) {
+      m.pathBFills = m.pathBFills + 1
+      m.save()
+    }
+  }
 }
 
 export function handleQuoteFilled(event: QuoteFilled): void {
@@ -370,6 +428,16 @@ export function handleSwapSettled(event: SwapSettled): void {
     mm.pnl = mm.cumulativePremium.minus(mm.cumulativePayout)
     mm.lastSeen = event.block.timestamp
     mm.save()
+  }
+
+  // ── Per-market settle counters (totalSettled / totalPayout) ──
+  if (s.market !== null) {
+    const m = Market.load(s.market as string)
+    if (m != null) {
+      m.totalSettled = m.totalSettled + 1
+      m.totalPayout = m.totalPayout.plus(event.params.payout)
+      m.save()
+    }
   }
 
   // ── Protocol active-swap set: remove from the open set (Signal 5). ──

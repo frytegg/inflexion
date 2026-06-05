@@ -15,13 +15,13 @@
 
 The deployed Sepolia bytecode is unchanged until the redeploy; the live demo still runs the pre-event stack.
 
-## ⚠️ Size: `InflexionCore` is 213 B over EIP-170
+## ✅ Size: `InflexionCore` back under EIP-170 — RESOLVED (2026-06-05)
 
-After the events, `InflexionCore` is **24,789 B vs the 24,576 B limit (+213 B)**. `forge build`/`forge test` are unaffected (revm doesn't enforce EIP-170; CI is green), but **the redeploy WILL fail to deploy until this is reduced.** Reclaim options for the redeploy size-pass (cheapest first):
+After the moat events, `InflexionCore` was **24,789 B vs the 24,576 B limit (+213 B)** — undeployable (revm doesn't enforce EIP-170, so `forge build`/`forge test`/CI stayed green and hid it). **Fixed by lowering `optimizer_runs` 2000 → 1500** (`foundry.toml`): core is now **23,934 B (+642 B margin)**, restoring the pre-events headroom.
 
-1. Lower `optimizer_runs` (currently 2000 → try 1500/1000) — global gas trade-off.
-2. Move the `SwapPriced` emit into a `public` library function (event + emit off-core).
-3. Further library extraction (the home-PC pattern that got core to 23.9 KB).
+Verified on this machine (no home PC needed): **168 forge tests green**; a clean same-code 2000-vs-1500 gas diff shows every hot path moves **< 0.1%** (settle +0.062%, createSwap +0.082%, PathA +0.079%, router pathB +0.072%) and the **overall suite gas is net −0.032%** — negligible vs the size win. `.gas-snapshot` refreshed at 1500 (it was stale — generated pre-events). **No contract logic, ABI, or event signature changed**, so the subgraph/SDK are unaffected.
+
+_(Considered + rejected: option 2 — moving the `SwapPriced` emit into a `public` library — would have changed the event's declaration site + the subgraph ABI for no gas gain over the runs change; option 3 — further library extraction — unnecessary, the runs change alone restored margin.)_
 
 ## Off-chain surfaces required (engine + API, NOT events — gas + I7)
 
@@ -48,9 +48,9 @@ From the access-layer verification (`docs/ACCESS_LAYER_ARCHITECTURE.md`): CvammP
 
 The SDK `LpClient.previewPremium` now fires the best-effort `POST ${engineBaseUrl}/telemetry/preview` ping (fire-and-forget; swallows every error — never blocks/fails the preview). Combined with the engine's `TelemetrySink` (`DEMAND_LOG`/`COMPETITION_LOG`), Signals 2 & 4's dynamic halves are captured **from the first interaction, before the API exists**. **Set `DEMAND_LOG` + `COMPETITION_LOG` on the engine NOW** (see `docs/ENGINE_TELEMETRY.md`) — anything not captured before the redeploy is lost forever (I7). This is independent of the contract redeploy.
 
-## Subgraph completion (pre-deploy — needs `graph build` on the home PC)
+## ✅ Subgraph completion — marketId fix IMPLEMENTED (2026-06-05; `graph build` cross-check remains home-PC)
 
-Bounded gap from the P4.c build (`docs/ACCESS_LAYER_ARCHITECTURE.md` §6 note #6):
+Bounded gap from the P4.c build (`docs/ACCESS_LAYER_ARCHITECTURE.md` §6 note #6) — **now fixed, see "Implemented" below**:
 `handleSwapCreated` does **not** derive `marketId` (the `SwapCreated`/`SwapPriced`/
 `QuoteFilled` events + `SwapRecord` all omit it), so `Swap.market` stays null, the
 per-market `Market` lifetime counters (`totalSwaps`/`totalV0`/`totalPremium`/
@@ -60,26 +60,17 @@ counters, and the per-market `/data/load-surface` series are empty. The
 geometry-bucketed signals (S1/S2/S3/S4 via `BucketAggregate`/`GeometryDemandBucket`)
 and protocol-wide S5 are **unaffected**.
 
-Fix (do before `build:wasm`/`deploy`; verify with `graph build`, which is home-PC-only):
+**Implemented (2026-06-05) — `graph codegen` passes on this machine; `graph build` (WASM) + a live keccak cross-check remain the home-PC verification:**
 
-1. In `handleSwapCreated`, derive `marketId =
-keccak256(abi.encodePacked(token0, token1, fee, uint32(expiry - createdAt)))` — the
-   `token0`/`token1`/`fee` are already decoded from the `NPM.positions(tokenId)` bind
-   done for the geometry buckets; use graph-ts `ethereum.encode` + `crypto.keccak256`.
-2. Set `Swap.market`, increment the `Market` lifetime counters, and write
-   `MarketStateSnapshot` from `ConvexityVault.CollateralLocked(marketId, …)` (which
-   **does** carry the `marketId`).
-3. _(optional, manifest-only)_ add UnderwriterVault/ILVault data sources if on-chain
-   Path-B MM-collateral / fee history is wanted (today MM PnL is reconstructed from
-   InflexionCore events, and live LP fees come from the SDK).
+1. `handleSwapCreated` now derives `marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(expiry − createdAt)))` via `helpers.deriveMarketId`. **Correction to the original note:** this is `abi.encodePacked` (TIGHT packing, 20+20+3+4 = 47 bytes) — **NOT** `ethereum.encode`, which ABI-pads every operand to 32 bytes and would hash a different (128-byte) preimage → non-matching id. `deriveMarketId` concatenates the raw big-endian bytes of each field at its on-chain width (`uintBytesBE`; note graph-ts `ByteArray.fromI32` is little-endian, unusable here). `token0`/`token1`/`fee` are reused from the existing `NPM.positions` bind; `expiry`/`createdAt` come from the swap record via `try_swaps(swapId)` (`expiry − createdAt == cfg.durationSeconds` on-chain, so the id matches both `registerMarket` and `_marketIdForSwap`). Verified statically against `InflexionCore.sol` L355/L590/L1146/L1157.
+2. `Swap.market` set; `Market` lifetime counters bumped (`totalSwaps`/`totalV0`/`totalPremium` in `handleSwapCreated`; `pathBFills` in `handleSwapPriced` where the path is known; `totalSettled`/`totalPayout` in `handleSwapSettled`); `MarketStateSnapshot` upserted in `handleCollateralLocked` from `ConvexityVault.lockedByMarket(marketId)` + `utilizationWad()`/`concentrationWad()` (all three getters confirmed on-chain — `ConvexityVault.sol` L68/L155/L163). Files changed: `src/helpers.ts`, `src/inflexion-core.ts`, `src/convexity-vault.ts`, `abis/ConvexityVault.json` (added the 3 getters), `scripts/gen-manifest.mjs` (added `Market`/`MarketStateSnapshot` to the vault data source), `subgraph.yaml` (regenerated).
+3. _(still optional, manifest-only)_ add UnderwriterVault/ILVault data sources if on-chain Path-B MM-collateral / fee history is wanted (today MM PnL is reconstructed from InflexionCore events, and live LP fees come from the SDK).
 
-Re-run `graph codegen` + `graph build` to confirm the AssemblyScript compiles before
-deploying. (CI only runs `graph codegen`; the WASM compile that catches AS bugs is
-home-PC-only.)
+**Remaining (home-PC only):** run `graph build` (asc → WASM) to type-check the AssemblyScript mapping bodies — `graph codegen` (CI + this machine) validates schema/ABIs/manifest + generated-type references but NOT the mapping bodies. Then cross-check one derived `marketId` against a live `MarketRegistered.marketId` on the fresh deployment to prove the keccak preimage matches bit-for-bit.
 
 ## Redeploy steps (run once, on WSL2)
 
-1. Size-pass `InflexionCore` back ≤ 24,576 B (above).
+1. ✅ Size-pass `InflexionCore` back ≤ 24,576 B — **DONE** (`optimizer_runs` 1500 → 23,934 B, see above); just rebuild + deploy with the committed `foundry.toml`.
 2. `forge script script/Deploy.s.sol` — redeploy the Solidity stack (InflexionCore + the `CvammPricing` lib with `loadComponents`); the Stylus FairValueOracle (`0x10E3…`) is UNCHANGED — just `setCvamm` back to it.
 3. Re-`setLoadParams` (from the params schema), re-`registerMarket`, `setCvammEnabled`.
 4. Re-seed via `SeedDemo.s.sol` / `DemoLifecycle.s.sol`. The residual swap-#1 settle becomes moot.
