@@ -15,9 +15,9 @@ dataSources:
     name: InflexionCore
     network: arbitrum-sepolia
     source:
-      address: "0x15b74efcab40a08281c0cea972bee0bba1a9a96d"
+      address: "0xc19865cf8403f59b8eca835833afee3aa8da4848"
       abi: InflexionCore
-      startBlock: 0
+      startBlock: 274081134
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -70,9 +70,9 @@ dataSources:
     name: ConvexityVault
     network: arbitrum-sepolia
     source:
-      address: "0xb8df0204ec18834af16652cc8ec5d39bd403a2d2"
+      address: "0xde2ffeba2e6a18f3a53d43ec0fccd299158ec30d"
       abi: ConvexityVault
-      startBlock: 0
+      startBlock: 274081134
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -107,9 +107,9 @@ dataSources:
     name: VolOracle
     network: arbitrum-sepolia
     source:
-      address: "0xe79bf574bfcfc17ba858cc311ce5fef8b78e947b"
+      address: "0xfdeafbb381192fc5337499d041eaead04d565ed9"
       abi: VolOracle
-      startBlock: 0
+      startBlock: 274081134
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
