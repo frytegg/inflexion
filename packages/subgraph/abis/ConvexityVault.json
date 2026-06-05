@@ -72,5 +72,26 @@
       { "name": "juniorLoss", "type": "uint256", "indexed": false },
       { "name": "seniorLoss", "type": "uint256", "indexed": false }
     ]
+  },
+  {
+    "type": "function",
+    "name": "lockedByMarket",
+    "stateMutability": "view",
+    "inputs": [{ "name": "", "type": "bytes32" }],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "utilizationWad",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "concentrationWad",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
   }
 ]

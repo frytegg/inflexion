@@ -16,8 +16,14 @@ import {
   CollateralLocked,
   SettlementReleased,
   JuniorLoss,
+  ConvexityVault,
 } from '../generated/ConvexityVault/ConvexityVault'
-import { Depositor, PoolDaySnapshot, PoolHourSnapshot } from '../generated/schema'
+import {
+  Depositor,
+  PoolDaySnapshot,
+  PoolHourSnapshot,
+  MarketStateSnapshot,
+} from '../generated/schema'
 import { getPoolState } from './entities'
 import {
   ZERO_BI,
@@ -192,6 +198,60 @@ export function handleCollateralLocked(event: CollateralLocked): void {
   ps.lastUpdated = event.block.timestamp
   ps.save()
   checkpoint(event.block.timestamp)
+
+  // ── Per-market load surface (MarketStateSnapshot, PUB-1) ──
+  // The CollateralLocked event is the ONLY ConvexityVault event carrying a
+  // marketId, so it's where the per-market snapshot is written. The event's
+  // `totalLocked` is PROTOCOL-WIDE, not per-market; the exact per-market locked
+  // is read on-chain via `lockedByMarket(marketId)` (same eth_call enrichment
+  // pattern as inflexion-core's NPM/swap reads). util/conc are protocol-wide
+  // accessors (nullable in the schema) — graceful-degrade to null on revert.
+  upsertMarketStateSnapshot(event)
+}
+
+/**
+ * Upsert the day-bucketed MarketStateSnapshot for the locked market.
+ * id = `${marketId}-${dayStart}` (schema MarketStateSnapshot). `market` is the
+ * Market ref (by id string; the referenced Market is created by
+ * handleMarketRegistered / handleSwapCreated). Required fields are seeded on
+ * first write; the load-component fields (baseLoadWad/…/totalLoadWad/sigmaRefWad)
+ * are left null here — they originate from SwapPriced (InflexionCore), not the
+ * vault, and the API joins them by (market, day).
+ */
+function upsertMarketStateSnapshot(event: CollateralLocked): void {
+  const marketKey = event.params.marketId.toHexString()
+  const ts = event.block.timestamp
+  const dayStart = ts.div(SECONDS_PER_DAY).times(SECONDS_PER_DAY)
+  const id = marketKey + '-' + dayStart.toString()
+
+  let snap = MarketStateSnapshot.load(id)
+  if (snap == null) {
+    snap = new MarketStateSnapshot(id)
+    snap.market = marketKey
+    snap.dayStart = dayStart
+    snap.lockedByMarket = ZERO_BI
+    snap.fillCount = 0
+    snap.v0Volume = ZERO_BI
+    snap.pathBFills = 0
+  }
+
+  // Exact per-market locked (eth_call); util/conc protocol-wide (nullable).
+  const vault = ConvexityVault.bind(event.address)
+  const lockedRes = vault.try_lockedByMarket(event.params.marketId)
+  // Fall back to the protocol-wide totalLocked only if the per-market read
+  // reverts (it shouldn't on a live vault); never leave the required field unset.
+  snap.lockedByMarket = lockedRes.reverted ? event.params.totalLocked : lockedRes.value
+
+  const utilRes = vault.try_utilizationWad()
+  if (!utilRes.reverted) snap.utilWad = utilRes.value
+  const concRes = vault.try_concentrationWad()
+  if (!concRes.reverted) snap.concWad = concRes.value
+
+  // fillCount counts lock events in the day (a Path-A lock ≈ a Path-A fill in
+  // this market); v0Volume/pathBFills/load components are filled by the API's
+  // join with the per-swap (InflexionCore) series — left as seeded here.
+  snap.fillCount = snap.fillCount + 1
+  snap.save()
 }
 
 export function handleSettlementReleased(event: SettlementReleased): void {
