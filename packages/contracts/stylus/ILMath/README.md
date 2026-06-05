@@ -1,7 +1,7 @@
 # Stylus ILMath — benchmark artifact (NOT deployed)
 
 **Status: retained, not in production.** The IL math shipped on Arbitrum Sepolia is
-the **Solidity** `src/ILMath.sol` (`0xC203…`, wired into `InflexionCore`). This
+the **Solidity** `src/ILMath.sol` (`0x7e90…7bd2`, wired into `InflexionCore`). This
 Stylus crate was built, host-tested, deployed, cached, and benchmarked — and
 **kept as the benchmark artifact, not deployed into core**: even after the gas pass
 below it is **cached ~20.2k vs Solidity ~4.8k (~4.18×)**. IL math is a tiny kernel,
@@ -39,7 +39,7 @@ cd packages/contracts/stylus/ILMath && cargo test          # host-side wei-ident
 cargo stylus deploy   --endpoint $RPC --private-key $DEPLOYER_PRIVATE_KEY --max-fee-per-gas-gwei 1 --no-verify
 cargo stylus cache bid --endpoint $RPC --private-key $DEPLOYER_PRIVATE_KEY --max-fee-per-gas-gwei 0.1 <addr> 0   # cache → cached-gas number
 # then (from packages/contracts): cached vs Solidity gas on-node
-STYLUS_ILMATH=<addr> SOL_ILMATH=0xC203…  PROBE=<probe> LOCAL_RPC=$RPC node script/stylus-bench.mjs
+STYLUS_ILMATH=<addr> SOL_ILMATH=0x7e90…7bd2  PROBE=<probe> LOCAL_RPC=$RPC node script/stylus-bench.mjs
 ```
 
 `$RPC` is the local Nitro dev node (`pnpm dev:node`) or any Arbitrum endpoint

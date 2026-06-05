@@ -3,7 +3,7 @@
  *
  *   PORT                 default 8787
  *   CHAIN_ID             default 421614 (Arbitrum Sepolia)
- *   VERIFYING_CONTRACT   InflexionCore address (required; default = Sepolia deploy)
+ *   VERIFYING_CONTRACT   InflexionCore address (default = registry core.inflexionCore)
  *   QUOTE_LOG            append-only JSONL path for accepted quotes (optional)
  *   DEMAND_LOG           append-only JSONL path for Signal-4 latent demand
  *                        (/quote requests + SDK previewPremium pings) (optional)
@@ -16,11 +16,12 @@
  */
 import { type Address } from 'viem'
 import { startEngine } from './server.js'
+import { DEFAULT_VERIFYING_CONTRACT } from './addresses.js'
 
 const PORT = Number(process.env['PORT'] ?? 8787)
 const CHAIN_ID = Number(process.env['CHAIN_ID'] ?? 421614)
 const VERIFYING_CONTRACT = (process.env['VERIFYING_CONTRACT'] ??
-  '0x15b74EfcAB40A08281C0Cea972BeE0bbA1a9A96d') as Address
+  DEFAULT_VERIFYING_CONTRACT) as Address
 const QUOTE_LOG = process.env['QUOTE_LOG']
 const DEMAND_LOG = process.env['DEMAND_LOG']
 const COMPETITION_LOG = process.env['COMPETITION_LOG']

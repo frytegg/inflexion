@@ -13,7 +13,7 @@ import { type EngineHandle, startEngine } from '../src/server.js'
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex
 const ACCOUNT = privateKeyToAccount(PK)
 const CHAIN_ID = 421614
-const CORE = '0x15b74EfcAB40A08281C0Cea972BeE0bbA1a9A96d' as Address
+const CORE = '0xC19865cF8403F59B8Eca835833aFEe3Aa8DA4848' as Address
 const MARKET = `0x${'ab'.repeat(32)}` as Hex
 const NOW = 1_900_000_000
 
