@@ -10,22 +10,27 @@
  *    Stylus `FairValueOracle` + `VolOracle`. The Φ-sum is NEVER reimplemented.
  *  - The pool "load to beat" is `CvammPricing.totalLoadWad(sigmaRef, util, conc,
  *    loadParams)`. The geometry-INDEPENDENT total load (in bps) is THE first-class
- *    streamable signal — `streamPoolLoadToBeat`. We read the canonical total from
- *    the DEPLOYED lib `totalLoadWad` and decompose the per-component skews
- *    (baseLoad / utilSkew / dispSkew) with the parity-tested TS port (`cvamm`)
- *    because the on-chain `loadComponents` is coded-not-yet-deployed; the rich
- *    on-chain path activates at the single redeploy.
+ *    streamable signal — `streamPoolLoadToBeat`. The canonical total AND the
+ *    per-component skews (baseLoad / utilSkew / dispSkew) come from the parity-
+ *    locked TS port (`cvamm`), which is byte-equal to the deployed Solidity
+ *    (math.parity.test.ts). The on-chain `CvammPricing` library IS deployed (with
+ *    totalLoadWad/loadComponents) but is DELEGATECALL-ONLY — a direct eth_call to
+ *    it reverts — so the TS port is the PERMANENT off-chain mirror, not an interim;
+ *    the lib runs on-chain only via the core's delegatecall during pricing.
  *  - regime = σ_ref vs `loadParams.regimeCalmBelowWad`/`regimeStressedAtWad`
  *    (NOT `sigmaComponents.binding`, which is which-EWMA-window-binds).
  *  - resolveMarket(swapId): SwapRecord has NO marketId — recovered via the shared
  *    `resolveMarket` helper.
  *  - `signQuote` is re-exported from `@inflexion/engine/quote` (never reimplemented)
  *    and asserts `loadBps ≤ maxLoadBps` (I10) AND `loadBps < live pool-load-bps`.
- *  - MM fill attribution is COARSE: `SwapCreated`/`SwapRouted` do NOT carry
- *    quoteId/nonce on the live deploy, and `isNonceUsed` is true on BOTH fill and
- *    cancel → `isQuoteFilled` returns a typed `NonceStatus` with `precision:
- *    'coarse'`, never a precise filled/cancelled distinction. Path is inferable
- *    everywhere via `mm == convexityVault` (Path A) else Path B.
+ *  - MM fill attribution from the DIRECT on-chain read is COARSE:
+ *    `SwapCreated`/`SwapRouted` do NOT carry quoteId/nonce, and `isNonceUsed` is
+ *    true on BOTH fill and cancel → `isQuoteFilled` returns a typed `NonceStatus`
+ *    with `precision:'coarse'`, never a precise filled/cancelled distinction. The
+ *    precise path is the now-live `QuoteFilled` event (emitted on-chain since the
+ *    2026-06-05 deploy), but it needs indexing — available once the subgraph is
+ *    deployed. Path is inferable everywhere via `mm == convexityVault` (Path A)
+ *    else Path B.
  *
  * GRACEFUL DEGRADATION is first-class: every method that needs a reverting read
  * (oracle stale / vol-uninitialized / out-of-range geometry / absent WS) returns a
@@ -350,8 +355,8 @@ export class MmClient {
     const util = invTuple[3]
     const conc = invTuple[4]
 
-    // Decompose the load with the parity-tested TS port (rich on-chain
-    // loadComponents activates at the redeploy — see file header).
+    // Decompose the load with the parity-locked TS port (the deployed on-chain
+    // loadComponents is delegatecall-only and cannot be eth_called — see header).
     const load: LoadBreakdown = cvamm.loadComponents(sigmaRefWad, util, conc, params)
     const poolPremium = capAt(cvamm.premiumFromLoad(fairPremium, load.totalLoadWad), geometry.maxIL)
 
@@ -1069,13 +1074,14 @@ export class MmClient {
   // ─── MM-8: isQuoteFilled (COARSE) + watchFills ──────────────────────────────
 
   /**
-   * COARSE fill status (MM-8). On the live deploy `isNonceUsed(mm, nonce)` is set
-   * on BOTH a fill and a cancel, and `SwapCreated`/`SwapRouted` carry NO
-   * quoteId/nonce, so the only honest answer is "nonce spent: filled-or-cancelled".
+   * COARSE fill status (MM-8). `isNonceUsed(mm, nonce)` is set on BOTH a fill and a
+   * cancel, and `SwapCreated`/`SwapRouted` carry NO quoteId/nonce, so the only
+   * honest answer from a direct on-chain read is "nonce spent: filled-or-cancelled".
    * Returns a typed `NonceStatus` with `precision:'coarse'` — NEVER claims a
-   * precise filled/cancelled distinction. The precise path (QuoteFilled event +
-   * subgraph) activates post-redeploy. Degrades to `spent:false, precision:
-   * 'coarse'` with a detail when the read fails — never throws.
+   * precise filled/cancelled distinction. The precise path is the now-live
+   * `QuoteFilled` event (emitted on-chain since the 2026-06-05 deploy), which
+   * becomes available once the subgraph is deployed to index it. Degrades to
+   * `spent:false, precision:'coarse'` with a detail when the read fails — never throws.
    */
   async isQuoteFilled(mm: Address, nonce: bigint): Promise<NonceStatus> {
     try {
@@ -1091,7 +1097,7 @@ export class MmClient {
         spent,
         precision: 'coarse',
         detail: spent
-          ? 'nonce bit set: FILLED-OR-CANCELLED (live deploy cannot distinguish; precise via QuoteFilled+subgraph post-redeploy)'
+          ? 'nonce bit set: FILLED-OR-CANCELLED (direct on-chain read cannot distinguish; precise via the now-live QuoteFilled event once the subgraph is deployed to index it)'
           : 'nonce bit clear: neither filled nor cancelled',
       }
     } catch (e) {
@@ -1107,9 +1113,10 @@ export class MmClient {
 
   /**
    * Watch for fills against an MM by polling `SwapCreated` logs filtered by the
-   * indexed `mm` topic (the live event carries `mm` but NOT quoteId/nonce, so the
+   * indexed `mm` topic (this event carries `mm` but NOT quoteId/nonce, so the
    * match to a specific quote is COARSE — joined by nonce via `isQuoteFilled`, or
-   * precisely via QuoteFilled+subgraph post-redeploy). The callback fires per new
+   * precisely via the now-live `QuoteFilled` event once the subgraph is deployed to
+   * index it). The callback fires per new
    * matching log. Returns a `StreamHandle`. Degrades silently on a failed poll
    * (reports via `onError`) — never throws inside the loop.
    */
@@ -1379,7 +1386,9 @@ export interface FillLog {
   premium: bigint
   blockNumber: bigint
   txHash: Hex
-  /** Always 'coarse' until QuoteFilled ships (no quoteId/nonce on SwapCreated). */
+  /** 'coarse' from this SwapCreated watch (no quoteId/nonce on the event); precise
+   *  attribution comes from the now-live `QuoteFilled` event once the subgraph is
+   *  deployed to index it. */
   attribution: 'coarse' | 'precise'
 }
 

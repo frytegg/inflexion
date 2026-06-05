@@ -25,7 +25,8 @@ export type DegradeReason =
   | 'oracle-degraded'
   /** No RPC transport was reachable (env unset, network error). */
   | 'no-rpc'
-  /** The rich QuoteFilled/SwapPriced events are absent on the live deploy. */
+  /** The rich QuoteFilled/SwapPriced events are live on-chain but not yet indexed
+   *  (the subgraph that would give precise attribution is not yet deployed). */
   | 'rich-events-absent'
   /** The subgraph / API endpoint is not wired. */
   | 'no-history-source'
@@ -312,13 +313,16 @@ export interface HedgeSuggestion {
 
 // ─── MM fill attribution ────────────────────────────────────────────────────
 
-/** Coarse fill status — `isNonceUsed` is true on BOTH fill and cancel pre-redeploy. */
+/** Coarse fill status — `isNonceUsed` is true on BOTH fill and cancel, so the
+ *  direct-on-chain read cannot distinguish them. */
 export interface NonceStatus {
   mm: Address
   nonce: bigint
   /** True iff the bitmap bit is set — i.e. filled OR cancelled (cannot distinguish live). */
   spent: boolean
-  /** Always 'coarse' until QuoteFilled ships; then precise attribution is available. */
+  /** Always 'coarse' from the direct on-chain read (`isNonceUsed`). Precise
+   *  attribution (via the now-live `QuoteFilled`) becomes available once the
+   *  subgraph is deployed to index it. */
   precision: 'coarse' | 'precise'
   detail: string
 }

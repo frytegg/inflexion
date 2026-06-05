@@ -3,9 +3,12 @@
  * the ONLY duplication the access-layer doc permits: the load math (NOT the
  * fairRate Φ-sum, which is always read from the on-chain FairValueOracle).
  *
- * Used until the on-chain `loadComponents` path is deployed (the SDK then wires
- * the rich on-chain call). It is parity-tested against the deployed
- * `CvammPricing.totalLoadWad` (math.parity.test.ts).
+ * This is the PERMANENT off-chain mirror: the on-chain `CvammPricing` library IS
+ * deployed (with totalLoadWad/loadComponents) but is DELEGATECALL-ONLY — a direct
+ * eth_call to it reverts (Solidity guards deployed libraries; confirmed on the
+ * 2026-06-05 deploy), so the SDK cannot read it directly and instead keeps this
+ * port parity-locked byte-equal to the deployed Solidity (math.parity.test.ts).
+ * The lib runs on-chain only via the core's delegatecall during pricing.
  *
  * All arithmetic is bigint (WAD = 1e18). The WAD exp/ln/pow helpers mirror
  * solady's `FixedPointMathLib` closely enough that `totalLoadWad` agrees with the
