@@ -1,13 +1,24 @@
 /**
  * InflexionCore mappings — the heart of the indexer. Builds the Swap lifecycle
- * (SwapCreated → SwapPriced → QuoteFilled → SwapSettled), decodes range geometry
- * via NPM.positions, and maintains the moat aggregates (Signals 1–5 structural
- * halves) + the market directory + per-MM stats + the σ_ref backfill.
+ * (on-chain emit order: SwapCreated → QuoteFilled → SwapPriced → SwapSettled),
+ * decodes range geometry via NPM.positions, and maintains the moat aggregates
+ * (Signals 1–5 structural halves) + the market directory + per-MM stats + the
+ * σ_ref backfill.
  *
  * NON-CIRCULAR rule baked in: the MM `loadBps` (QuoteFilled, Path B) is the
  * behavioral load datum; the pool `totalLoadWad` (SwapPriced) is the mechanical
  * baseline. Cap-bound fills (`cappedAtMaxIL`) are EXCLUDED from the load
  * aggregates — they carry zero load information.
+ *
+ * EVENT-ORDER NOTE (load-bearing): QuoteFilled fires BEFORE SwapPriced on every
+ * Path-B create — `_executePathB` emits SwapCreated+QuoteFilled, THEN `_emitPriced`
+ * emits SwapPriced (InflexionCore.sol createSwap L908→909, createSwapRouted
+ * L1007→1008). So the spread (Signal 2) + the non-circular MM-load BucketAggregate
+ * accumulation live in `handleSwapPriced` (the LATER of the pair), where the pool
+ * `totalLoadWad`, the swap's persisted `mmLoadBps` (set by the earlier QuoteFilled),
+ * AND the authoritative `cappedAtMaxIL` are all available. `handleQuoteFilled` only
+ * persists the per-swap MM fields — it must NOT read poolLoadWad/cappedAtMaxIL,
+ * which `handleSwapPriced` has not written yet at that point.
  */
 import { BigInt, Bytes, Address, log } from '@graphprotocol/graph-ts'
 import {
@@ -49,11 +60,15 @@ import {
   eventUid,
   nonceId,
 } from './helpers'
+// NPM address is templated from deployments/arbitrum-sepolia.json by
+// `pnpm prepare:manifest` (scripts/gen-manifest.mjs) — see ./generated-addresses.
+import { NPM_ADDRESS } from './generated-addresses'
 
-// The NPM the protocol is wired to (the position custody NFT). Read from the
-// generated registry by the manifest; we bind it lazily here because the
-// geometry decode is an enrichment eth_call, not an event.
-const NPM_ADDRESS = Address.fromString('0x6b2937Bde17889EDCf8fbD8dE31C3C2a70Bc4d65')
+// The NPM the protocol is wired to (the position custody NFT) is imported above
+// from ./generated-addresses (templated from the single deployment registry, never
+// hardcoded — so it can never drift from the deployed contract's configured NPM
+// across networks). We bind it lazily in the handlers because the geometry decode
+// is an enrichment eth_call, not an event.
 
 // ─── Market directory ────────────────────────────────────────────────────────
 
@@ -300,9 +315,14 @@ export function handleSwapPriced(event: SwapPriced): void {
     sp.save()
   }
 
-  // ── BucketAggregate: count the pool fill + accumulate the mechanical baseline.
-  //    EXCLUDE cap-bound fills (zero load info). The MM-load half is added in
-  //    handleQuoteFilled (Path B). Path-A pool fills are counted here.
+  // ── BucketAggregate: count the fill + accumulate the mechanical baseline AND,
+  //    for Path B, the NON-CIRCULAR MM-load + spread (Signal 2). EXCLUDE cap-bound
+  //    fills (zero load info). SwapPriced is the LATER of (QuoteFilled, SwapPriced)
+  //    on a Path-B create, so here we have BOTH the pool `totalLoadWad`/authoritative
+  //    `cappedAtMaxIL` (this event) AND the swap's `mmLoadBps` persisted by the
+  //    earlier QuoteFilled — the only point where the cap-exclusion is correct and
+  //    the spread is non-null. (Doing this in handleQuoteFilled read not-yet-written
+  //    poolLoadWad/cappedAtMaxIL → spread always null, capped fills miscounted.)
   if (!event.params.cappedAtMaxIL) {
     const b = getBucketAggregate(s.widthBucket, s.distanceBucket, s.durationBucket)
     b.totalNonCappedFills = b.totalNonCappedFills + 1
@@ -315,6 +335,22 @@ export function handleSwapPriced(event: SwapPriced): void {
     if (event.params.path == 1) {
       b.countMMFills = b.countMMFills + 1
       b.countMMWins = b.countMMWins + 1
+      // NON-CIRCULAR MM load + spread (Signal 2). Path B ⇒ QuoteFilled fired earlier
+      // in the same tx ⇒ s.mmLoadBps is persisted. The lone exception is the
+      // defensive-create branch above (SwapPriced indexed without its SwapCreated/
+      // QuoteFilled — a re-org/replay artefact), which leaves s.mm == 0 and mmLoadBps
+      // unset; we skip the load/spread there so a phantom 0 cannot poison the
+      // aggregates. A REAL fill — even a legitimate 0-load one — always carries a
+      // non-zero MM from SwapCreated, so this never drops genuine data.
+      // mmLoadBps → WAD: loadBps/10000 * 1e18 = loadBps * 1e14.
+      if (s.mm.notEqual(Address.zero())) {
+        const mmLoadWad = BigInt.fromI32(s.mmLoadBps).times(BigInt.fromString('100000000000000'))
+        const spreadWad = event.params.totalLoadWad.minus(mmLoadWad)
+        s.spreadWad = spreadWad
+        s.save() // re-save: spreadWad is set after the s.save() above (Path B only)
+        b.sumMMLoadBps = b.sumMMLoadBps.plus(BigInt.fromI32(s.mmLoadBps))
+        b.sumSpreadWad = b.sumSpreadWad.plus(spreadWad)
+      }
     } else {
       b.countPoolFills = b.countPoolFills + 1
     }
@@ -346,28 +382,17 @@ export function handleQuoteFilled(event: QuoteFilled): void {
   const id = event.params.swapId.toString()
   const s = Swap.load(id)
   if (s != null) {
+    // Persist the per-swap MM fill fields ONLY. QuoteFilled fires BEFORE SwapPriced
+    // (InflexionCore.sol _executePathB L809, then _emitPriced L909/1008), so the pool
+    // `poolLoadWad` and the authoritative `cappedAtMaxIL` are NOT written yet — reading
+    // them here is premature. The spread (Signal 2) + the non-circular MM-load
+    // BucketAggregate accumulation are therefore done in handleSwapPriced (the later
+    // of the pair), which sees `totalLoadWad` + `cappedAtMaxIL` on its event and this
+    // persisted `mmLoadBps`. See the EVENT-ORDER NOTE in the file header.
     s.quoteId = event.params.quoteId
     s.nonce = event.params.nonce
     s.mmLoadBps = event.params.loadBps
-    // Spread (Signal 2): pool mechanical load − MM behavioral load, in WAD.
-    // mmLoadBps → WAD: loadBps/10000 * 1e18 = loadBps * 1e14.
-    const mmLoadWad = BigInt.fromI32(event.params.loadBps).times(
-      BigInt.fromString('100000000000000'),
-    )
-    if (s.poolLoadWad !== null) {
-      s.spreadWad = (s.poolLoadWad as BigInt).minus(mmLoadWad)
-    }
     s.save()
-
-    // ── BucketAggregate: add the NON-CIRCULAR MM load (skip cap-bound fills). ──
-    if (!s.cappedAtMaxIL) {
-      const b = getBucketAggregate(s.widthBucket, s.distanceBucket, s.durationBucket)
-      b.sumMMLoadBps = b.sumMMLoadBps.plus(BigInt.fromI32(event.params.loadBps))
-      if (s.spreadWad !== null) {
-        b.sumSpreadWad = b.sumSpreadWad.plus(s.spreadWad as BigInt)
-      }
-      b.save()
-    }
   }
 
   // ── Nonce: precise fill attribution (MM-8). ──

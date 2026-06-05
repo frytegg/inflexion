@@ -20,3 +20,5 @@ packages/subgraph/generated
 packages/subgraph/build
 # Auto-generated manifest (templated from the deployment registry by gen-manifest.mjs).
 packages/subgraph/subgraph.yaml
+# Auto-generated NPM address constant (templated from the registry by gen-manifest.mjs).
+packages/subgraph/src/generated-addresses.ts

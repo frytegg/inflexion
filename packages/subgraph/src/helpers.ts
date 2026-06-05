@@ -106,11 +106,19 @@ export function depositorId(who: Address, tranche: i32): string {
  * replicate Solidity `abi.encodePacked` (TIGHT packing) of `uintN` operands.
  * `width` is the on-chain field width in BYTES (uint24 → 3, uint32 → 4).
  * High-order bits above `width*8` are dropped (matches the on-chain uintN cast).
+ *
+ * Sign-safety: a caller may pass an i32 that was a uint32 ≥ 2³¹ on-chain — it
+ * arrives NEGATIVE after `BigInt.toI32()`, then widens to i64 with sign-extension.
+ * Because we only ever emit the LOW `width` bytes and `& 0xff` masks each one, the
+ * sign bits (which live ABOVE `width`) are never written, so the uint32 (width 4)
+ * preimage stays bit-for-bit correct across the full on-chain domain. Locked by the
+ * marketId parity tests referenced on `deriveMarketId`.
  */
 function uintBytesBE(value: i64, width: i32): ByteArray {
   const out = new ByteArray(width)
   for (let i = 0; i < width; i++) {
-    // Most-significant byte first: byte at index i is shifted by (width-1-i)*8.
+    // Most-significant byte first: byte at index i is shifted by (width-1-i)*8;
+    // `& 0xff` isolates exactly one byte regardless of `value`'s sign.
     out[i] = u8((value >> ((width - 1 - i) * 8)) & 0xff)
   }
   return out
@@ -132,6 +140,15 @@ function uintBytesBE(value: i64, width: i32): ByteArray {
  *   - uint32 durationSeconds → 4 big-endian bytes
  * The result is a 32-byte keccak digest, returned as Bytes (matches the on-chain
  * bytes32 marketId and the Market.id `${marketId.toHexString()}` keying).
+ *
+ * PARITY (load-bearing join key — subgraph == SDK == contract): the 20+20+3+4 = 47
+ * byte tight-packed preimage here MUST stay identical to the SDK `computeMarketId`
+ * (packages/sdk/src/resolveMarket.ts) and the on-chain keccak256(abi.encodePacked).
+ * All three are pinned to the LIVE Arbitrum Sepolia demo marketId 0xd1aa1fad…5ca3
+ * (dWETH, dUSDC, fee 500, 604800s) by:
+ *   - packages/contracts/test/MarketIdParity.t.sol  (on-chain side)
+ *   - packages/sdk/src/marketid.parity.test.ts       (SDK / width-contract side)
+ * Any field-width change that breaks that match will fail those tests.
  */
 export function deriveMarketId(
   token0: Address,
