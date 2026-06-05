@@ -29,7 +29,8 @@ const env = await signQuote(privateKey, quote, 421614, coreAddress) // -> { quot
 
 ```bash
 pnpm --filter @inflexion/engine build
-PORT=8787 VERIFYING_CONTRACT=0x15b7… pnpm --filter @inflexion/engine start
+# VERIFYING_CONTRACT defaults to the registry's core.inflexionCore; override only for a non-default deploy:
+PORT=8787 pnpm --filter @inflexion/engine start
 
 # example MM bot (separate process):
 MM_PRIVATE_KEY=0x… MARKET_ID=0x… LOAD_BPS=500 pnpm --filter @inflexion/engine mm-bot

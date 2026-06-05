@@ -8,7 +8,7 @@
  *   MARKET_ID           bytes32 market to quote (required)
  *   ENGINE_WS           default ws://localhost:8787
  *   CHAIN_ID            default 421614 (Arbitrum Sepolia)
- *   VERIFYING_CONTRACT  InflexionCore (default Sepolia deploy)
+ *   VERIFYING_CONTRACT  InflexionCore (default = registry core.inflexionCore)
  *   QUOTE_PRICE         oracle price the MM signs against (uint128, default 0)
  *   LOAD_BPS            spread over FairPremium (default 500 = 5%)
  */
@@ -16,6 +16,7 @@ import WebSocket from 'ws'
 import { type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { type SignedQuote, CollateralModel, encodeQuote, signQuote } from './quote.js'
+import { DEFAULT_VERIFYING_CONTRACT } from './addresses.js'
 
 const TTL_S = 10n
 const REISSUE_MS = 5000
@@ -28,7 +29,7 @@ if (pk === undefined || marketId === undefined) {
 const wsUrl = process.env['ENGINE_WS'] ?? 'ws://localhost:8787'
 const chainId = Number(process.env['CHAIN_ID'] ?? 421614)
 const verifyingContract = (process.env['VERIFYING_CONTRACT'] ??
-  '0x15b74EfcAB40A08281C0Cea972BeE0bbA1a9A96d') as Address
+  DEFAULT_VERIFYING_CONTRACT) as Address
 const quotePrice = BigInt(process.env['QUOTE_PRICE'] ?? '0')
 const loadBps = Number(process.env['LOAD_BPS'] ?? 500)
 
