@@ -8,10 +8,14 @@ optimizer = true
 # dropped the old 48KB allowance). At 1,000,000 runs the core is 31,199B (un-
 # deployable); pure/EIP-712/geometry logic was extracted into linked libraries
 # (TickMath, CvammPricing, SwapMath, QuoteVerification — see src/libraries/), and
-# runs were set to the highest value that fits with margin: 2,000 → core 23,900B
-# (676B headroom). The optimizer gas/size curve is flat from ~40k to 1M runs, so
-# this preserves nearly all of the runtime-gas benefit while clearing the limit.
-optimizer_runs = 2000
+# runs are set to the highest value that fits with margin. The optimizer gas/size
+# curve is flat from ~40k to 1M runs, so a runs reduction in this region preserves
+# nearly all of the runtime-gas benefit while clearing the limit:
+#   2,000 → 24,789B (+213B OVER) — the moat events (SwapPriced/QuoteFilled + the
+#           load-breakdown helpers) ate the prior 676B headroom (was 23,900B).
+#   1,500 → 23,934B (642B headroom) — margin restored; hot-path gas delta is
+#           negligible (see .gas-snapshot). This is the deploy config.
+optimizer_runs = 1500
 via_ir = true
 fs_permissions = [
   { access = "read", path = "../../deployments" },

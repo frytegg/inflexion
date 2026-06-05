@@ -125,6 +125,8 @@ dataSources:
         - PoolState
         - PoolDaySnapshot
         - PoolHourSnapshot
+        - Market
+        - MarketStateSnapshot
       abis:
         - name: ConvexityVault
           file: ./abis/ConvexityVault.json

@@ -7,7 +7,7 @@
  * realized (on-chain) and latent (off-chain) halves of Signals 4 / 2 share one
  * coordinate system the API can join on.
  */
-import { BigInt, Bytes, Address, ethereum } from '@graphprotocol/graph-ts'
+import { BigInt, Bytes, ByteArray, Address, crypto, ethereum } from '@graphprotocol/graph-ts'
 
 export const ZERO_BI = BigInt.fromI32(0)
 export const ONE_BI = BigInt.fromI32(1)
@@ -99,4 +99,49 @@ export function nonceId(mm: Bytes, nonce: BigInt): string {
 /** (address, tranche) composite id for the Depositor entity. */
 export function depositorId(who: Address, tranche: i32): string {
   return who.toHexString() + '-' + tranche.toString()
+}
+
+/**
+ * Big-endian fixed-width byte slice of an unsigned integer `value`, used to
+ * replicate Solidity `abi.encodePacked` (TIGHT packing) of `uintN` operands.
+ * `width` is the on-chain field width in BYTES (uint24 → 3, uint32 → 4).
+ * High-order bits above `width*8` are dropped (matches the on-chain uintN cast).
+ */
+function uintBytesBE(value: i64, width: i32): ByteArray {
+  const out = new ByteArray(width)
+  for (let i = 0; i < width; i++) {
+    // Most-significant byte first: byte at index i is shifted by (width-1-i)*8.
+    out[i] = u8((value >> ((width - 1 - i) * 8)) & 0xff)
+  }
+  return out
+}
+
+/**
+ * marketId = keccak256(abi.encodePacked(token0, token1, fee, durationSeconds))
+ *
+ * Replicates the EXACT on-chain derivation in InflexionCore.sol (registerMarket
+ * L355, _prepareSwap L590, _marketForSwap L1146, _marketIdForSwap L1157):
+ *   keccak256(abi.encodePacked(address token0, address token1, uint24 fee, uint32 durationSeconds))
+ *
+ * `abi.encodePacked` is TIGHT packing (no 32-byte ABI padding), so the preimage
+ * is 20 + 20 + 3 + 4 = 47 bytes. We MUST concatenate the raw big-endian bytes of
+ * each field at its on-chain width — NOT `ethereum.encode`, which ABI-pads every
+ * operand to 32 bytes and would produce a different (non-matching) hash.
+ *   - address → 20 bytes (Address is already a 20-byte ByteArray)
+ *   - uint24 fee → 3 big-endian bytes
+ *   - uint32 durationSeconds → 4 big-endian bytes
+ * The result is a 32-byte keccak digest, returned as Bytes (matches the on-chain
+ * bytes32 marketId and the Market.id `${marketId.toHexString()}` keying).
+ */
+export function deriveMarketId(
+  token0: Address,
+  token1: Address,
+  fee: i32,
+  durationSeconds: i32,
+): Bytes {
+  let packed = changetype<ByteArray>(token0)
+    .concat(changetype<ByteArray>(token1))
+    .concat(uintBytesBE(fee, 3)) // uint24
+    .concat(uintBytesBE(durationSeconds, 4)) // uint32
+  return changetype<Bytes>(crypto.keccak256(packed))
 }
