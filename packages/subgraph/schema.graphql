@@ -279,7 +279,7 @@ enum SigmaSource {
 }
 
 type SigmaPoint @entity(immutable: true) {
-  "id = `${token}-${blockNumber}-${logIndex}`."
+  "id = `${blockNumber}-${logIndex}` (eventUid; globally unique across data sources, so the SwapPriced backfill points never collide with Poked points)."
   id: ID!
   token: Bytes!
   timestamp: BigInt!
