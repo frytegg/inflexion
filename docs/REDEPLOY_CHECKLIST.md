@@ -48,7 +48,7 @@ From the access-layer verification (`docs/ACCESS_LAYER_ARCHITECTURE.md`): CvammP
 
 The SDK `LpClient.previewPremium` now fires the best-effort `POST ${engineBaseUrl}/telemetry/preview` ping (fire-and-forget; swallows every error — never blocks/fails the preview). Combined with the engine's `TelemetrySink` (`DEMAND_LOG`/`COMPETITION_LOG`), Signals 2 & 4's dynamic halves are captured **from the first interaction, before the API exists**. **Set `DEMAND_LOG` + `COMPETITION_LOG` on the engine NOW** (see `docs/ENGINE_TELEMETRY.md`) — anything not captured before the redeploy is lost forever (I7). This is independent of the contract redeploy.
 
-## ✅ Subgraph completion — marketId fix IMPLEMENTED (2026-06-05; `graph build` cross-check remains home-PC)
+## ✅ Subgraph completion — marketId fix VERIFIED + event-order fix (2026-06-05; `graph build` (WASM) + keccak cross-check DONE)
 
 Bounded gap from the P4.c build (`docs/ACCESS_LAYER_ARCHITECTURE.md` §6 note #6) — **now fixed, see "Implemented" below**:
 `handleSwapCreated` does **not** derive `marketId` (the `SwapCreated`/`SwapPriced`/
@@ -60,13 +60,18 @@ counters, and the per-market `/data/load-surface` series are empty. The
 geometry-bucketed signals (S1/S2/S3/S4 via `BucketAggregate`/`GeometryDemandBucket`)
 and protocol-wide S5 are **unaffected**.
 
-**Implemented (2026-06-05) — `graph codegen` passes on this machine; `graph build` (WASM) + a live keccak cross-check remain the home-PC verification:**
+**Implemented (2026-06-05) — `graph codegen` + `graph build` (WASM) + the keccak cross-check all pass (see "✅ Verified" below):**
 
 1. `handleSwapCreated` now derives `marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(expiry − createdAt)))` via `helpers.deriveMarketId`. **Correction to the original note:** this is `abi.encodePacked` (TIGHT packing, 20+20+3+4 = 47 bytes) — **NOT** `ethereum.encode`, which ABI-pads every operand to 32 bytes and would hash a different (128-byte) preimage → non-matching id. `deriveMarketId` concatenates the raw big-endian bytes of each field at its on-chain width (`uintBytesBE`; note graph-ts `ByteArray.fromI32` is little-endian, unusable here). `token0`/`token1`/`fee` are reused from the existing `NPM.positions` bind; `expiry`/`createdAt` come from the swap record via `try_swaps(swapId)` (`expiry − createdAt == cfg.durationSeconds` on-chain, so the id matches both `registerMarket` and `_marketIdForSwap`). Verified statically against `InflexionCore.sol` L355/L590/L1146/L1157.
 2. `Swap.market` set; `Market` lifetime counters bumped (`totalSwaps`/`totalV0`/`totalPremium` in `handleSwapCreated`; `pathBFills` in `handleSwapPriced` where the path is known; `totalSettled`/`totalPayout` in `handleSwapSettled`); `MarketStateSnapshot` upserted in `handleCollateralLocked` from `ConvexityVault.lockedByMarket(marketId)` + `utilizationWad()`/`concentrationWad()` (all three getters confirmed on-chain — `ConvexityVault.sol` L68/L155/L163). Files changed: `src/helpers.ts`, `src/inflexion-core.ts`, `src/convexity-vault.ts`, `abis/ConvexityVault.json` (added the 3 getters), `scripts/gen-manifest.mjs` (added `Market`/`MarketStateSnapshot` to the vault data source), `subgraph.yaml` (regenerated).
 3. _(still optional, manifest-only)_ add UnderwriterVault/ILVault data sources if on-chain Path-B MM-collateral / fee history is wanted (today MM PnL is reconstructed from InflexionCore events, and live LP fees come from the SDK).
 
-**Remaining (home-PC only):** run `graph build` (asc → WASM) to type-check the AssemblyScript mapping bodies — `graph codegen` (CI + this machine) validates schema/ABIs/manifest + generated-type references but NOT the mapping bodies. Then cross-check one derived `marketId` against a live `MarketRegistered.marketId` on the fresh deployment to prove the keccak preimage matches bit-for-bit.
+**✅ Verified (2026-06-05, on the Windows dev machine — no separate home-PC step needed):**
+
+- **`graph build` (asc → WASM) passes** — all three data sources (`InflexionCore`/`ConvexityVault`/`VolOracle.wasm`) compile; the AssemblyScript mapping bodies type-check (`graph codegen` validates schema/ABIs/manifest + generated types only, NOT the bodies).
+- **keccak `marketId` cross-check passes bit-for-bit** — `deriveMarketId`'s tight-packed preimage reproduces the LIVE on-chain marketIds (`marketId_fee500_7d` `0xd1aa1fad…5ca3`, `shortMarketId_fee500_300s` `0xacbeed…3e7e`) for both demo markets, three independent ways (viem `encodePacked`, a manual replica of `deriveMarketId`, and the registry value). Now locked by `packages/contracts/test/MarketIdParity.t.sol` + `packages/sdk/src/marketid.parity.test.ts` (both pinned to the live ids).
+
+**⚠️ Found + fixed during this verification — branch `fix/subgraph-event-order-aggregation` (commit `f6f3872`, NOT yet merged):** the WASM build is green, but a runtime event-order bug it cannot catch surfaced. The contract emits `SwapCreated → QuoteFilled → SwapPriced`, but `handleQuoteFilled` read `poolLoadWad`/`cappedAtMaxIL` — written only by the LATER `handleSwapPriced` — so Signal-2 `sumSpreadWad` was never accumulated and capped Path-B fills corrupted `sumMMLoadBps` (breaking the NON-CIRCULAR invariant). The spread + non-circular MM-load accumulation was relocated into `handleSwapPriced`. Also hardened: `NPM_ADDRESS` templated from the deployment registry (`src/generated-addresses.ts`, regenerated by `prepare:manifest`) instead of hardcoded; the two marketId parity tests above. **Merge this branch BEFORE the redeploy** — the moat dataset begins at the redeploy block and these aggregates are unreconstructable retroactively.
 
 ## Redeploy steps (run once, on WSL2)
 
