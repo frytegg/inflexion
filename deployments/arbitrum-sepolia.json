@@ -63,7 +63,7 @@
       "quoteVerification": "0x74819eed322f3e1a2dc10bb0d3cae50078d90807"
     },
     "demo": {
-      "_note": "Fresh numeraire-correct mock pair (dWETH < dUSDC so token1=dUSDC=numeraire) + seeded fee-500 pool + ~$100k UNPROTECTED LP position (for previews; tokenId 3218). dWETH oracle-priced via the real Chainlink ETH/USD feed. On-chain demo SWAPS (smoke + lifecycle) are PENDING re-creation on this fresh stack — see lifecycle._note. smokeTestSwapId is the id the first such swap will receive.",
+      "_note": "Fresh numeraire-correct mock pair (dWETH < dUSDC so token1=dUSDC=numeraire) + seeded fee-500 pool + ~$100k UNPROTECTED LP position (for previews; tokenId 3218). dWETH oracle-priced via the real Chainlink ETH/USD feed. The live create->settle lifecycle (Path A + Path B) ran on 2026-06-05 — see lifecycle below; smokeTestSwapId = the Path-A swap (#1).",
       "demoWeth": "0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D",
       "demoWethDecimals": 18,
       "demoUsdc": "0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d",
@@ -75,32 +75,32 @@
       "smokeTestSwapId": 1
     },
     "lifecycle": {
-      "_note": "PENDING re-creation after the 2026-06-05 full-fresh redeploy. shortMarketId_fee500_300s below is the keccak preimage for the FRESH demo tokens (not yet registered on-chain). Re-create with script/DemoLifecycle.s.sol + cast createSwapPathA / createSwapRouted + settle. The pathA/pathB blocks are the PRIOR (2026-06-03) run's figures, kept for reference only.",
+      "_note": "LIVE create->settle lifecycle on the FRESH stack (2026-06-05), short (300s) fee-500 market 0xb8bbd684…, settled live (no time-warp) at the Chainlink round bracketing each expiry. All amounts in USD (dUSDC 6dec). The MM is a fresh demo signer (the prior MM key was unavailable on the home PC); it deposited 5,000 dUSDC into UnderwriterVault, signed the Path-B quote, and its own collateral paid the Path-B settlement.",
       "shortMarketId_fee500_300s": "0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2",
-      "marketMaker": "0xBc44f7A913221Cb2f56A59f8cBAa7Fb9Bcc50851",
+      "marketMaker": "0xe632B215120dD43A719458487bA3e03638fec953",
       "pathA_convexity": {
-        "_note": "REFERENCE ONLY (prior 2026-06-03 run; not on the fresh stack). Path-A (cvAMM pool) convexity hedge: premium is a small fraction of MaxIL.",
-        "swapId": 2,
-        "lpPositionTokenId": 3175,
-        "V0": "216622.54",
-        "maxIL": "1147.75",
-        "premium": "28.67",
-        "premiumPctOfMaxIL": "2.5%",
-        "settledRealisedIL": "1.83",
-        "settledPayout": "1.83"
+        "_note": "Path-A (cvAMM pool) convexity hedge: premium is a small fraction of MaxIL. Settled from the ConvexityVault.",
+        "swapId": 1,
+        "lpPositionTokenId": 3220,
+        "V0": "270531.28",
+        "maxIL": "1669.24",
+        "premium": "9.70",
+        "premiumPctOfMaxIL": "0.58%",
+        "settledRealisedIL": "148.64",
+        "settledPayout": "148.64"
       },
       "pathB_routing": {
-        "_note": "REFERENCE ONLY (prior 2026-06-03 run; not on the fresh stack). createSwapRouted picked the MM (Path B) because it strictly beat the cvAMM pool price; the MM's price was charged and the MM's OWN collateral was locked in UnderwriterVault.",
-        "swapId": 3,
-        "lpPositionTokenId": 3176,
-        "premiumA_cvamm": "23.18",
-        "premiumB_mm": "17.53",
+        "_note": "createSwapRouted picked the MM (Path B) because it strictly beat the cvAMM pool price; the MM's price was charged and the MM's OWN collateral was locked + paid out from UnderwriterVault.",
+        "swapId": 2,
+        "lpPositionTokenId": 3221,
+        "premiumA_cvamm": "13.80",
+        "premiumB_mm": "8.93",
         "chosenPath": "B (MM)",
-        "mmLoadBps": 500,
-        "maxIL": "1191.60",
-        "mmCollateralLocked": "1191.60",
-        "settledRealisedIL": "15.43",
-        "settledPayout": "15.43",
+        "mmLoadBps": 1000,
+        "maxIL": "3215.65",
+        "mmCollateralLocked": "3215.65",
+        "settledRealisedIL": "245.66",
+        "settledPayout": "245.66",
         "settledFromMMCollateral": true
       }
     }
