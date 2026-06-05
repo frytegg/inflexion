@@ -22,20 +22,20 @@ import { Test } from "forge-std/Test.sol";
 ///         the same two vectors (the SDK/width-contract side of the lock).
 contract MarketIdParityTest is Test {
     // Demo pair: dWETH < dUSDC ⇒ token0 = dWETH (deployments/arbitrum-sepolia.json).
-    address internal constant DEMO_WETH = 0xe8cc35BA27De935972d78348B9E43bF6F97c2444;
-    address internal constant DEMO_USDC = 0xeF0462608C6D0C39a6D8f4E9a7316e8433834309;
+    address internal constant DEMO_WETH = 0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D;
+    address internal constant DEMO_USDC = 0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d;
     uint24 internal constant FEE = 500;
 
     /// fee-500 / 7-day market (durationSeconds = 604800).
     function test_marketId_fee500_7d_matchesLiveDeployment() public pure {
         bytes32 id = keccak256(abi.encodePacked(DEMO_WETH, DEMO_USDC, FEE, uint32(604_800)));
-        assertEq(id, bytes32(0xd1aa1fadc568d6a86c186936ff1de1ec737c844b21b3eebcc2b0ba3080615ca3));
+        assertEq(id, bytes32(0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69));
     }
 
     /// fee-500 / 300s lifecycle market (durationSeconds = 300).
     function test_marketId_fee500_300s_matchesLiveDeployment() public pure {
         bytes32 id = keccak256(abi.encodePacked(DEMO_WETH, DEMO_USDC, FEE, uint32(300)));
-        assertEq(id, bytes32(0xacbeedeed5a6daa8765c896ff3cf27645d6e85fba9f8c39ea15a732738fa3e7e));
+        assertEq(id, bytes32(0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2));
     }
 
     /// Guard the pre-image WIDTH itself: the tight-packed bytes must be exactly

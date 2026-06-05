@@ -35,49 +35,51 @@
     "_poolNote": "There is NO pre-seeded WETH/USDC v3 pool with material liquidity on Arbitrum Sepolia (developer testnet). The demo must create + seed it (Factory.createPool -> pool.initialize(sqrtP) -> NPM.mint). Obtain testnet USDC from https://faucet.circle.com/ and WETH by wrapping ETH."
   },
   "deployment": {
-    "_deployedAt": "2026-06-03",
+    "_deployedAt": "2026-06-05",
     "_deployer": "0x96455C9b00D530BD0629b71B674298440328b1Dd",
-    "_note": "P3.10 — full cvAMM stack live on Arbitrum Sepolia. Stylus FairValueOracle deployed via `cargo stylus deploy` (WSL2); Solidity stack via script/Deploy.s.sol (USDC=demo dUSDC, STYLUS_FVO set, SKIP_FVO_INIT=true then init via cast). InflexionCore fits EIP-170 via the library extraction at optimizer_runs=2000 (23,900B). Markets+pool+LP seeded via script/SeedDemo.s.sol; a live createSwapPathA (swap #1) was priced on-chain by the Stylus FVO (V0=$120,351, MaxIL=collateral=$706.29, I1 holds).",
+    "_deployBlock": 274081134,
+    "_note": "FULL-FRESH redeploy (2026-06-05) — replaces the 2026-06-03 P3.10 stack. Picks up the moat events (QuoteFilled / SwapPriced) + CvammPricing.loadComponents at optimizer_runs=1500 (InflexionCore 23,934B, EIP-170 OK). A FRESH Stylus FairValueOracle was deployed (cargo stylus deploy, WSL2) and init'd via cast to the FRESH VolOracle — the prior FVO was set-once-init'd to the old vol, so reusing it would have orphaned the new vol's sigma_ref. Solidity stack via script/Deploy.s.sol (USDC=fresh dUSDC, STYLUS_FVO=fresh, SKIP_FVO_INIT=true). Fresh demo pair via script/DeployDemoMocks.s.sol; 9 markets + pool + ~$100k unprotected LP + funded tranches via script/SeedDemo.s.sol. VolOracle poked (sigma_ref initialized to the 0.5e18 floor); FVO.fairPremium verified live (fairRate ~0.847 at floor vol). _deployBlock is the subgraph startBlock — the moat dataset begins here.",
     "stylus": {
-      "fairValueOracle": "0x10E3399025E930da7B4d4bE71181157CCee4E882",
-      "_activationTx": "0x9b086b7270f0061eea2534485c2565093944b2affa0c17f533ee71b651f77d77",
-      "_runtimeBytes": 21702
+      "fairValueOracle": "0x98a6aa75108b70fc0794bc3b87efe0ae99d5d52c",
+      "_activationTx": "0x8fc48dc62c0a99ad636301a008fba5bbd02e84e85d6abb373aa2767572d55a6c",
+      "_runtimeBytes": 21702,
+      "_note": "Byte-identical Rust to the prior FVO (21702 B; wasm already activated by codehash) — redeployed only to obtain a fresh address whose set-once init() points at the fresh VolOracle."
     },
     "core": {
-      "inflexionCore": "0x15b74EfcAB40A08281C0Cea972BeE0bbA1a9A96d",
-      "oracleManager": "0x584de30E891d7346f8720951961e29b19E16d4fd",
-      "volOracle": "0xE79Bf574BfCfC17bA858CC311CE5FeF8B78e947B",
-      "ilMath": "0xC203E2686601Cc252EcE66F8c792FF88E8fbDD9b",
-      "ilVault": "0x047CC6Bd6327798f231F75562d63C886e7476Eb2",
-      "underwriterVault": "0xa26dfDdE77BA5C8F95B6Fa225f62D288799989EF",
-      "convexityVault": "0xB8dF0204Ec18834AF16652Cc8ec5D39BD403a2D2",
+      "inflexionCore": "0xC19865cF8403F59B8Eca835833aFEe3Aa8DA4848",
+      "oracleManager": "0x2c18147B6ec75dcb330d9A48B6B96a4d1a8b529b",
+      "volOracle": "0xfdEafBB381192FC5337499d041eaead04d565Ed9",
+      "ilMath": "0x7e90362bc6Df9cb5faA13952e07853ab16c77bd2",
+      "ilVault": "0x9f7615Aca943832977CEf3ac1862fD48B87b7664",
+      "underwriterVault": "0x4Fb459F3393D206c2b7faD7f0fC9C35a78348D64",
+      "convexityVault": "0xDE2fFeBA2E6A18f3A53D43EC0fCCD299158eC30d",
       "treasury": "0x96455C9b00D530BD0629b71B674298440328b1Dd"
     },
     "libraries": {
       "_note": "Auto-deployed + linked by forge during the Deploy.s.sol broadcast (public library functions, delegatecall).",
-      "tickMath": "0xc6e5be49490a501004e87412fbc9bb1c91ea4de8",
-      "cvammPricing": "0x86921f776adfec34d7b7c18ba87a7de52ecb757b",
-      "swapMath": "0x021af1ed28ae948da4dc505d51dfce30139bb441",
-      "quoteVerification": "0x0f7a413a11d94d2bee2d710860b54e9a215a4a02"
+      "tickMath": "0xbf02bbc82e0fb1a4b9828bb90fc9dd9e97578965",
+      "cvammPricing": "0x4a053d29a55a64172140f9ebbc27c321c0ba2b53",
+      "swapMath": "0xf7be9745b6768d06a18c386c6db5c8cb065ba314",
+      "quoteVerification": "0x74819eed322f3e1a2dc10bb0d3cae50078d90807"
     },
     "demo": {
-      "_note": "Numeraire-correct mock pair (dWETH < dUSDC so token1=dUSDC=numeraire) + seeded fee-500 pool + LP position + an open Path-A swap. dWETH oracle-priced via the real Chainlink ETH/USD feed.",
-      "demoWeth": "0xe8cc35BA27De935972d78348B9E43bF6F97c2444",
+      "_note": "Fresh numeraire-correct mock pair (dWETH < dUSDC so token1=dUSDC=numeraire) + seeded fee-500 pool + ~$100k UNPROTECTED LP position (for previews; tokenId 3218). dWETH oracle-priced via the real Chainlink ETH/USD feed. On-chain demo SWAPS (smoke + lifecycle) are PENDING re-creation on this fresh stack — see lifecycle._note. smokeTestSwapId is the id the first such swap will receive.",
+      "demoWeth": "0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D",
       "demoWethDecimals": 18,
-      "demoUsdc": "0xeF0462608C6D0C39a6D8f4E9a7316e8433834309",
+      "demoUsdc": "0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d",
       "demoUsdcDecimals": 6,
-      "pool": "0xc47595A7eDad7a93A890Aa7B11a705e9a18AA40B",
+      "pool": "0xfE1Eb4D5796a350B13852F822B3E6a9fDbb858a5",
       "poolFee": 500,
-      "lpPositionTokenId": 3174,
-      "marketId_fee500_7d": "0xd1aa1fadc568d6a86c186936ff1de1ec737c844b21b3eebcc2b0ba3080615ca3",
+      "lpPositionTokenId": 3218,
+      "marketId_fee500_7d": "0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69",
       "smokeTestSwapId": 1
     },
     "lifecycle": {
-      "_note": "Full create->settle lifecycle demo on a short (300s) fee-500 market (marketId 0xacbeedeed5a6daa8765c896ff3cf27645d6e85fba9f8c39ea15a732738fa3e7e), settled live (no time-warp). Reproduce setup with script/DemoLifecycle.s.sol; opens via cast (Stylus); settle via cast. All amounts in USD (dUSDC 6dec).",
-      "shortMarketId_fee500_300s": "0xacbeedeed5a6daa8765c896ff3cf27645d6e85fba9f8c39ea15a732738fa3e7e",
+      "_note": "PENDING re-creation after the 2026-06-05 full-fresh redeploy. shortMarketId_fee500_300s below is the keccak preimage for the FRESH demo tokens (not yet registered on-chain). Re-create with script/DemoLifecycle.s.sol + cast createSwapPathA / createSwapRouted + settle. The pathA/pathB blocks are the PRIOR (2026-06-03) run's figures, kept for reference only.",
+      "shortMarketId_fee500_300s": "0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2",
       "marketMaker": "0xBc44f7A913221Cb2f56A59f8cBAa7Fb9Bcc50851",
       "pathA_convexity": {
-        "_note": "Path-A (cvAMM pool) convexity hedge: premium is a small fraction of MaxIL.",
+        "_note": "REFERENCE ONLY (prior 2026-06-03 run; not on the fresh stack). Path-A (cvAMM pool) convexity hedge: premium is a small fraction of MaxIL.",
         "swapId": 2,
         "lpPositionTokenId": 3175,
         "V0": "216622.54",
@@ -88,7 +90,7 @@
         "settledPayout": "1.83"
       },
       "pathB_routing": {
-        "_note": "createSwapRouted picked the MM (Path B) because it strictly beat the cvAMM pool price; the MM's price was charged and the MM's OWN collateral was locked in UnderwriterVault.",
+        "_note": "REFERENCE ONLY (prior 2026-06-03 run; not on the fresh stack). createSwapRouted picked the MM (Path B) because it strictly beat the cvAMM pool price; the MM's price was charged and the MM's OWN collateral was locked in UnderwriterVault.",
         "swapId": 3,
         "lpPositionTokenId": 3176,
         "premiumA_cvamm": "23.18",

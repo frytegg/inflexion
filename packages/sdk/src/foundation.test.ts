@@ -37,7 +37,7 @@ describe('addresses registry', () => {
   it('exposes the demo market ids + token id', () => {
     expect(demo.marketId_fee500_7d).toMatch(/^0x[0-9a-fA-F]{64}$/)
     expect(demo.shortMarketId_fee500_300s).toMatch(/^0x[0-9a-fA-F]{64}$/)
-    expect(demo.lpPositionTokenId).toBe(3174n)
+    expect(demo.lpPositionTokenId).toBe(3218n)
     expect(addresses.chainId).toBe(421614)
   })
 })
