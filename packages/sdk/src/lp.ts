@@ -9,10 +9,13 @@
  * documented corrections applied):
  *  - Pricing reads the on-chain Stylus `FairValueOracle.fairPremium` — the Φ-sum is
  *    NEVER reimplemented. The Path-A load stack is the deterministic `CvammPricing`
- *    TS port (math.js, parity-tested against the deployed lib) over the public inputs
- *    `(σ_ref, util, conc)` + `loadParams()` — exactly the inputs `_pricePathAFromFair`
- *    consumes on-chain. (The rich on-chain `loadComponents` path activates at the
- *    single redeploy; the TS port is the documented interim.)
+ *    TS port (math.js, parity-locked byte-equal to the deployed lib in
+ *    math.parity.test.ts) over the public inputs `(σ_ref, util, conc)` +
+ *    `loadParams()` — exactly the inputs `_pricePathAFromFair` consumes on-chain.
+ *    (The on-chain `CvammPricing.loadComponents` IS deployed but is
+ *    DELEGATECALL-ONLY — a direct eth_call to it reverts — so the TS port is the
+ *    PERMANENT off-chain mirror, not an interim; the lib runs on-chain only via the
+ *    core's delegatecall during pricing.)
  *  - `regime` is the σ_ref-vs-loadParams band (calm/normal/stressed) via `cvamm.regimeOf`
  *    — NOT `sigmaComponents.binding`.
  *  - Geometry mirrors `_prepareSwap`/`_fairPremium`: Pa/Pb via TickMath from the NFT

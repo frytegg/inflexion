@@ -5,12 +5,13 @@
  * type inference is fast.
  *
  * GETTER-GAP NOTES (flagged for the Integrate phase; none block the foundation):
- *  - InflexionCore: NO `loadComponents` path on-chain in pricing today — the
- *    deployed `_pricePathAFromFair` calls `CvammPricing.loadComponents`, but the
- *    public `getMarketPricing`-style aggregator view does NOT exist; the SDK
- *    composes it from `loadParams()` + `convexityVault.inventory()` + the
- *    `cvammPricing` lib (see math.ts). The richer on-chain path lands at the
- *    single redeploy.
+ *  - InflexionCore: there is NO public `getMarketPricing`-style aggregator view —
+ *    the deployed `_pricePathAFromFair` calls `CvammPricing.loadComponents` via
+ *    DELEGATECALL during pricing, but a deployed Solidity library cannot be
+ *    eth_called directly (it reverts on a direct CALL; confirmed on the 2026-06-05
+ *    deploy). So the SDK composes pricing from `loadParams()` +
+ *    `convexityVault.inventory()` + the parity-locked `cvammPricing` TS port (see
+ *    math.ts). That TS port is the PERMANENT off-chain mirror, not an interim.
  *  - InflexionCore: `markets(marketId)` is the public mapping getter; it returns
  *    the MarketConfig fields as a TUPLE (no struct names) — decoded positionally.
  *  - InflexionCore: NO `getMarkets()` enumerator (documented non-blocking gap;
@@ -18,9 +19,11 @@
  *  - InflexionCore: `settlePreview` is NOT `view` (returns), but the deployed
  *    ILMath.computeIL is `pure`, so it is safe to `eth_call`/simulate. Marked
  *    `nonpayable` here; the SDK calls it via `simulateContract`, never readContract.
- *  - SwapCreated / SwapRouted on the LIVE deploy do NOT carry quoteId/nonce; the
- *    rich QuoteFilled/SwapPriced events ship at the redeploy. isNonceUsed is true
- *    on BOTH fill and cancel → coarse fill attribution (documented in mm surface).
+ *  - SwapCreated / SwapRouted do NOT carry quoteId/nonce; the rich
+ *    QuoteFilled/SwapPriced events are LIVE on-chain since the 2026-06-05 deploy
+ *    (the lifecycle demo fired both), but PRECISE per-fill attribution from them
+ *    needs them indexed (subgraph / eth_getLogs). isNonceUsed is true on BOTH fill
+ *    and cancel → the direct-on-chain answer stays COARSE (documented in mm surface).
  *  - ConvexityVault per-depositor getters that EXIST in source:
  *    seniorBalanceOf/juniorBalanceOf (mappings), convertToAssets/convertToShares,
  *    seniorWithdraw/juniorWithdraw (mappings → (shares, unlockAt)),
@@ -29,8 +32,12 @@
  *  - OracleManager.getPrice REVERTS on stale/sequencer-down (not a soft view).
  *    Every LP read that needs P0 must catch the revert (see client error helper).
  *  - VolOracle.sigmaRef/sigmaComponents REVERT if the token is not initialized.
- *  - CvammPricing lib functions (totalLoadWad/loadComponents/etc.) are `public`
- *    on the deployed lib image — callable via eth_call to `libs.cvammPricing`.
+ *  - CvammPricing lib functions (totalLoadWad/loadComponents/etc.) are `public` on
+ *    the deployed lib image, but it is a DELEGATECALL-ONLY library: Solidity guards
+ *    deployed libraries against direct CALLs, so both selectors REVERT via eth_call
+ *    to `libs.cvammPricing` (confirmed on the 2026-06-05 deploy). The lib runs
+ *    on-chain only via the core's delegatecall during pricing; the SDK mirrors it
+ *    with the parity-locked math.ts TS port. DO NOT eth_call it — it will revert.
  */
 
 // ─── InflexionCore ──────────────────────────────────────────────────────────
@@ -285,8 +292,10 @@ export const inflexionCoreAbi = [
       { name: 'premiumB', type: 'uint256', indexed: false },
     ],
   },
-  // NOTE: QuoteFilled / SwapPriced are coded but NOT on the live deploy — added
-  // post-redeploy. Kept here so the SDK can subscribe once they ship.
+  // NOTE: QuoteFilled / SwapPriced are LIVE on-chain since the 2026-06-05 deploy
+  // (the lifecycle demo fired both). The SDK can subscribe to them today; PRECISE
+  // per-fill attribution from them additionally needs them indexed (subgraph,
+  // pending its Studio-slug deploy — or eth_getLogs).
   {
     type: 'event',
     name: 'QuoteFilled',
@@ -724,9 +733,12 @@ export const cvammPricingAbi = [
     ],
     outputs: [{ type: 'uint256' }],
   },
-  // loadComponents — CODED but NOT yet deployed (activates at the single redeploy).
-  // Present so the rich on-chain path can be wired once live; until then the SDK
-  // uses the math.ts TS port (parity-tested against totalLoadWad).
+  // loadComponents — DEPLOYED on the CvammPricing lib, but DELEGATECALL-ONLY: a
+  // direct eth_call to `libs.cvammPricing` REVERTS (Solidity guards deployed
+  // libraries; confirmed on the 2026-06-05 deploy). The ABI is kept for shape
+  // reference only — DO NOT call it on-chain. The SDK permanently uses the math.ts
+  // TS port (parity-locked byte-equal to the deployed Solidity in math.parity.test.ts);
+  // the lib runs on-chain only via the core's delegatecall during pricing.
   {
     type: 'function',
     name: 'loadComponents',
