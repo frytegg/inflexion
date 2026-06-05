@@ -14,7 +14,7 @@ Built for the Arbitrum Open House London Buildathon (25 May → 14 June 2026).
 
 | Doc                                    | What it is                                                                                                                                               |
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`spec.md`](spec.md)                   | The protocol specification. **v3.3 build-ready.** Single source of truth for design.                                                                     |
+| [`spec.md`](spec.md)                   | The protocol specification. **v4.0 FINALIZED.** Single source of truth for design.                                                                       |
 | [`ROADMAP.md`](ROADMAP.md)             | Living task tracker. Start each session at the **▶ NEXT** pointer; mark `[x] (date)` and bump the pointer at session end.                                |
 | [`RUNBOOK.md`](RUNBOOK.md)             | Environment versions, env vars, common commands, demo-day playbook.                                                                                      |
 | [`docs/MATH.md`](docs/MATH.md)         | IL formula derivation, convexity proof, reference magnitudes.                                                                                            |

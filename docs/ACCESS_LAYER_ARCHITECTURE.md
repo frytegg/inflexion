@@ -159,12 +159,12 @@ SDK must reproduce this **exactly** because both rails derive from it on-chain.
 
 ```
 NPM.positions(tokenId) → token0, token1, fee, tickLower, tickUpper, liquidity
-sqrtPa = TickMath.getSqrtRatioAtTick(tickLower)        [pure; lib at 0xc6e5… or TS port]
+sqrtPa = TickMath.getSqrtRatioAtTick(tickLower)        [pure; lib at 0xbf02…8965 or TS port]
 sqrtPb = TickMath.getSqrtRatioAtTick(tickUpper)
 P0     = OracleManager.getPrice(oracleToken)           [view]
 sqrtP0 = InflexionCore.oracleDerivedSqrtPriceX96(marketId, P0)   [view — the exact on-chain conversion]
 a = (sqrtPa/sqrtP0)²  ;  b = (sqrtPb/sqrtP0)²          (WAD; matches _fairPremium)
-maxIL  = ILMath.computeMaxIL(sqrtP0, sqrtPa, sqrtPb, liquidity)  [pure, deployed 0xC203…]
+maxIL  = ILMath.computeMaxIL(sqrtP0, sqrtPa, sqrtPb, liquidity)  [pure, deployed 0x7e90…7bd2]
 marketId = keccak256(abi.encodePacked(token0, token1, fee, durationSeconds))
 ```
 
@@ -283,7 +283,7 @@ Concrete, instrument-precise legs (the three the spec requires):
 
 - **`settlePreview` is NOT declared `view`.** It is `external returns (uint256, uint128)`
   because `IILMath.computeIL` is non-view in the interface. **However** the _deployed_
-  `ILMath` (Solidity, `0xC203…`) implements `computeIL` as `pure`, so an
+  `ILMath` (Solidity, `0x7e90…7bd2`) implements `computeIL` as `pure`, so an
   `eth_call`/`staticCall` of `settlePreview` succeeds and mutates nothing. The SDK calls
   it via `publicClient.call`/`simulateContract`, never as a `readContract` view. Document
   this so the SDK author doesn't wire it as a view and get a type error.
