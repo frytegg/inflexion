@@ -1,0 +1,12 @@
+# Next.js
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+
+# deps / build
+/node_modules
+/.vercel
+
+# scratch design aids (not part of the app)
+/_design/
