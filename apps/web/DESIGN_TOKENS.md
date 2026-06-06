@@ -96,15 +96,16 @@ all numbers (financial data wants `tabular-nums`). Three roles; all self-hosted.
 
 | Role            | Proposed (free, self-hostable)                             | Alternates                                       | Use                                      |
 | --------------- | ---------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------- |
-| **Display**     | **PENDING — pick by seeing** (`_design/font-compare.html`) | Clash Display · Space Grotesk · Unbounded · Syne | hero & section headlines only            |
-| **Sans / UI**   | **General Sans** (Fontshare) — **LOCKED**                  | Switzer · Hanken Grotesk                         | body, UI, labels                         |
-| **Mono / data** | **IBM Plex Mono** — **LOCKED**                             | JetBrains Mono · Spline Sans Mono                | **all numbers**, addresses, code, ticker |
+| **Display**     | **Space Grotesk** (Google) — **LOCKED**   | Clash Display · Unbounded · Syne  | hero & section headlines only             |
+| **Sans / UI**   | **General Sans** (Fontshare) — **LOCKED** | Switzer · Hanken Grotesk          | body, UI, labels                          |
+| **Mono / data** | **IBM Plex Mono** (Google) — **LOCKED**   | JetBrains Mono · Spline Sans Mono | **all numbers**, addresses, code, ticker  |
 
-> Sans + Mono are **locked** (2026-06-05). **Display is pending a visual pick** from
-> 4 candidates (`_design/font-compare.html`) — chosen by seeing, not by name (Clash
-> Display is over-used in DeFi; one candidate should carry a geometric/mathematical
-> quality echoing the curve motif). Constraints kept: display ≠ the body face; mono
-> **must** have true tabular figures; avoid Inter/Geist as primaries (the "default AI" stack).
+> All three **locked** (2026-06-05). **Display = Space Grotesk** — its mathematical /
+> Space-Mono lineage fits the quant·terminal positioning, its numerals read precise
+> (not balloon-round), and it bridges naturally to IBM Plex Mono on the number side.
+> Constraints kept: display ≠ body; mono has true tabular figures; no Inter/Geist as
+> primaries. Space Grotesk + IBM Plex Mono via `next/font/google` (self-hosted);
+> General Sans via the Fontshare CDN.
 
 ### Type scale (`rem`, 16px root)
 
