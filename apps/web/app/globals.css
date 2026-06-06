@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Space Grotesk (--font-display) + IBM Plex Mono (--font-mono) are wired via
+   next/font in app/layout.tsx (set on <html>). General Sans (--font-sans) loads
+   from the Fontshare CDN (<link> in layout) and is named here. Source of truth:
+   apps/web/DESIGN_TOKENS.md. */
+
+:root {
+  color-scheme: dark;
+  --ring: 20 184 166; /* teal — focus rings via rgb(var(--ring) / .55) */
+  --font-sans: 'General Sans', ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: #0b1220;
+    color: #f3f5f7;
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+  /* every number is mono + tabular */
+  .num,
+  [data-num] {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  h1,
+  h2,
+  h3,
+  .display {
+    font-family: var(--font-display), var(--font-sans), sans-serif;
+  }
+  ::selection {
+    background: rgb(20 184 166 / 0.25);
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--ring) / 0.55);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
