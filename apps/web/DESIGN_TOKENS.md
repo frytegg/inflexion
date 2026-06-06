@@ -94,11 +94,11 @@ Focus ring: `rgba(20,184,166,0.45)`. Selection: teal @ 25% on navy.
 **Not Inter-everywhere.** A characterful display face + a real tabular mono for
 all numbers (financial data wants `tabular-nums`). Three roles; all self-hosted.
 
-| Role            | Proposed (free, self-hostable)                             | Alternates                                       | Use                                      |
-| --------------- | ---------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------- |
-| **Display**     | **Space Grotesk** (Google) — **LOCKED**   | Clash Display · Unbounded · Syne  | hero & section headlines only             |
-| **Sans / UI**   | **General Sans** (Fontshare) — **LOCKED** | Switzer · Hanken Grotesk          | body, UI, labels                          |
-| **Mono / data** | **IBM Plex Mono** (Google) — **LOCKED**   | JetBrains Mono · Spline Sans Mono | **all numbers**, addresses, code, ticker  |
+| Role            | Proposed (free, self-hostable)            | Alternates                        | Use                                      |
+| --------------- | ----------------------------------------- | --------------------------------- | ---------------------------------------- |
+| **Display**     | **Space Grotesk** (Google) — **LOCKED**   | Clash Display · Unbounded · Syne  | hero & section headlines only            |
+| **Sans / UI**   | **General Sans** (Fontshare) — **LOCKED** | Switzer · Hanken Grotesk          | body, UI, labels                         |
+| **Mono / data** | **IBM Plex Mono** (Google) — **LOCKED**   | JetBrains Mono · Spline Sans Mono | **all numbers**, addresses, code, ticker |
 
 > All three **locked** (2026-06-05). **Display = Space Grotesk** — its mathematical /
 > Space-Mono lineage fits the quant·terminal positioning, its numerals read precise
