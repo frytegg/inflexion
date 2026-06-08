@@ -155,7 +155,7 @@ Hairline **1px** everywhere; lean on `border.subtle` + a one-step `bg` lift for 
 
 Durations: `instant 100ms · fast 160ms · base 220ms · slow 320ms`.
 Easing: entrance `cubic-bezier(.16,1,.3,1)` (expo-out) · standard `cubic-bezier(.4,0,.2,1)`.
-Principles: subtle entrances (fade + 4–8px translate, never big slides); tasteful count-up on key stats; the **inflection dot** may pulse subtly as the one signature flourish; **always respect `prefers-reduced-motion`**. No prefab-looking animations.
+Principles: subtle entrances (fade + 4–8px translate, never big slides); tasteful count-up on key stats; the **inflection dot** may pulse subtly as the one signature flourish; **always respect `prefers-reduced-motion`**. Motion/WebGL libraries are fine — tune them to the tokens (e.g. the teal S-curve `FloatingLines` background) so they read on-brand, not prefab.
 
 ## 7. Iconography
 

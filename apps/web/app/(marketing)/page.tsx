@@ -1,10 +1,20 @@
-import { PagePlaceholder } from '@/components/page-placeholder'
+import { Hero } from '@/components/landing/hero'
+import { StatsStrip } from '@/components/landing/stats-strip'
+import { Pillars } from '@/components/landing/pillars'
+import { Guarantee } from '@/components/landing/guarantee'
+import { Doors } from '@/components/landing/doors'
+import { DataTeaser } from '@/components/landing/data-teaser'
 
+// hero → stats → pillars (how it works) → guarantee (the bridge) → doors (what you do) → data teaser
 export default function LandingPage() {
   return (
-    <PagePlaceholder
-      title="Hedge in-range impermanent loss."
-      subtitle="Pay a fixed premium, transfer the in-range IL risk of your Uniswap v3 position. Paid your realized IL at expiry — capped at MaxIL."
-    />
+    <>
+      <Hero />
+      <StatsStrip />
+      <Pillars />
+      <Guarantee />
+      <Doors />
+      <DataTeaser />
+    </>
   )
 }

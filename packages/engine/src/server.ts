@@ -118,6 +118,16 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
 
   const http = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
+    // CORS — the browser dApp (different origin) reads GET /quote (previewPremium)
+    // and publishes POST /quote (MM signing). Allow any origin; no credentials.
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'content-type')
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204
+      res.end()
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/health') {
       json(res, 200, {
         ok: true,
@@ -139,6 +149,42 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
         const input = (body.value ?? {}) as PreviewPingInput
         const result = telemetry.ingestPreview(input, now())
         json(res, result.ok ? 202 : 400, result)
+      })()
+      return
+    }
+    // Browser-friendly publish (the WS path stays for the mm-bot). Same verify +
+    // freshness + store as the WS handler; body is the wire envelope.
+    if (req.method === 'POST' && url.pathname === '/quote') {
+      void (async () => {
+        const body = await readJsonBody(req, 8192)
+        if (!body.ok) {
+          json(res, 400, { error: body.reason })
+          return
+        }
+        const msg = (body.value ?? {}) as { quote?: QuoteWire; signature?: `0x${string}` }
+        if (msg.quote === undefined || msg.signature === undefined) {
+          json(res, 400, { error: 'expected { quote, signature }' })
+          return
+        }
+        const env: QuoteEnvelope = { quote: decodeQuote(msg.quote), signature: msg.signature }
+        if (!isAddress(env.quote.mm)) {
+          json(res, 400, { error: 'bad mm address' })
+          return
+        }
+        if (!freshnessOk(env, now(), maxSkewS)) {
+          telemetry.logQuote(env.quote, false, now(), 'stale-or-far-validUntil')
+          json(res, 422, { rejected: true, reason: 'stale-or-far-validUntil' })
+          return
+        }
+        const ok = await verifyQuote(env, cfg.chainId, cfg.verifyingContract)
+        if (!ok) {
+          telemetry.logQuote(env.quote, false, now(), 'bad-signature')
+          json(res, 422, { rejected: true, reason: 'bad-signature' })
+          return
+        }
+        telemetry.logQuote(env.quote, true, now())
+        store.put(env, now())
+        json(res, 200, { ok: true, marketId: env.quote.marketId, loadBps: env.quote.loadBps })
       })()
       return
     }

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { Space_Grotesk, IBM_Plex_Mono } from 'next/font/google'
 import './globals.css'
+import '../components/menu/staggered-menu.css'
 import { Providers } from './providers'
 
 // Display (Space Grotesk) + Mono (IBM Plex Mono) self-hosted via next/font.

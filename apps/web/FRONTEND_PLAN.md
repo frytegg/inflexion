@@ -29,7 +29,7 @@
 
 **HARD CONSTRAINTS**
 
-- **No prefab "wow-effect" libraries** for structural/hero elements — **Aceternity UI, Magic UI, ReactBits, 21st.dev** and similar are banned (beams / animated-gradient text / 3D hover cards / animated-grid backgrounds = the generic vibe-coded look a technical judge spots instantly). Wow factor = **our data rendered beautifully.**
+- **External libraries are welcome** (three.js, ReactBits, motion libs, etc.) — they're how you build a natural, polished site, not a constraint to avoid. The bar is **craft + identity, not avoidance**: never ship a prefab component in its default look — recolor + reshape it to the brand (e.g. the `FloatingLines` WebGL background recolored to teal and reshaped from a sine wave into the inflection **S-curve**). The bespoke data-viz still carries the brand alongside them.
 - **Never touch** `settle` / `MaxIL` / `I1–I9` / `params.json` / `params.py`. The frontend is a read/write client only.
 - **In-range coverage must be explicit** on every risk surface (see CHANGE 2 below).
 - **Two-never-merged claims**, never blended, wherever risk is shown: (1) **LPs are always paid** — no bad debt in FULL, code-enforced; (2) **depositor / MM capital is NOT guaranteed** — they absorb crash losses up to MaxIL per position.
