@@ -8,9 +8,12 @@
  *     SEPARATE ERC-20 approve + UnderwriterVault.deposit/withdraw (the SDK exports
  *     the ABI + addresses but has no MmClient helper, so we call the documented
  *     on-chain fns directly via the wallet client — we do NOT invent a method).
- *  2. Geometry + pricing — mm.getPositionGeometry(tokenId, duration),
- *     mm.getMarketPricing(marketId, geometry), mm.getPoolLoadToBeat(marketId) →
- *     the POOL LOAD TO BEAT the MM must undercut (and ≤ maxLoadBps, I10).
+ *  2. The quote is PER-MARKET — set the load (below the pool's, ≤ maxLoadBps I10),
+ *     the MaxIL-ratio band (which positions you cover), and capacity. NO tokenId:
+ *     MaxIL is the unit of risk, so one firm quote covers ANY in-range position in
+ *     the market whose MaxIL/V0 ∈ [min, max] bps (InflexionCore checks this at fill).
+ *     mm.getPoolLoadToBeat + getMarketConfig (oracle anchor) drive it; an
+ *     illustrative premium uses a representative position.
  *  3. Build + SIGN a SignedQuote in the BROWSER — enforce I10 + below-pool BEFORE
  *     signing, then walletClient.signTypedData.
  *  4. Publish the envelope to the engine (NEXT_PUBLIC_ENGINE_URL) or show it.
@@ -312,8 +315,11 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
 
   // Inputs.
   const [marketId, setMarketId] = useState<Hex>(DEMO_MARKET_ID)
-  const [tokenId, setTokenId] = useState<string>(demo.lpPositionTokenId.toString())
   const [loadBps, setLoadBps] = useState<string>('')
+  // The MaxIL-ratio band — which positions this quote covers. A quote is per-MARKET,
+  // not per-NFT: it fills any in-range position whose MaxIL/V0 ∈ [min, max] bps.
+  const [minRatioBps, setMinRatioBps] = useState<string>('0')
+  const [maxRatioBps, setMaxRatioBps] = useState<string>('10000')
   const [priceBandBps, setPriceBandBps] = useState<string>('50')
   const [maxNotional, setMaxNotional] = useState<string>('')
   const [validitySecs, setValiditySecs] = useState<string>('10')
@@ -331,23 +337,38 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
   >({ kind: 'idle' })
 
   const market = findMarket(marketId)
-  const tokenIdBig = useMemo(() => {
-    try {
-      return tokenId.trim() === '' ? undefined : BigInt(tokenId.trim())
-    } catch {
-      return undefined
-    }
-  }, [tokenId])
+  // Market config → the oracleToken (the quotePrice anchor — per-MARKET, not per-NFT).
+  const marketConfig = useQuery({
+    queryKey: ['mm', 'config', marketId],
+    queryFn: () => sdk.mm.getMarketConfig(marketId),
+    enabled: market !== undefined,
+  })
+  const oracleToken = marketConfig.data?.oracleToken
 
-  // Geometry from the position (priceable envelope — render PendingNote when not).
+  // Live oracle price = the quotePrice the MM signs against (Fork-2 band anchor).
+  const oracle = useQuery({
+    queryKey: ['mm', 'oracle', oracleToken],
+    queryFn: () =>
+      sdk.publicClient.readContract({
+        address: core.oracleManager,
+        abi: oracleManagerAbi,
+        functionName: 'getPrice',
+        args: [oracleToken!],
+      }) as Promise<bigint>,
+    enabled: oracleToken !== undefined,
+    refetchInterval: 12_000,
+  })
+
+  // ILLUSTRATIVE pricing only — a representative in-range position (the seeded demo
+  // LP) priced at the selected duration. The QUOTE does NOT depend on this; the real
+  // premium is computed on-chain per the LP's own position at fill.
   const geometry = useQuery({
-    queryKey: ['mm', 'geometry', tokenIdBig?.toString(), market?.durationSeconds],
-    queryFn: () => sdk.mm.getPositionGeometry(tokenIdBig!, market!.durationSeconds),
-    enabled: tokenIdBig !== undefined && market !== undefined,
+    queryKey: ['mm', 'sampleGeo', market?.durationSeconds],
+    queryFn: () => sdk.mm.getPositionGeometry(demo.lpPositionTokenId, market!.durationSeconds),
+    enabled: market !== undefined,
   })
   const geo = geometry.data
 
-  // Pricing for the resolved geometry (fair value + the pool load to beat).
   const pricingGeo =
     geo?.priceable === true
       ? {
@@ -360,13 +381,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
       : undefined
 
   const pricing = useQuery({
-    queryKey: [
-      'mm',
-      'pricing',
-      marketId,
-      pricingGeo ? pricingGeo.maxIL.toString() : 'none',
-      pricingGeo?.aWad.toString(),
-    ],
+    queryKey: ['mm', 'samplePricing', marketId, pricingGeo?.aWad.toString() ?? 'none'],
     queryFn: () => sdk.mm.getMarketPricing(marketId, pricingGeo!),
     enabled: pricingGeo !== undefined,
   })
@@ -393,6 +408,8 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
   // Quote validation (mirror mm.signQuote guards) — gate the sign button.
   const loadNum = loadBps.trim() === '' ? NaN : Number(loadBps)
   const bandNum = priceBandBps.trim() === '' ? NaN : Number(priceBandBps)
+  const minRatioNum = minRatioBps.trim() === '' ? NaN : Number(minRatioBps)
+  const maxRatioNum = maxRatioBps.trim() === '' ? NaN : Number(maxRatioBps)
   const maxNotionalRaw = parseUsdc(maxNotional)
   const validNum = validitySecs.trim() === '' ? NaN : Number(validitySecs)
 
@@ -400,16 +417,24 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
   const loadInt = Number.isInteger(loadNum)
   const i10Ok = maxLoadBps === undefined || (loadInt && loadNum <= maxLoadBps)
   const belowPool = poolBps === undefined || (loadInt && loadNum < poolBps)
+  const ratioOk =
+    Number.isInteger(minRatioNum) &&
+    Number.isInteger(maxRatioNum) &&
+    minRatioNum >= 0 &&
+    maxRatioNum <= 10_000 &&
+    minRatioNum <= maxRatioNum
+  // Signing needs the oracle price (quotePrice) + valid load/band/ratio/capacity —
+  // NOT the illustrative sample pricing.
   const inputsOk =
     loadInt &&
     loadNum >= 0 &&
     Number.isInteger(bandNum) &&
     bandNum >= 0 &&
+    ratioOk &&
     Number.isFinite(validNum) &&
     validNum >= 5 &&
     maxNotionalRaw > 0n &&
-    geo?.priceable === true &&
-    pricing.data?.available === true
+    oracle.data !== undefined
 
   const canSign = inputsOk && i10Ok && belowPool && isConnected
 
@@ -421,8 +446,8 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
       setSignError('Connect a wallet to sign.')
       return
     }
-    if (geo?.priceable !== true || pricing.data?.available !== true) {
-      setSignError('Position is not priceable right now.')
+    if (oracleToken === undefined) {
+      setSignError('Market oracle not resolved yet — try again in a moment.')
       return
     }
     setSigning(true)
@@ -443,16 +468,13 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
         )
       }
 
-      // The oracle price the MM signs against (Fork-2 band anchor) = the live
-      // sqrtP0 squared in oracle units. The simplest correct anchor is the
-      // contract's oracle price; we re-derive it from the priced geometry's P0.
-      // quotePrice is a uint128 oracle price — use the same oracle the position
-      // was priced at (P0 in oracle decimals). We read it fresh from the oracle.
+      // quotePrice (Fork-2 band anchor) = the live oracle price for the MARKET's
+      // oracleToken — read fresh, position-independent.
       const oraclePrice = (await sdk.publicClient.readContract({
         address: core.oracleManager,
         abi: oracleManagerAbi,
         functionName: 'getPrice',
-        args: [geo.config.oracleToken],
+        args: [oracleToken],
       })) as bigint
 
       const now = Math.floor(Date.now() / 1000)
@@ -460,8 +482,8 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
         mm: sdk.walletClient.account!.address,
         marketId,
         loadBps: loadNum,
-        minMaxILRatioBps: 0,
-        maxMaxILRatioBps: 10_000,
+        minMaxILRatioBps: minRatioNum,
+        maxMaxILRatioBps: maxRatioNum,
         quotePrice: oraclePrice,
         priceBandBps: bandNum,
         model: 0, // FULL
@@ -548,17 +570,37 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
             </select>
           </Field>
 
-          <Field
-            label="LP position tokenId"
-            hint={`Default ${demo.lpPositionTokenId.toString()} (seeded demo position). Duration ${market ? fmtDuration(market.durationSeconds) : '—'} fixes the marketId + FVO duration.`}
-          >
-            <AmountInput
-              suffix="NFT"
-              value={tokenId}
-              onChange={(e) => setTokenId(e.target.value)}
-              placeholder="3218"
-            />
-          </Field>
+          <div className="rounded-md border border-line-subtle bg-base p-3">
+            <p className="text-body-sm text-fg-secondary">
+              A quote is <span className="text-fg">per-market</span>, not per-position — it fills{' '}
+              <span className="text-fg">any in-range position</span> whose MaxIL is within the band
+              below (MaxIL is the unit of risk), up to your capacity.{' '}
+              {market ? `Duration ${fmtDuration(market.durationSeconds)}.` : ''}
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-4">
+              <Field label="Min MaxIL ratio (bps)" hint="MaxIL/V0 lower bound">
+                <AmountInput
+                  suffix="bps"
+                  value={minRatioBps}
+                  onChange={(e) => setMinRatioBps(e.target.value)}
+                  placeholder="0"
+                />
+              </Field>
+              <Field label="Max MaxIL ratio (bps)" hint="10000 = cover all">
+                <AmountInput
+                  suffix="bps"
+                  value={maxRatioBps}
+                  onChange={(e) => setMaxRatioBps(e.target.value)}
+                  placeholder="10000"
+                />
+              </Field>
+            </div>
+            {!ratioOk && (minRatioBps.trim() !== '' || maxRatioBps.trim() !== '') && (
+              <p className="mt-2 text-body-sm text-loss">
+                Band must be integers with 0 ≤ min ≤ max ≤ 10000.
+              </p>
+            )}
+          </div>
 
           <div className="grid grid-cols-2 gap-4">
             <Field
@@ -684,14 +726,42 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
             )}
           </Card>
 
-          {/* Position pricing */}
+          {/* Oracle price — the quotePrice anchor (per-market, not per-NFT) */}
+          <Card>
+            <div className="flex items-center justify-between">
+              <span className="text-label uppercase text-fg-tertiary">
+                Oracle price — quotePrice anchor
+              </span>
+              <Badge tone="neutral">{market ? fmtDuration(market.durationSeconds) : '—'}</Badge>
+            </div>
+            {oracle.isLoading ? (
+              <Skeleton className="mt-2 h-8 w-40" />
+            ) : oracle.data === undefined ? (
+              <div className="mt-2">
+                <PendingNote>
+                  Oracle price not readable — it&apos;s the Fork-2 band anchor you sign against, so
+                  signing is blocked until it recovers.
+                </PendingNote>
+              </div>
+            ) : (
+              <>
+                <div className="num mt-1 text-mono-stat text-fg">
+                  ${(Number(oracle.data) / 1e8).toFixed(2)}
+                </div>
+                <p className="mt-1 text-body-sm text-fg-tertiary">
+                  LPs fill only while the live price stays within ±
+                  {Number.isFinite(bandNum) ? bandNum : '?'} bps of this (Fork-2 / I9).
+                </p>
+              </>
+            )}
+          </Card>
+
+          {/* Illustrative pricing — a representative position */}
           <Card>
             <span className="text-label uppercase text-fg-tertiary">
-              This position — fair value
+              Illustrative — a representative position
             </span>
-            {tokenIdBig === undefined ? (
-              <p className="mt-2 text-body-sm text-fg-tertiary">Enter a valid tokenId.</p>
-            ) : geometry.isLoading || pricing.isLoading ? (
+            {geometry.isLoading || pricing.isLoading ? (
               <Skeleton className="mt-2 h-24" />
             ) : geo?.priceable !== true ? (
               <div className="mt-2">
@@ -711,24 +781,27 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
             ) : (
               <div className="mt-3 grid grid-cols-2 gap-4">
                 <Stat
-                  label="MaxIL (cap = your locked collateral)"
+                  label="Sample MaxIL (representative)"
                   value={fmtUsd(geo.geometry.maxIL)}
                   accent="warn"
                 />
-                <Stat label="On-chain FairPremium" value={fmtUsd(pricing.data.fairPremium)} />
+                <Stat
+                  label="On-chain FairPremium (sample)"
+                  value={fmtUsd(pricing.data.fairPremium)}
+                />
                 <Stat
                   label="Pool premium (Path-A, to beat)"
                   value={fmtUsd(pricing.data.poolPremium)}
                   accent="teal"
                 />
                 <Stat
-                  label="Your est. premium"
+                  label="Est. premium @ your load (sample)"
                   value={
                     Number.isFinite(loadNum) && loadNum >= 0
                       ? fmtUsd(estPremium(pricing.data.fairPremium, loadNum, geo.geometry.maxIL))
                       : '—'
                   }
-                  sub={`fair × (1 + ${Number.isFinite(loadNum) ? loadNum : '?'} bps), capped at MaxIL`}
+                  sub={`fair × (1 + ${Number.isFinite(loadNum) ? loadNum : '?'} bps), capped at MaxIL · each LP priced from their own position`}
                 />
               </div>
             )}
@@ -737,7 +810,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
           {payoffGeometry && (
             <Card>
               <span className="text-label uppercase text-fg-tertiary">
-                Payoff you underwrite — capped at MaxIL
+                Representative payoff — capped at MaxIL
               </span>
               <PayoffChart geometry={payoffGeometry} className="mt-2 w-full" />
               <p className="mt-2 text-body-sm text-fg-tertiary">
