@@ -22,41 +22,85 @@ pnpm --filter @inflexion/backend start
 
 ## Environment
 
-| Var | Required | Purpose |
-| --- | --- | --- |
-| `PORT` | host-injected | Listen port (Railway sets this; default `8088`). |
-| `SUBGRAPH_URL` | recommended | Subgraph query endpoint. Absent → history/aggregate surfaces return typed `pending`. |
-| `ARBITRUM_SEPOLIA_RPC` | recommended | RPC for the live current-load surface (or `SEPOLIA_RPC`). Absent → live endpoints `pending`. |
-| `CHAIN_ID` | no | Default `421614` (Arbitrum Sepolia). |
-| `VERIFYING_CONTRACT` | no | InflexionCore address for EIP-712 quote verification. Default = the address registry. |
-| `DEMAND_LOG` | for Signal 4 | JSONL path on the shared volume, e.g. `/data/demand.jsonl`. |
-| `COMPETITION_LOG` | for Signal 2 | JSONL path on the shared volume, e.g. `/data/competition.jsonl`. |
-| `QUOTE_LOG` | no | Accepted-quote JSONL (optional). |
+| Var                    | Required      | Purpose                                                                                      |
+| ---------------------- | ------------- | -------------------------------------------------------------------------------------------- |
+| `PORT`                 | host-injected | Listen port (the host / compose sets this; default `8088`).                                  |
+| `BACKEND_DOMAIN`       | for VM deploy | TLS hostname for Caddy (your domain, or `<vm-ip>.sslip.io`).                                 |
+| `SUBGRAPH_URL`         | recommended   | Subgraph query endpoint. Absent → history/aggregate surfaces return typed `pending`.         |
+| `ARBITRUM_SEPOLIA_RPC` | recommended   | RPC for the live current-load surface (or `SEPOLIA_RPC`). Absent → live endpoints `pending`. |
+| `CHAIN_ID`             | no            | Default `421614` (Arbitrum Sepolia).                                                         |
+| `VERIFYING_CONTRACT`   | no            | InflexionCore address for EIP-712 quote verification. Default = the address registry.        |
+| `DEMAND_LOG`           | for Signal 4  | JSONL path on the shared volume, e.g. `/data/demand.jsonl`.                                  |
+| `COMPETITION_LOG`      | for Signal 2  | JSONL path on the shared volume, e.g. `/data/competition.jsonl`.                             |
+| `QUOTE_LOG`            | no            | Accepted-quote JSONL (optional).                                                             |
 
-## Deploy to Railway
+## Deploy on a VM (Oracle Cloud free tier) — recommended
 
-The repo ships [`railway.json`](../../railway.json) (Dockerfile builder → [`apps/backend/Dockerfile`](./Dockerfile), healthcheck `/health`).
+Always-on, $0, persistent telemetry. The stack is [`docker-compose.yml`](../../docker-compose.yml): the combined backend + a [Caddy](./Caddyfile) reverse proxy that obtains **automatic Let's Encrypt HTTPS** — required, because an HTTPS dApp cannot call a plain-HTTP backend (mixed content is blocked).
+
+### 1. Create the VM
+
+Oracle Cloud → Compute → Instances → **Create**. Image **Ubuntu 22.04**; shape **VM.Standard.A1.Flex** (Ampere/ARM, Always Free — e.g. 2 OCPU / 12 GB; fall back to **VM.Standard.E2.1.Micro** if A1 capacity is unavailable). Add your SSH key, create, note the **public IP**.
+
+### 2. Open ports 80 + 443 (two places — Oracle blocks both)
+
+- **VCN security list**: Networking → your VCN → the subnet's Security List → add Ingress rules for TCP **80** and **443** from `0.0.0.0/0`.
+- **On the VM** (Oracle's Ubuntu image ships restrictive iptables):
+  ```bash
+  sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+  sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+  sudo netfilter-persistent save
+  ```
+
+### 3. Install Docker
 
 ```bash
-npm i -g @railway/cli      # one-time
-railway login              # opens a browser
-railway init               # create/link a project (run from the repo root)
-railway up                 # build + deploy the Dockerfile
+ssh ubuntu@<PUBLIC_IP>
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker ubuntu && exit   # re-SSH so the docker group applies
 ```
 
-Then in the Railway service dashboard:
+### 4. Get the code + configure
 
-1. **Variables** — set `SUBGRAPH_URL`, `ARBITRUM_SEPOLIA_RPC`, `DEMAND_LOG=/data/demand.jsonl`, `COMPETITION_LOG=/data/competition.jsonl`. (`PORT` is injected; `CHAIN_ID`/`VERIFYING_CONTRACT` default correctly.)
-2. **Volume** — add a volume mounted at **`/data`** so the telemetry JSONL survives restarts and is shared between the API and engine halves.
-3. **Networking** — generate a public domain. The healthcheck hits `/health`.
+```bash
+ssh ubuntu@<PUBLIC_IP>
+git clone https://github.com/frytegg/inflexion.git && cd inflexion
+cp .env.example .env && nano .env
+```
+
+Set in `.env`:
+
+```
+SUBGRAPH_URL=https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest
+ARBITRUM_SEPOLIA_RPC=<your Arbitrum Sepolia RPC>
+# TLS hostname for Caddy — a domain pointed at the VM, OR sslip.io with no domain:
+BACKEND_DOMAIN=<PUBLIC_IP>.sslip.io
+```
+
+> **No domain?** `BACKEND_DOMAIN=<PUBLIC_IP>.sslip.io` resolves to your IP, so Caddy still gets a real certificate. With a domain, add an A record (e.g. `api.inflexion.xyz → <PUBLIC_IP>`) and use that hostname instead.
+
+### 5. Launch
+
+```bash
+docker compose up -d --build      # first build ~2-4 min on A1
+docker compose logs -f caddy      # watch the certificate get issued
+curl https://<BACKEND_DOMAIN>/health
+curl https://<BACKEND_DOMAIN>/engine/health
+```
+
+Update later with `git pull && docker compose up -d --build`.
+
+## Deploy to Railway (alternative, paid)
+
+The repo also ships [`railway.json`](../../railway.json) (Dockerfile builder, healthcheck `/health`): `railway up` from the repo root, set the same env vars, add a volume at `/data`, generate a domain. Railway removed its free tier (~$5/mo).
 
 ## After deploy — wire the dApp
 
-With the Railway domain `https://<app>.up.railway.app`, set in `apps/web/.env.local` (and the web host):
+With your backend origin `https://<BACKEND_DOMAIN>`, set in `apps/web/.env.local` (and the web host):
 
 ```
-NEXT_PUBLIC_API_URL=https://<app>.up.railway.app
-NEXT_PUBLIC_ENGINE_URL=https://<app>.up.railway.app/engine
+NEXT_PUBLIC_API_URL=https://<BACKEND_DOMAIN>
+NEXT_PUBLIC_ENGINE_URL=https://<BACKEND_DOMAIN>/engine
 ```
 
 The engine lives under the `/engine` prefix, so the SDK's `${engineBaseUrl}/quote` resolves to `…/engine/quote`. WebSocket quote-streaming (the `mm-bot`) is a local-dev tool and is not exposed by the hosted backend; browser MMs publish via `POST /engine/quote`.
