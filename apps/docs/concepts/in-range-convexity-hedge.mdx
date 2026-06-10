@@ -1,0 +1,210 @@
+---
+title: "In-range convexity hedge (not insurance)"
+description: "Why Inflexion hedges in-range, capped impermanent loss — entry requires Pa ≤ P0 ≤ Pb, payout is min(IL, MaxIL), and loss beyond the range is directional, not impermanent."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+The product label is precise and load-bearing: Inflexion sells an **in-range convexity hedge**, not "IL insurance." Every word does work.
+
+- **In-range** — entry requires the position to be in range ($P_a \le P_0 \le P_b$); out-of-range positions are rejected at creation.
+- **Convexity** — a Uniswap v3 LP holds a *concave* value function: they are short gamma, and impermanent loss is the realization of that short-gamma exposure. The hedge sells the LP the offsetting long-convexity leg.
+- **Hedge** — a collateralized derivative with a fixed maturity and an exact closed-form fair price, not actuarial mutualization.
+
+The payout is **capped at MaxIL**, and that cap is the single most important honest framing in the protocol. This page explains why the cap is the *right* product rather than a defect, why loss beyond the range is out of scope by design, and why "convexity hedge" — not "insurance" — is the only label that survives a sophisticated reader.
+
+<Note>
+This page is the conceptual home of the label. For the geometry that makes MaxIL the cap and the unit of risk, see [MaxIL](/concepts/maxil); for the closed-form fair price, see [Fair value](/concepts/fair-value); for the structural payout-≤-collateral argument, see [No bad debt](/concepts/no-bad-debt).
+</Note>
+
+## The payoff, in one line
+
+The protocol pays the LP, at expiry, from the underwriter's pre-locked collateral:
+
+$$
+\text{payout} \;=\; \min\big(\text{realized\_IL},\ \text{MaxIL}\big)
+$$
+
+where realized IL is the guarded difference between holding the entry basket and the live LP value (the `max(0, …)` is invariant **I3** — never an unchecked subtraction):
+
+$$
+\text{realized\_IL} \;=\; \max\big(0,\ V_{\text{hold}}(P_T) - V_{\text{lp}}(P_T)\big)
+$$
+
+and MaxIL is the **maximum in-range IL** of the specific position — pure geometry, frozen at creation:
+
+$$
+\text{MaxIL} \;=\; \max\big(\text{IL}(P_a),\ \text{IL}(P_b)\big)
+$$
+
+Three facts fall straight out of this and are repeated on every LP surface in the app:
+
+1. At entry, $P_T = P_0 \Rightarrow V_{\text{hold}} = V_{\text{lp}} \Rightarrow \text{realized\_IL} = 0$. No drift, no loss — and **no payout**. This is invariant **I4**: the LP never profits *from the swap*.
+2. While the price stays in range, the LP is paid back their realized IL exactly.
+3. Beyond the range, true IL keeps growing, but the payout is **flat at MaxIL** — that flat ceiling is the cap that makes the no-bad-debt guarantee hold by construction.
+
+## Entry requires Pa ≤ P0 ≤ Pb
+
+A position is only protectable if it is **in range at creation**:
+
+$$
+P_a \;\le\; P_0 \;\le\; P_b
+$$
+
+This is enforced at three layers, not assumed:
+
+- The Python reference raises `ValueError` if $P_0$ is out of range.
+- The on-chain Stylus pricer reverts `OutOfRange` when the normalized entry leaves the band — the gate is `a ≥ 1e18 || b ≤ 1e18`.
+- The app's `/protect` empty-state says it in plain language: *"Out-of-range positions are not protectable — entry requires Pa ≤ P0 ≤ Pb"*, and each position row carries an in-range / out-of-range / oracle-degraded badge.
+
+The requirement is both a **correctness** condition and a **product-honesty** condition.
+
+<Tabs>
+<Tab title="Why it's a correctness condition">
+
+The two results the product depends on only hold in range:
+
+- **The convexity proof.** $\text{IL}(P) = V_{\text{hold}}(P) - V_{\text{lp}}(P)$ is convex on $[P_a, P_b]$, so its maximum *while price stays in range* is attained at a boundary. The proof: $V_{\text{hold}}$ is affine in $P$; in range $V_{\text{lp}}(P) = L\big(2\sqrt{P} - \sqrt{P_a} - P/\sqrt{P_b}\big)$, so
+
+$$
+\frac{d^2 V_{\text{lp}}}{dP^2} \;=\; -\tfrac{1}{4}\,L\,P^{-3/2} \;<\; 0
+$$
+
+  ⇒ $V_{\text{lp}}$ is strictly concave ⇒ $\text{IL} = \text{affine} - \text{concave}$ is convex, and $\max(0, \text{IL})$ (a pointwise max of convex functions) is convex. A convex function on a compact interval attains its max at an endpoint. This holds for **any** entry, centered or not.
+- **The cap.** That boundary maximum *is* MaxIL — but only because the price is in range when the position is opened. An out-of-range entry has no well-defined in-range maximum to lock collateral against.
+
+</Tab>
+<Tab title="Why it's a honesty condition">
+
+The product is named for what it does: it hedges *in-range* IL. Accepting an already-out-of-range position would silently change the payoff the LP is buying — the cap math and the convexity proof would not describe their position. Rejecting it at creation keeps the label exactly true.
+
+</Tab>
+</Tabs>
+
+## Why loss beyond the range is directional, not impermanent — and out of scope
+
+This is the crux. Inside the range, an LP holds a price-dependent mix of both tokens, and the value function is concave:
+
+$$
+V_{\text{lp}}(P_T) \;=\;
+\begin{cases}
+L\,(1/\sqrt{P_a} - 1/\sqrt{P_b})\cdot P_T & P_T < P_a \quad(\text{fully token0, linear}) \\[4pt]
+L\,(2\sqrt{P_T} - P_T/\sqrt{P_b} - \sqrt{P_a}) & P_a \le P_T \le P_b \quad(\text{concave}) \\[4pt]
+L\,(\sqrt{P_b} - \sqrt{P_a}) & P_T > P_b \quad(\text{fully token1, constant})
+\end{cases}
+$$
+
+Look at the regime *above* $P_b$. The position has **fully rotated into token1**, so $V_{\text{lp}}$ is **constant** — it cannot grow with price. Meanwhile $V_{\text{hold}}$ is affine and keeps growing linearly with $P_T$. So the gap between them widens without bound: **absolute IL is unbounded beyond the range**.
+
+Two things follow.
+
+<Steps>
+<Step title="The unbounded tail is not 'impermanent' loss">
+At the range boundary the LP has fully rotated into one asset. From there on, the gap versus holding is **foregone spot upside** — a *directional* loss the LP would have taken on any one-sided position. It is no longer the *impermanent* loss the LP set out to hedge: the price-mixing concavity that produces impermanent loss only exists in range. Calling the beyond-range tail "impermanent loss" and promising to cover it would be mislabeling a directional bet.
+</Step>
+<Step title="Covering an unbounded tail cannot be trustless">
+Any product that promised to cover unbounded IL could not be fully collateralized — there is no finite collateral that bounds an unbounded payoff — so it could not be trustless. The cap at MaxIL is exactly what keeps the payoff finite, the collateral exact ($\text{collateral}_{\text{FULL}} = \text{MaxIL}$), and the settlement non-custodial.
+</Step>
+<Step title="LPs who want beyond-range protection re-cover after re-ranging">
+The honest path forward for an LP whose position drifts out of range is to re-range their Uniswap position and buy a fresh hedge against the new geometry. The protocol does not pretend a single capped claim covers an unbounded directional tail.
+</Step>
+</Steps>
+
+<Warning>
+**Limit → Why → Mitigation.** The hedge does **not** pay beyond-range IL.
+- **Why:** above $P_b$ (or below $P_a$) the LP is fully rotated into one asset, so the loss versus holding is *directional* (foregone spot), not the in-range *impermanent* loss the product hedges — and that tail is mathematically unbounded, so covering it could never be fully collateralized or trustless.
+- **Mitigation:** the cap at MaxIL keeps the payoff finite and the collateral exact; an LP who wants protection on a new range re-ranges their position and re-covers. Every LP surface shows the [payoff-with-cap chart](#the-payoff-with-cap-diagram) and the "in-range convexity hedge" label so the cap never surprises an LP at settlement.
+</Warning>
+
+## The payoff-with-cap diagram
+
+The shape of the payoff is the clearest single explanation of the product, and the app renders it on every LP and MM surface from the position's geometry $\{P_a, P_0, P_b\}$. The chart's visual language, axis by axis:
+
+| Element | What it shows |
+| --- | --- |
+| **Teal bold line** | the payout you actually receive, $\min(\text{IL}, \text{MaxIL})$ |
+| **Teal shaded area** | the covered region |
+| **Dashed red line** | the *true* IL, which keeps growing beyond the range |
+| **Red shaded area** | the uncovered region — true IL above the cap (zero in-range) |
+| **Amber dashed horizontal line** | the **MaxIL cap** — the hero of the chart |
+| **Vertical markers** $P_a$ / $P_0$ / $P_b$ | range edges and entry price |
+
+Read left to right: the teal payout line tracks the true IL exactly while the price is in range, then **detaches and runs flat along the amber MaxIL line** as the dashed-red true IL keeps climbing into the uncovered region. The point where teal leaves red is the moment the cap binds — the visual statement of $\min(\text{IL}, \text{MaxIL})$.
+
+The curve is deterministic v3 geometry, normalized to % of $V_0$:
+
+$$
+\text{IL}(P) = \max\big(\text{holdValue}(P) - \text{lpValue}(P),\ 0\big), \qquad
+\text{MaxIL} = \max\big(\text{IL}(P_a),\ \text{IL}(P_b)\big)
+$$
+
+The app's caption states the whole product in one sentence:
+
+> "You are paid your realized IL up to MaxIL (teal) while the price is in range. Beyond the range the true IL (dashed red) keeps growing but your payout is capped at the amber line — the cap that makes the no-bad-debt guarantee hold."
+
+<Tip>
+The asymmetry in the chart is real and predictable: even for a *ratio*-symmetric range the convex IL curve is larger toward the **upper** boundary, so the cap typically binds first on the up-move. In the canonical fixture $[80, 100, 125]$, $\text{MaxIL} = \text{IL}(P_b{=}125) > \text{IL}(P_a{=}80)$.
+</Tip>
+
+## The cap is the product, not a deductible
+
+A common misread is to treat MaxIL as an insurance deductible or coverage limit — a number chosen to bound the writer's exposure. It is neither. MaxIL is **pure geometry**: it is the exact maximum in-range IL of the specific position, computed at creation from $(P_a, P_b, L, P_0)$, frozen there, and *identical across all three durations*. Duration changes nothing about MaxIL — only [`fairRate`](/concepts/fair-value), the fraction of MaxIL the claim is worth, moves with $\sigma^2 T$.
+
+Because $\text{collateral}_{\text{FULL}} = \text{MaxIL}$ and $\text{covered\_payoff} = \min(\text{realized\_IL}, \text{MaxIL}) \le \text{MaxIL}$ by construction of the cap:
+
+$$
+\text{payout} \;\le\; \text{collateral} \;=\; \text{MaxIL}
+$$
+
+so FULL mode cannot produce bad debt under any price path — a structural invariant (**I1**, **I2**), provable by Foundry invariant tests and independent of the oracle and of whatever $\sigma$ was (verified `max_payout_frac = 1.000000` across a ±99% grid). The cap *is* the guarantee; remove it and the guarantee is gone. That is what "load-bearing" means here.
+
+MaxIL is therefore best read as a **collateral / normalization unit**, not a risk metric — two positions with identical MaxIL can carry very different risk profiles. The full treatment is on the [MaxIL page](/concepts/maxil).
+
+## Why "convexity hedge," not "IL insurance"
+
+The label is not branding — mislabeling the product as "insurance" is both a **demand risk** and a **reputational / regulatory risk** flagged in the external audit.
+
+<AccordionGroup>
+<Accordion title="It is not insurance — it is a collateralized derivative">
+Insurance implies actuarial mutualization of a pooled, open-ended risk, with the attendant regulatory ambiguity. Inflexion has none of that: it is a European, fixed-maturity, capped claim priced by an exact closed-form, settled trustlessly from pre-locked collateral. The cvAMM pays claims in **pre-locked USDC and mints nothing** — it is explicitly **not Bancor**, no token-inflation reinsurance, no death spiral.
+</Accordion>
+<Accordion title="The cap would mislead an insurance buyer — and a sophisticated LP discounts it">
+An "insurance" buyer reasonably expects to be made whole. But the payoff is truncated at MaxIL: the beyond-range tail is uncovered by design. A sophisticated LP who reads "insurance" and then sees the truncated tail will *discount* the product — and feel misled. Naming it a *convexity hedge* and showing the [payoff-with-cap chart](#the-payoff-with-cap-diagram) up front makes the truncation a feature the LP understands and prices, not a surprise at settlement.
+</Accordion>
+<Accordion title="'Convexity' is the precise risk being transferred">
+A v3 LP's value function is concave in price — they are **short gamma / short volatility**, and IL is the realization of that exposure. The academic anchor is the LVR literature: the AMM's adverse-selection cost (LVR) is the *theta* of the replicating short option (Milionis–Moallemi–Roughgarden 2022), and an IL-protection claim is statically replicable by a strip of vanilla options (Lipton–Lucic–Sepp 2025). Inflexion sells the LP the offsetting **long-convexity** leg, capped at the in-range maximum, and prices it as the exact risk-neutral expectation of that capped payoff — [the Φ-sum](/concepts/fair-value). "Convexity hedge" names exactly that transfer.
+</Accordion>
+<Accordion title="It is not GammaSwap and not Panoptic either">
+Not GammaSwap — that is perpetual vol trading needing active management. Not Panoptic — an options market for quants. On Inflexion the LP pays *one number* and the protocol computes everything else; the audience is the LP who wants certainty, including DAO / protocol-owned-liquidity treasuries that need predictable, reportable P&L.
+</Accordion>
+</AccordionGroup>
+
+## What is hedged (precise)
+
+The hedge covers **gross in-range IL accruing from creation onward**, not the LP's net P&L. All entry quantities ($P_0$, the entry token amounts, $L$) are snapshotted **at swap creation**, not at the LP's original mint. Two consequences:
+
+- Any IL the LP already bore *before* covering stays theirs — the hedge starts the clock at creation.
+- The LP keeps Uniswap **fee accrual** during custody, so the LP's total outcome is $\text{fees} - \text{IL} + \text{payout} - \text{premium}$, which *can* be net positive. That is correct, not a leak: invariant **I4** concerns the payout, which is $0$ whenever IL is $0$. The hedge is a hedge, not a lottery.
+
+Settlement uses the liquidity $L$ **stored at creation**, never re-read from the NFT — invariant **I6**, so an external `increaseLiquidity` on the custodied NFT cannot inflate the payout above MaxIL.
+
+## The honest guarantee
+
+<ClaimA />
+
+This is the LP-side claim only. It is a **separate** claim from the depositor / market-maker capital risk — never merge the two. For the underwriter side, see [tranches](/concepts/tranches) and the [no-bad-debt](/concepts/no-bad-debt) page; for the full settlement walkthrough, see the [lifecycle](/protocol/lifecycle).
+
+<CardGroup cols={2}>
+<Card title="MaxIL — cap and unit of risk" icon="ruler" href="/concepts/maxil">
+Why MaxIL is pure geometry, frozen at creation, and the unit that makes positions fungible to an underwriter.
+</Card>
+<Card title="Fair value — the Φ-sum" icon="function" href="/concepts/fair-value">
+The exact closed-form price of the capped, in-range claim, published on-chain.
+</Card>
+<Card title="No bad debt (FULL)" icon="shield-check" href="/concepts/no-bad-debt">
+How payout ≤ collateral = MaxIL holds by construction — and the full qualifying clause.
+</Card>
+<Card title="Protect your position" icon="umbrella" href="/app/protect">
+Buy an in-range hedge in the app: pick a market, preview the premium, read the payoff chart, settle at expiry.
+</Card>
+</CardGroup>

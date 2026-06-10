@@ -1,0 +1,505 @@
+---
+title: "Underwrite — compete as an MM"
+description: "The Path-B market-maker flow in the app: post collateral to the UnderwriterVault, then build and sign one PER-MARKET firm EIP-712 quote (no tokenId) — load below the pool, a MaxIL-ratio band, capacity — and publish it to the engine. Why MaxIL fungibility makes positions interchangeable to you."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The `/underwrite` page is the **Path-B market-maker rail** in the live app. It is where
+you, an MM, post collateral, build and **sign a firm EIP-712 quote**, and publish it to
+the off-chain engine so an LP can fill it on-chain. The whole flow rests on one idea: an
+MM quote is **per-market, never per-NFT** — because [MaxIL](/concepts/maxil) is the
+fungible unit of risk.
+
+You are doing the opposite of the [LP on `/protect`](/app/protect): they pay a fixed
+premium to shed in-range IL convexity; you collect that premium for taking it. You are
+**short convexity, paid the premium for it**, and your capital is at risk in a way the
+LP's is not.
+
+<Warning>
+**Your capital is NOT guaranteed. You are short convexity and paid the premium for
+it.** The no-bad-debt guarantee on [`/protect`](/app/protect) is for the protected LP —
+**not for you**. On a fill the protocol locks your own collateral at MaxIL and pays the
+LP `min(realized_IL, MaxIL)` from it at settlement. The page header states this
+verbatim; the full disclosure is at the bottom of this page. This is a **separate
+claim** from the LP guarantee — the two are never merged.
+</Warning>
+
+<CardGroup cols={2}>
+  <Card title="Path B — the MM rail" icon="signature" href="/protocol/path-b-mm">
+    The protocol-level reference: createSwap, the 13-field quote, the three protections.
+  </Card>
+  <Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why MaxIL fungibility is what makes your quote per-market, not per-position.
+  </Card>
+  <Card title="Quote signing in depth" icon="key" href="/integrate/quote-signing">
+    The EIP-712 domain, types, and the field-order rule that must match the typehash.
+  </Card>
+  <Card title="The MmClient SDK surface" icon="code" href="/sdk/mm-client">
+    Every read/write behind this page: pricing, pool-load-to-beat, sign, cancel.
+  </Card>
+</CardGroup>
+
+## Before you start — prerequisites
+
+<Steps>
+  <Step title="Connect a wallet on Arbitrum Sepolia (chainId 421614)">
+    Every write on the page is gated behind a `ConnectGate`; reads work immediately.
+    The live deployment is the 2026-06-05 full redeploy. Addresses load from the SDK,
+    never hardcoded — see [the deployment table](/reference/deployments).
+  </Step>
+  <Step title="Hold dUSDC — the numéraire collateral asset">
+    Collateral, premiums, V0, and MaxIL are all denominated in **dUSDC (6 decimals)**.
+    `1 dUSDC = 1_000_000n` raw. dWETH is the demo volatile token (18 dec); Chainlink
+    feeds are 8 dec; WAD (1e18) is used for load and σ_ref ratios. See
+    [decimals and units](/reference/decimals-units).
+  </Step>
+  <Step title="(Optional) Have the engine running">
+    With `NEXT_PUBLIC_ENGINE_URL` set, the page **publishes** your signed quote to the
+    relay (`POST /quote`). Without it, the page still **signs** in your browser and
+    renders the exact wire envelope you would hand the engine — it never crashes.
+    See [degradation](#engine-offline-you-still-sign).
+  </Step>
+</Steps>
+
+The page has three sections, top to bottom: **post collateral**, **build & sign a
+quote**, and **book + fills**.
+
+## Section 1 — Post collateral (UnderwriterVault)
+
+Your collateral lives in the per-MM **`UnderwriterVault`** — separate from the Path-A
+[`ConvexityVault`](/protocol/path-a-cvamm) that pooled depositors fund. A quote cannot
+be filled against collateral you have not posted: at fill the contract requires
+`availableBalance(mm) ≥ maxIL` of the position, else `MMUndercollateralised`.
+
+The `CollateralPanel` reads `mm.getMmCollateral(address)` every 12s and shows three
+numbers:
+
+| Field | Meaning |
+| --- | --- |
+| **Deposited** | total dUSDC you have posted |
+| **Locked** (amber) | $\sum \text{MaxIL}$ across your active fills — your committed collateral |
+| **Available to quote** (teal) | `deposited − locked` — what new quotes can draw on |
+
+This is [invariant I5](/security/invariants): `locked ≤ deposited`, by construction.
+Locked collateral is never re-routed; it stays instantly liquid to pay LPs at
+settlement.
+
+### Deposit is two transactions — and there is no SDK helper for it
+
+Collateral deposit/withdraw is a **separate, direct on-chain flow**. The SDK
+deliberately exposes the ABI + address but **no `MmClient` method for collateral** — it
+does not invent one — so the page calls the documented `UnderwriterVault` functions
+directly via the wallet client.
+
+<Steps>
+  <Step title="Approve (only if your allowance is short)">
+    ERC-20 `approve(UnderwriterVault, amount)` on dUSDC. The spender is the
+    **UnderwriterVault** — not InflexionCore (the LP-premium spender) and not the
+    ConvexityVault (the depositor spender). Three different spenders; this is the
+    recurring gotcha.
+  </Step>
+  <Step title="Deposit">
+    `UnderwriterVault.deposit(amount)`. A **Max** button fills your wallet balance.
+  </Step>
+</Steps>
+
+```ts UnderwriterVault deposit (direct, via wagmi walletClient)
+import { core, tokens } from '@inflexion/sdk'
+import { erc20Abi } from 'viem'
+
+const amount = 50_000_000_000n // 50,000 dUSDC, 6-dec raw
+
+// 1. Approve only if the current allowance is short.
+const allowance = await publicClient.readContract({
+  address: tokens.demoUsdc,
+  abi: erc20Abi,
+  functionName: 'allowance',
+  args: [account, core.underwriterVault], // spender == UnderwriterVault
+})
+if (allowance < amount) {
+  await walletClient.writeContract({
+    address: tokens.demoUsdc,
+    abi: erc20Abi,
+    functionName: 'approve',
+    args: [core.underwriterVault, amount],
+  })
+}
+
+// 2. Deposit into your per-MM vault.
+await walletClient.writeContract({
+  address: core.underwriterVault,
+  abi: underwriterVaultAbi, // exported from @inflexion/sdk
+  functionName: 'deposit',
+  args: [amount],
+})
+```
+
+**Withdraw** is a single tx — `UnderwriterVault.withdraw(amount)` — and only the
+**available** (un-locked) portion is withdrawable; the locked part is committed to open
+fills.
+
+<Warning>
+**Collateral must stay instantly liquid — never lock it elsewhere.**
+
+- **The rule:** the page's deposit hint says exactly this. It is a protocol invariant,
+  not a UI nicety.
+- **Why:** your locked collateral is the *only* source the LP is paid from at
+  settlement. If it were routed to a utilization-gated venue (Aave / Compound) it could
+  be un-redeemable at the exact moment it is needed, breaking the
+  [no-bad-debt guarantee](/concepts/no-bad-debt) the LP relies on.
+- **The path forward:** idle (un-locked) capital only may ever earn yield, and only via
+  instantly-redeemable wrappers (sDAI / tokenized T-bills). Locked collateral stays put.
+  See [collateral models](/protocol/collateral-models).
+</Warning>
+
+## Section 2 — Build & sign a firm quote (PER-MARKET, no tokenId)
+
+This is the conceptual heart of the page (`QuoteBuilder`). **A quote is per-market, not
+per-position.** You pick a market and express a single appetite; the quote then fills
+**any in-range position in that market** whose MaxIL/V0 ratio falls in your band, up to
+your capacity. The contract checks the band at fill.
+
+<Info>
+**There is no `tokenId` anywhere in a quote.** The `SignedQuote` struct carries 13
+fields and not one of them is a position id. This is the entire design, not an
+omission — see [why fungibility makes it per-market](#why-per-market-not-per-nft).
+</Info>
+
+### The inputs you set
+
+The builder takes six inputs:
+
+<ParamField path="Market" type="dropdown — one of 9">
+  Picks the `marketId` over all 9 markets (3 fee tiers × 3 durations) and sets the
+  `oracleToken` anchor your `quotePrice` is read against. One quote binds to exactly one
+  market.
+</ParamField>
+
+<ParamField path="Min / Max MaxIL ratio (bps)" type="0 → 10000">
+  Your **appetite band**: the MaxIL/V0 ratios you are willing to write. `10000` (=
+  100%) means "cover any ratio". This is *which positions you cover*, never a price
+  input.
+</ParamField>
+
+<ParamField path="Your load (bps)" type="≤ maxLoadBps AND < pool load" required>
+  Your markup over the on-chain `FairPremium`. It must satisfy **both** guards:
+  `loadBps ≤ maxLoadBps` ([I10](/security/invariants)) **and** strictly below the live
+  pool load, or your quote will never win the route.
+</ParamField>
+
+<ParamField path="Price band (bps)" type="25 → 500 on-chain">
+  The [Fork-2](/security/forks) band around your signed `quotePrice`. An LP can only
+  fill your quote while the live oracle price stays within ± this band of your anchor.
+  This is your firm-quote, no-last-look protection.
+</ParamField>
+
+<ParamField path="Max notional (V0)" type="uint128, numéraire raw">
+  Your capacity cap for this quote ([I7](/security/invariants)). The on-chain ledger
+  `consumedNotional[quoteId]` enforces it across every fill.
+</ParamField>
+
+<ParamField path="Valid for (s)" type="bound to now + [5,15]s on-chain">
+  The validity window. On-chain `secondsAhead` is bound to `[5s, 15s]` — a short leakage
+  window for a bearer signature.
+</ParamField>
+
+The premium an LP ultimately pays is **derived from your load over the published fair
+value** — you never stream a raw premium:
+
+$$
+\text{premium}_B \;=\; \left\lceil \text{FairPremium}\cdot\Bigl(1 + \tfrac{\text{loadBps}}{10^4}\Bigr) \right\rceil, \qquad \text{capped at MaxIL}
+$$
+
+where `FairPremium = fairRate · MaxIL` is the closed-form
+[Φ-sum](/math/fair-value-phi-sum) read on-chain, never reimplemented.
+
+### The live reference cards (right side)
+
+While you set inputs, four cards stream live state so you can price competitively:
+
+<AccordionGroup>
+  <Accordion title="Pool load to beat — the headline you must undercut" icon="gauge-high">
+    `mm.getPoolLoadToBeat(marketId)` every 8s. The bps load the always-on pool charges,
+    broken into **Base / Util skew / Disp skew**, with the regime badge. Copy: *"Your
+    load must be strictly below this and ≤ maxLoadBps (I10)"*. This number is
+    **geometry-free** — it is the pure pool floor, needing no position. See the
+    [load stack](/math/load-stack).
+  </Accordion>
+  <Accordion title="Oracle price — your quotePrice anchor" icon="anchor">
+    `OracleManager.getPrice(oracleToken)` every 12s — the Fork-2 band anchor you sign
+    against, position-independent. **Signing is blocked if it cannot be read** (a stale
+    feed / sequencer down): there is no anchor to sign, so the page refuses rather than
+    sign against a phantom price.
+  </Accordion>
+  <Accordion title="Illustrative pricing — a representative position only" icon="chart-line">
+    Uses the seeded demo LP (`tokenId 3218`) as a *representative* position via
+    `mm.getPositionGeometry` + `mm.getMarketPricing` to show a sample MaxIL, the on-chain
+    FairPremium, the pool premium, and your estimated premium at your load. The label is
+    explicit: **the quote does not depend on this** — each LP is priced from their own
+    position at fill.
+  </Accordion>
+  <Accordion title="Representative payoff chart — your bounded downside" icon="chart-area">
+    The same capped-payoff visual the LP sees, captioned: *"You pay the LP min(realized
+    IL, MaxIL) at expiry... the cap is what keeps your downside bounded"*. The amber
+    MaxIL line is the most you ever pay on any one fill.
+  </Accordion>
+</AccordionGroup>
+
+### Why per-market, not per-NFT {#why-per-market-not-per-nft}
+
+The absence of `tokenId` is the direct consequence of [MaxIL](/concepts/maxil) being
+the **fungible unit of risk**. Because MaxIL is pure geometry, frozen at creation,
+identical across durations, and L-independent in the fair-rate sense, every position in
+a market becomes **interchangeable to you as an underwriter**. You do not need to see a
+specific NFT to price it — you express one appetite, once, and the contract enforces it
+per-fill.
+
+So your quote carries a triple:
+
+$$
+\text{quote} \;=\; \bigl(\underbrace{\text{loadBps}}_{\text{price}},\; \underbrace{[\text{minMaxILRatioBps},\, \text{maxMaxILRatioBps}]}_{\text{appetite}},\; \underbrace{\text{maxNotionalV0}}_{\text{capacity}}\bigr)
+$$
+
+and **any** LP position in that market whose ratio falls in your band can fill it. The
+band is the only place the LP's specific geometry enters the gate, and the contract
+computes it **from the LP's own position**, not from your quote:
+
+$$
+\text{ratioBps} \;=\; \frac{\text{maxIL}\cdot 10^4}{V_0}, \qquad \text{require}\;\; \text{ratioBps} \in [\text{minMaxILRatioBps},\, \text{maxMaxILRatioBps}]
+$$
+
+<Tip>
+The MaxIL-ratio band is a **convenience appetite filter, not an adverse-selection
+fix**. Every v3 position parameter is public on-chain via `positions(tokenId)` — both
+rails read the exact geometry, so there is no information asymmetry to defend against.
+The band just lets you say "I only write 2%–7% MaxIL/V0 widths" once, and every
+conforming position is fungible to you. See [Path B in depth](/protocol/path-b-mm).
+</Tip>
+
+### Guard banners — you cannot sign a losing quote
+
+Before the Sign button activates, the builder shows two guard banners:
+
+- an **I10 banner** if `loadBps > maxLoadBps`;
+- a **"does not undercut the live pool" banner** if `loadBps >= poolBps` — *"A quote at
+  or above the pool floor will not win the route."*
+
+The Sign button is gated on `canSign` = valid inputs **AND** I10 OK **AND** below-pool
+**AND** wallet connected. This mirrors the same guards `mm.signQuote` enforces
+server-side.
+
+### Signing — browser EIP-712, no private key in the browser
+
+On click, the page does **not** trust the values you set a moment ago — it re-reads
+fresh state and re-enforces the guards right before signing:
+
+<Steps>
+  <Step title="Re-read & re-enforce I10 + below-pool">
+    Fetch fresh `maxLoadBps` and pool load, re-check both guards. A stale-tab quote that
+    has drifted above the pool is rejected at the last instant.
+  </Step>
+  <Step title="Read the fresh oracle price for quotePrice">
+    The signed `quotePrice` is the *current* oracle price, not a cached one. This is the
+    Fork-2 band anchor.
+  </Step>
+  <Step title="Build the SignedQuote">
+    `model = FULL (0)`, `partialRatioBps = 0`, a random `quoteId`, and a bitmap
+    `nonce = encodeNonce(word, bit)`. PARTIAL is enum-only and reverts — FULL is the
+    only mode in v1.
+  </Step>
+  <Step title="Sign with the connected wallet">
+    `walletClient.signTypedData` over the domain
+    `{ 'Inflexion', '1', 421614, core.inflexionCore }`, `SignedQuoteTypes`, primaryType
+    `SignedQuote`. No key ever touches the browser JS — your wallet signs.
+  </Step>
+</Steps>
+
+The 13-field struct order **must match `InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly**
+or the on-chain `createSwap` / `createSwapRouted` rejects the signature. The canonical
+browser pattern, mirroring what the page does:
+
+```ts browser quote signing (wagmi) — mirrors /underwrite
+import { SignedQuoteTypes, quoteDomain, core, CHAIN_ID, encodeNonce } from '@inflexion/sdk'
+
+// 1. Enforce I10 + below-pool BEFORE signing (same guards as mm.signQuote).
+const params = await mm.getLoadParams()
+if (quote.loadBps > params.maxLoadBps) throw new Error('i10-exceeded')
+
+const pool = await mm.getPoolLoadToBeat(quote.marketId)
+if (pool.available && quote.loadBps >= Number(pool.totalLoadBps)) {
+  throw new Error('not-below-pool') // a quote at/above the floor never wins the route
+}
+
+// 2. Read the FRESH oracle price as the Fork-2 band anchor.
+//    (the page reads OracleManager.getPrice(oracleToken) here)
+
+// 3. Build the PER-MARKET quote — note: NO tokenId.
+const quote = {
+  mm: account,
+  marketId,                                  // one of the 9 markets
+  loadBps: Number(pool.totalLoadBps) - 50,   // undercut the pool by 50 bps
+  minMaxILRatioBps: 0,
+  maxMaxILRatioBps: 10_000,                   // cover any MaxIL/V0 ratio
+  quotePrice: liveOraclePrice,                // bigint — the fresh oracle anchor
+  priceBandBps: 100,                          // ±1% Fork-2 band
+  model: 0,                                    // CollateralModel.FULL
+  partialRatioBps: 0,
+  maxNotionalV0: 1_000_000_000_000n,          // capacity (numéraire raw, V0 units)
+  validUntil: BigInt(Math.floor(Date.now() / 1000) + 8),
+  quoteId: ('0x' + crypto.randomUUID().replace(/-/g, '').padEnd(64, '0')) as `0x${string}`,
+  nonce: encodeNonce(0n, 0),                   // bitmap (word<<8)|bit — selective cancel
+}
+
+// 4. Sign with the connected wallet (EIP-712, no raw key in the browser).
+const signature = await walletClient.signTypedData({
+  account: walletClient.account,
+  domain: quoteDomain(CHAIN_ID, core.inflexionCore), // { 'Inflexion','1',421614, core }
+  types: SignedQuoteTypes,
+  primaryType: 'SignedQuote',
+  message: quote,                              // bigints for uint128 / uint64 / uint256
+})
+const envelope = { quote, signature }          // → publish to the engine, or hand to an LP
+```
+
+### Publish to the engine
+
+The signed envelope is POSTed to `${NEXT_PUBLIC_ENGINE_URL}/quote` as a `QuoteWire` —
+bigints serialized to decimal strings via `encodeQuote`. The signed-envelope card
+prints `loadBps`, band, `quotePrice`, `maxNotionalV0`, `validUntil` (local time), model,
+`quoteId`, and `nonce`.
+
+```bash publish a signed quote to the engine
+curl -X POST "$ENGINE_URL/quote" \
+  -H 'content-type: application/json' \
+  -d '{
+    "quote": {
+      "mm": "0x...",
+      "marketId": "0x67c4bee1...6479d69",
+      "loadBps": 850,
+      "minMaxILRatioBps": 0,
+      "maxMaxILRatioBps": 10000,
+      "quotePrice": "...",
+      "priceBandBps": 100,
+      "model": 0,
+      "partialRatioBps": 0,
+      "maxNotionalV0": "1000000000000",
+      "validUntil": "...",
+      "quoteId": "0x...",
+      "nonce": "0"
+    },
+    "signature": "0x..."
+  }'
+```
+
+### Engine offline — you still sign {#engine-offline-you-still-sign}
+
+<Warning>
+**If `NEXT_PUBLIC_ENGINE_URL` is unset, the quote cannot be published — but signing
+still works and nothing crashes.**
+
+- **Limit:** without the engine relay, the page cannot POST your quote to an LP-facing
+  book, so no one can discover and fill it through the app.
+- **Why:** Path B is the only rail that needs an off-chain quote book; Path A (the
+  pool) is signature-free and always-on, so the absence of the engine never affects an
+  LP's ability to get protection.
+- **Mitigation:** the page shows **"engine not configured"** and renders the **exact
+  wire envelope** you would hand the engine WS — or that an LP could pass directly to
+  `lp.buyProtection`. Because EIP-712 verification is on-chain, any LP holding your valid
+  signed quote can call `createSwap` directly, with no engine in the loop. The relay is a
+  convenience, never a trust dependency. See the [trust model](/security/trust-model).
+</Warning>
+
+## Section 3 — Book, fills, and cancel
+
+`BookAndFills` is your live position view.
+
+### Your book — active fills
+
+`mm.getBook(address)` every 15s shows **Exposure ($\sum V_0$)** and **Locked ($\sum
+\text{MaxIL}$ == your committed collateral, amber)**, plus a per-swap table of swap / V0
+/ MaxIL / premium / expiry. Discovery is an **on-chain swap scan** (no subgraph) — so
+aggregate exposure is exact, today.
+
+### Cancel quote nonces
+
+Paste space/comma-separated decimal nonces (`(word<<8)|bit`) and `mm.cancelNonces`
+**burns the bitmap bit so that quote can never fill again**. This is the on-chain
+backstop to the engine's cancel: even if the relay still has the bytes, a cancelled bit
+is dead on-chain instantly.
+
+```ts cancel one quote's nonce on-chain
+import { encodeNonce } from '@inflexion/sdk'
+
+// Cancel exactly the quote signed with nonce (word=0, bit=0) — never cancel-all.
+const txHash = await mm.cancelNonces([encodeNonce(0n, 0)])
+```
+
+### Recent fills — coarse attribution (and why)
+
+The `FillsFeed` (`mm.watchFills`) polls `SwapCreated` logs filtered by your `mm`
+address.
+
+<Warning>
+**Fill attribution is coarse today — you see *that* you filled, not *which quote*
+filled.**
+
+- **Limit:** the live `SwapCreated` event carries the `mm` address but **not** the
+  `quoteId` or `nonce`, so a fill cannot be joined back to a specific signed quote. The
+  badge in the UI says **"coarse"**.
+- **Why:** `isNonceUsed(mm, nonce)` is also set on *both* fill and cancel, so it cannot
+  by itself distinguish a fill from a cancellation.
+- **Mitigation / path forward:** the deploy **already emits** the precise `QuoteFilled`
+  event (`swapId, mm, quoteId, nonce, loadBps`) on-chain since block 274081134. Precise
+  per-quote attribution becomes available the moment the subgraph indexes it — it
+  degrades to a typed *pending* state in the meantime, never a fake number. Your
+  aggregate exposure and locked collateral are exact today regardless.
+</Warning>
+
+## Proven live on Path B
+
+The 2026-06-05 redeploy ran a real routed fill that **chose the MM**:
+
+- `createSwapRouted` (swap #2) saw the pool at **\$13.80** vs the MM at **\$8.93** (MM
+  `loadBps` 1000) and chose Path B because it strictly beat the pool.
+- MaxIL **\$3,215.65** was locked from the **MM's own `UnderwriterVault`** collateral.
+- At expiry: realized IL **\$245.66**, payout **\$245.66** — settled from the MM's
+  collateral, never protocol funds.
+
+This is the rail end to end: you win by undercutting the pool, your own collateral backs
+the fill, and the LP is paid from it.
+
+## The two separate claims
+
+The MM rail never changes which guarantee applies to whom. The LP-facing guarantee is
+enforced identically on both rails:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to you, the underwriter on Path B:
+
+<ClaimB />
+
+<Maturity />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Path B — the protocol reference" icon="signature" href="/protocol/path-b-mm">
+    createSwap, all 13 quote fields, capacity (I7), nonce replay defense.
+  </Card>
+  <Card title="Quote signing" icon="key" href="/integrate/quote-signing">
+    The exact EIP-712 domain, types, and typehash your signature must match.
+  </Card>
+  <Card title="Hedging your short convexity" icon="scale-balanced" href="/sdk/greeks-hedge">
+    Greeks + the three-leg hedge suggester — your residual-risk choice, not pool solvency.
+  </Card>
+  <Card title="Earn passively instead" icon="layer-group" href="/app/earn">
+    Underwrite via the pooled cvAMM (Path A) — signature-free, no quote book.
+  </Card>
+</CardGroup>

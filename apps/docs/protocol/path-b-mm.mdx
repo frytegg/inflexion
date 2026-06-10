@@ -1,0 +1,488 @@
+---
+title: "Path B — the market-maker rail"
+description: "createSwap in full: the 13-field firm EIP-712 SignedQuote, why it is per-market and never per-NFT, the three deterministic on-chain protections that replace last-look, on-chain capacity authority (I7), and Permit2-style bitmap-nonce replay defense."
+---
+
+Path B is the **firm signed-quote rail**: a market maker streams an EIP-712 (or
+EIP-1271 contract-signed) quote, posts collateral in its own `UnderwriterVault`, and
+an LP fills it directly on-chain via `createSwap`. It is the
+**ceiling of price** — an MM only ever wins flow by genuinely beating the always-on
+[cvAMM pool](/protocol/path-a-cvamm). It can never *degrade* the guarantee an LP
+already has from the pool.
+
+Two load-bearing reasons the MM rail exists at all:
+
+1. **Hedged MMs export short-gamma risk OUT of the system** to the global options
+   market (Deribit / Panoptic). A closed pool can only *relocate* risk; it cannot
+   *shrink* it. An MM that lays off its short-convexity exposure makes the whole
+   system carry less risk.
+2. **Forward-looking-vol MMs correct the pool's structural backward-looking bias.**
+   The cvAMM prices off realized `σ_ref`; an MM can price off implied / forward vol and
+   undercut the pool precisely when the pool is mispricing the future.
+
+This page is the deep reference for the rail: the entry point, the quote struct, the
+per-market fungibility model, the three protections that make it firm without
+last-look, and the two on-chain ledgers (capacity and nonce) that keep the off-chain
+quote book honest.
+
+<CardGroup cols={2}>
+  <Card title="The two rails, one core" icon="diagram-project" href="/concepts/two-rails">
+    How Path A and Path B feed one untouched settlement core.
+  </Card>
+  <Card title="Routing in depth" icon="route" href="/protocol/routing">
+    `createSwapRouted` — the cheaper of `{pool, MM}`, never reverting on a bad quote.
+  </Card>
+  <Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why MaxIL fungibility is what makes an MM quote per-market, not per-NFT.
+  </Card>
+  <Card title="Forks 1 & 2" icon="code-branch" href="/security/forks">
+    The audit forks the price band (I9) and liveness backstop (I8) resolve.
+  </Card>
+</CardGroup>
+
+## `createSwap` — the full signed-quote entry point
+
+`createSwap(quote, signature, tokenId, maxPremium)` is
+the one entry point where Path-B state mutates. It follows the same four-phase
+[CEI structure](/security/cei-reentrancy) as every create path: a READ prologue, a
+block of CHECKS, atomic EFFECTS, then external INTERACTIONS last.
+
+```solidity
+function createSwap(
+    SignedQuote calldata quote,
+    bytes      calldata signature,
+    uint256             tokenId,
+    uint256             maxPremium   // LP slippage guard
+) external returns (uint256 swapId);
+```
+
+### PHASE 1 — the shared READ prologue
+
+`createSwap` begins with `_prepareSwap`, the identical
+`view` prologue used by all three entry points. It establishes the *facts of the
+position* on-chain, so neither the LP nor the MM can lie about geometry or price:
+
+<Steps>
+  <Step title="Ownership">
+    `ownerOf(tokenId) == msg.sender` else `NotPositionOwner`.
+  </Step>
+  <Step title="Position read + marketId cross-check">
+    Read `positions(tokenId)`; derive `marketId` from the live `token0/token1/fee` and
+    the market's `durationSeconds`, require it equals the quote's `marketId` else
+    `MarketMismatch`. The LP cannot point a quote at the
+    wrong market.
+  </Step>
+  <Step title="Pa / Pb from ticks">
+    `sqrtPa` / `sqrtPb` come from `positions().tickLower/tickUpper` via
+    `TickMath.getSqrtRatioAtTick` — the LP cannot lie
+    about the range.
+  </Step>
+  <Step title="P0 pinned to Chainlink on-chain">
+    `oracle.getPrice(oracleToken)` sets `g.livePrice` — **never caller-supplied**.
+    This single read both pins `P0` and serves as the
+    anchor for the Path-B band check below, at **zero extra oracle cost**.
+  </Step>
+  <Step title="In-range gate">
+    `require Pa ≤ P0 ≤ Pb` else `PositionOutOfRange` —
+    the rule that makes this an [in-range convexity hedge](/concepts/in-range-convexity-hedge),
+    not insurance.
+  </Step>
+  <Step title="MaxIL, entry snapshot, V0">
+    `maxIL = ilMath.computeMaxIL(...)`; entry amounts `(a0, a1)` via
+    `SwapMath.entryAmounts`; `V0 = amount0InToken1(a0) + a1` in numeraire units.
+    `L` is captured here (`g.liquidity`) and stored at execution —
+    invariant [I6](/security/invariants).
+  </Step>
+</Steps>
+
+Then fair value is read once via `_fairPremium`: the
+geometry is converted to ratios $a = P_a/P_0$, $b = P_b/P_0$, the [VolOracle](/protocol/oracles)
+is poked (permissionless, no-op if too soon), and the
+[Stylus FairValueOracle](/math/fair-value-phi-sum) returns
+`(premium, fairRateWad, sigmaRefWad)`. This is the **single source of fair
+value** for the rail. Both rails — and the router — price off this one number.
+
+$$
+\text{FairPremium} = \text{fairRate}\cdot\text{MaxIL}, \qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\,\text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+Path B then derives its premium as a **load over the published fair value** — the
+quote can set the load, never the premium itself:
+
+$$
+\text{premium}_B = \left\lceil \text{FairPremium}\cdot\Bigl(1 + \tfrac{\text{loadBps}}{10^4}\Bigr) \right\rceil,
+\qquad \text{capped at MaxIL}
+$$
+
+The round-**up** ceiling closes the
+integer-division free-coverage edge.
+
+## The `SignedQuote` struct — all 13 fields
+
+The quote is a flat EIP-712 struct. Read each field
+together with what the contract does with it at fill — the struct is only meaningful
+alongside its on-chain enforcement.
+
+```solidity
+struct SignedQuote {
+    address mm;                 // 1  signer; collateral in UnderwriterVault (or EIP-1271 signer)
+    bytes32 marketId;           // 2  keccak(token0, token1, fee, durationSeconds) — PER-MARKET
+    uint16  loadBps;            // 3  load over on-chain FairPremium; premium = FairPremium·(1+loadBps/1e4)
+    uint16  minMaxILRatioBps;   // 4  per-market MaxIL/V0 band lower bound
+    uint16  maxMaxILRatioBps;   // 5  per-market MaxIL/V0 band upper bound
+    uint128 quotePrice;         // 6  oracle price the MM saw at signing — band-check anchor (Fork 2)
+    uint16  priceBandBps;       // 7  ± band around quotePrice; auto-voids on-chain if exceeded
+    uint8   model;              // 8  CollateralModel.FULL
+    uint16  partialRatioBps;    // 9  0 in FULL
+    uint128 maxNotionalV0;      // 10 capacity this quote may consume (in V0 units)
+    uint64  validUntil;         // 11 absolute expiry ts; secondsAhead band [5s, 15s]
+    bytes32 quoteId;            // 12 on-chain capacity + replay tracking key
+    uint256 nonce;             // 13 Permit2-style bitmap (word<<8 | bit): selective cancel
+    // bytes signature — passed alongside, EIP-712 (ECDSA or EIP-1271)
+}
+```
+
+<AccordionGroup>
+  <Accordion title="1. mm — the signer and collateral owner" icon="user-shield">
+    The address that signed the quote and whose `UnderwriterVault` balance backs it. At
+    fill the contract requires `underwriterVault.availableBalance(mm) ≥ maxIL` else
+    `MMUndercollateralised`, and locks `maxIL` from this
+    MM's pool. With EIP-1271 support, `mm` can be a **contract signer** — so a vault can
+    own its collateral directly with no keeper EOA.
+  </Accordion>
+  <Accordion title="2. marketId — PER-MARKET, the key to fungibility" icon="layer-group">
+    `keccak256(abi.encodePacked(token0, token1, fee, durationSeconds))`.
+    The quote binds to a **market**, not a position. For
+    ETH/USDC that is 3 fee tiers × 3 durations = **9 marketIds**, all underwritten by
+    one pool — and any MM quote targets exactly one of them. At fill, the position's
+    *actual* `(token0, token1, fee)` is cross-checked against this `marketId`
+    (`MarketMismatch`).
+  </Accordion>
+  <Accordion title="3. loadBps — the only price lever the MM holds" icon="sliders">
+    Basis points of load over the on-chain `FairPremium`. The contract requires
+    `loadBps ≤ maxLoadBps` else `LoadExceedsMax` — this
+    is [invariant I10](/security/invariants) on Path B. The MM sets a load over the
+    *published* fair value; it can never stream a raw premium. Overcharge is impossible
+    by code, not by trust.
+  </Accordion>
+  <Accordion title="4–5. minMaxILRatioBps / maxMaxILRatioBps — the per-market ratio band" icon="ruler-combined">
+    The MaxIL/V0 band this quote is willing to write, e.g. "2%–7% of V0". At fill the
+    contract computes the LP's own `ratioBps = maxIL·1e4/V0` and requires it lies in
+    `[min, max]` else `RatioOutOfBand`. This is a
+    **convenience filter**, never a pricing input — geometry is public, so it is not an
+    adverse-selection fix. See [below](#per-market-not-per-nft).
+  </Accordion>
+  <Accordion title="6–7. quotePrice / priceBandBps — the Fork-2 oracle band" icon="gauge">
+    `quotePrice` is the oracle price the MM saw at signing; `priceBandBps` is the ±
+    tolerance. At fill, `require absBps(P_live, quotePrice) ≤ priceBandBps` else
+    `PriceOutOfBand`. `priceBandBps` must itself lie in
+    `[PRICE_BAND_MIN_BPS = 25, PRICE_BAND_MAX_BPS = 500]` (`PriceBandOutOfProtocolRange`).
+    This is [invariant I9](/security/invariants) — the
+    [no-last-look protection](#the-three-deterministic-protections).
+  </Accordion>
+  <Accordion title="8–9. model / partialRatioBps — FULL only at launch" icon="lock">
+    `model` must be `CollateralModel.FULL` else `UnsupportedModel`;
+    `partialRatioBps` is `0` in FULL. PARTIAL exists in the
+    enum but reverts — it is [roadmap, gated on the quant](/protocol/collateral-models).
+  </Accordion>
+  <Accordion title="10. maxNotionalV0 — the capacity ceiling" icon="database">
+    The total V0 (position value, **not** collateral) this quote may ever consume. The
+    on-chain ledger `consumedNotional[quoteId]` enforces it across every fill — see
+    [capacity authority (I7)](#capacity-authority-i7).
+  </Accordion>
+  <Accordion title="11. validUntil — the short validity window" icon="clock">
+    Absolute expiry timestamp. Required `validUntil > now` (`QuoteExpired`) and
+    `secondsAhead ∈ [5s, 15s]` (`ValidityOutOfBand`;
+    bounds `VALIDITY_MIN_S=5`/`VALIDITY_MAX_S=15`, default 8s). Bounds the
+    leakage interval — one of the [three protections](#the-three-deterministic-protections).
+  </Accordion>
+  <Accordion title="12. quoteId — the capacity + replay key" icon="key">
+    The bytes32 key under which capacity (`consumedNotional[quoteId]`) is tracked. One
+    `quoteId` can fill repeatedly up to `maxNotionalV0`, then no more.
+  </Accordion>
+  <Accordion title="13. nonce — Permit2-style bitmap, selective cancel" icon="toggle-on">
+    A packed `word << 8 | bit`. The MM cancels exactly one quote by flipping exactly one
+    bit — never cancel-all. See [bitmap-nonce replay defense](#bitmap-nonce-replay-defense).
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+**There is NO `tokenId` in the quote.** This is not an omission — it is the entire
+design. The quote is per-market; the *fill* binds it to a specific NFT. The
+`SIGNED_QUOTE_TYPEHASH` was bumped for the `loadBps`
+schema, and verification moved from `ECDSA.recover` to OZ
+`SignatureChecker.isValidSignatureNow` to support **EIP-1271 contract signers**.
+</Note>
+
+## Per-market, not per-NFT {#per-market-not-per-nft}
+
+The absence of `tokenId` is the direct mechanical consequence of MaxIL being the
+**fungible unit of risk**. Because [MaxIL](/concepts/maxil) is pure geometry, frozen
+at creation, identical across durations, and L-independent in the fair-rate sense,
+positions become **interchangeable to an underwriter within a market**. An MM does not
+need to see your specific NFT to price you — it expresses a single appetite once and
+the contract enforces it per-fill.
+
+So an MM signs **one** quote per `marketId` carrying a triple:
+
+$$
+\text{quote} \;=\; \bigl(\underbrace{\text{loadBps}}_{\text{price}},\; \underbrace{[\text{minMaxILRatioBps},\, \text{maxMaxILRatioBps}]}_{\text{appetite}},\; \underbrace{\text{maxNotionalV0}}_{\text{capacity}}\bigr)
+$$
+
+and **any** LP position in that market whose ratio lies in the band can fill it. The
+band check is the only place the LP's specific geometry enters the Path-B gate, and
+it is computed *from the LP's own position*, not from the quote:
+
+$$
+\text{ratioBps} \;=\; \frac{\text{maxIL}\cdot 10^4}{V_0}, \qquad
+\text{require}\;\; \text{ratioBps} \in [\text{minMaxILRatioBps},\, \text{maxMaxILRatioBps}]
+$$
+
+else `RatioOutOfBand` (mirrored non-reverting in the router).
+
+<Tip>
+The contract computes `ratioBps` **from the LP's position, not from the quote** — the
+MM declares the band it is willing to write; the contract proves the LP's specific
+position falls inside it. The MM expresses "I write 2%–7% MaxIL/V0 positions" once,
+and every conforming position in the market is interchangeable to it. That is what
+"fungible to an underwriter" means in code.
+</Tip>
+
+<Warning>
+**The ratio band is a convenience filter, NOT an adverse-selection fix.**
+
+- **Limit:** an earlier design framing said "the LP knows the range, the MM does not,
+  so the MM quotes a band to avoid being picked off on geometry."
+- **Why that framing is void:** v3 position params (`token0/1`, `fee`, `tickLower/Upper`,
+  `liquidity`) are **public on-chain** via `positions(tokenId)`. Both rails read the
+  exact geometry and price the *specific* position; there is no information asymmetry to
+  defend against.
+- **What the band actually is:** an optional MM-side appetite filter ("I only write
+  these widths"). It survives as a convenience, never as a pricing input. The price is
+  the closed-form `FairPremium` times the MM's `loadBps`.
+</Warning>
+
+## The PHASE-2 checks, in order
+
+After the READ prologue, `createSwap` runs the full revert path before any state
+changes. In order:
+
+| # | Check | Revert | Invariant |
+|---|-------|--------|------|
+| 1 | `markets[quote.marketId].active` | — | — |
+| 2 | Signature valid (EIP-712 ECDSA **or** EIP-1271) | — | — |
+| 3 | `fairValueOracle` wired, `loadBps ≤ maxLoadBps` | `LoadExceedsMax` | I10 |
+| 4 | premium = `_pricePathB`, capped at MaxIL | — | — |
+| 5 | `model == FULL`; dust V0 / premium guards | `UnsupportedModel` | — |
+| 6 | `ratioBps ∈ [min, max]` | `RatioOutOfBand` | — |
+| 7 | `validUntil > now`; `secondsAhead ∈ [5s, 15s]` | `QuoteExpired` / `ValidityOutOfBand` | — |
+| 8 | `!isNonceUsed(mm, nonce)` | `NonceAlreadyUsed` | — |
+| 9 | `priceBandBps ∈ [25, 500]`; `absBps(P_live, quotePrice) ≤ priceBandBps` | `PriceBandOutOfProtocolRange` / `PriceOutOfBand` | I9 |
+| 10 | `consumedNotional[quoteId] + V0 ≤ maxNotionalV0` | `CapacityExceeded` | I7 |
+| 11 | `availableBalance(mm) ≥ maxIL` | `MMUndercollateralised` | — |
+| 12 | premium ≤ maxPremium | `PremiumExceedsSlippage` | — |
+
+Two protocol-wide dust floors apply to all create paths: `MIN_POSITION_V0 = $100` and
+`MIN_PREMIUM = $1`, blocking dust swaps that grief capacity
+and closing the integer-division free-coverage edge.
+
+## The three deterministic protections — firm quotes, no last-look {#the-three-deterministic-protections}
+
+A signed payload is a **bearer instrument**: once an MM signs it, the bytes survive in
+any hand that copied them, beyond the off-chain engine's cancel. When vol gaps the MM
+is short convexity and a searcher can submit the leaked bytes on-chain. The naive
+defense — "last look", where the MM rejects at settlement — undercuts trustlessness and
+*is itself the abuse pattern* auditors flag. So Inflexion has **no last-look path**.
+Instead, the MM is protected by **three deterministic on-chain
+mechanisms at fill, with zero MM discretion**:
+
+<Steps>
+  <Step title="Oracle-anchored price band (I9 / Fork 2)">
+    At fill the contract reads the live oracle once (the same read that pins `P0`,
+    `g.livePrice`) and requires `absBps(P_live, quote.quotePrice) ≤ priceBandBps`, else
+    `PriceOutOfBand`. The quote **auto-voids on-chain,
+    deterministically**, if the oracle has drifted beyond the band the MM chose. This
+    kills the dominant pickoff (gap-on-stale-quote). Bounds: `PRICE_BAND_MIN_BPS = 25`
+    (0.25%), `PRICE_BAND_MAX_BPS = 500` (5%), MM default 100 (1%). The MM is
+    exposed only to drifts *within* the band it priced for — never to gaps that blow
+    through it. See [price pinning](/security/price-pinning).
+  </Step>
+  <Step title="Short validity window">
+    `validUntil` must be `[5s, 15s]` ahead (default 8s) — `VALIDITY_MIN_S`/`VALIDITY_MAX_S`.
+    This bounds the leakage interval:
+    a leaked quote is only live for a handful of seconds. The band is the *primary*
+    defense; the clock is a secondary leakage-window control.
+  </Step>
+  <Step title="On-chain selective nonce invalidation">
+    A Permit2-style bitmap nonce lets the MM cancel exactly one quote by flipping exactly
+    one bit — never cancel-all (`cancelNonces`, `isNonceUsed`,
+    `_useNonce`). See [below](#bitmap-nonce-replay-defense).
+  </Step>
+</Steps>
+
+<Info>
+**Why deterministic = not last-look.** "Last look" means the MM has *discretion* to
+fade a fill after seeing it. Here every protection is a pure on-chain predicate
+evaluated at fill: same inputs, same outcome, no MM in the loop. The MM cannot reject a
+fill that passes; it cannot accept one that fails. Firmness and protection are both
+mechanical.
+</Info>
+
+**Acknowledged residuals** (not blockers): a *spot* band does not catch
+pure vol-only moves (IV jumps with little spot drift) — a small surface on crypto
+majors, mitigated by the short `validUntil`; within-band drift the MM bears (it chose
+the band); and oracle lag if Chainlink has not ticked (majors tick on 0.05% deviation).
+
+## Capacity authority — I7 {#capacity-authority-i7}
+
+The on-chain ledger is **authoritative over the off-chain engine**. A signed quote can
+fill repeatedly only up to its declared capacity, and concurrent submissions cannot
+over-consume it. The rule ([I7](/security/invariants)):
+
+$$
+\text{consumedNotional}[\text{quoteId}] + V_0 \;\le\; \text{maxNotionalV0}
+$$
+
+else `CapacityExceeded`. `maxNotionalV0` is denominated
+in **V0 (position value), not collateral**. The check-and-increment is
+**atomic in a single transaction, in PHASE-3 effects, before any external call** —
+`consumedNotional[quote.quoteId] += g.V0` in `_executePathB`. Because the
+increment happens in effects before the premium pull or NFT custody, two concurrent
+fills cannot both pass the capacity check and over-consume.
+
+<Warning>
+**The off-chain engine cannot over-fill a quote — the chain is the authority.**
+
+- **Limit:** the engine surfaces quotes and could, in principle, hand the same quote to
+  many takers at once, or keep serving a quote past its real capacity.
+- **Why it cannot over-fill:** capacity lives on-chain in `consumedNotional[quoteId]`,
+  checked and incremented atomically before any external call. The engine's view of
+  capacity is advisory; the chain's is binding.
+- **Mitigation (by construction):** the eleventh-hour fill that would breach
+  `maxNotionalV0` simply reverts `CapacityExceeded`. Capacity is an on-chain promise the
+  engine cannot overspend.
+</Warning>
+
+## Bitmap-nonce replay defense {#bitmap-nonce-replay-defense}
+
+A bearer quote must be revocable *selectively* — an MM that wants to pull one stale
+quote must not have to invalidate its entire book. Inflexion uses **Permit2-style
+bitmap nonces**: the `nonce` packs a word index and a bit position as `word << 8 | bit`.
+
+- **Check:** `!isNonceUsed(mm, nonce)` else `NonceAlreadyUsed`.
+- **Consume:** `_useNonce(mm, nonce)` flips the bit, atomically in PHASE-3 effects
+  alongside the capacity increment.
+- **Selective cancel:** `cancelNonces(uint256[])` flips a list of bits, so
+  the MM revokes exactly the quotes it wants — **never cancel-all**. A cancelled
+  bit can never fill, satisfying the second clause of I7.
+
+This is the on-chain backstop for the off-chain cancel: even if the engine has already
+dropped a quote from its book, the bytes are dead on-chain the instant the MM cancels
+the bit (or fills it once).
+
+## PHASE 3 + 4 — execution (`_executePathB`)
+
+`_executePathB` is the **only** place Path-B state
+mutates. Strict CEI: all effects, then all interactions.
+
+<Steps>
+  <Step title="EFFECTS — state, no external calls">
+    `consumedNotional[quoteId] += V0` (I7) → `_useNonce(mm, nonce)` →
+    `underwriterVault.lockCollateral(mm, maxIL)` → write
+    `SwapRecord{ mm: quote.mm, collateral: maxIL, liquidity: g.liquidity /* I6 */, ... }`.
+    The counterparty stored is `quote.mm`, so settle later dispatches to the MM's vault.
+  </Step>
+  <Step title="INTERACTIONS — external, last">
+    Pull premium USDC → take the NFT into `ILVault` → **premium split: 99% to the MM, 1%
+    to the treasury** (no tranche split on Path B) → emit `SwapCreated` +
+    `QuoteFilled` + the `SwapPriced` event.
+  </Step>
+</Steps>
+
+The MM's collateral lives in its own per-MM [`UnderwriterVault`](/protocol/vaults),
+where the standing invariant is [I5](/security/invariants): `locked[mm] ≤ deposited[mm]`
+by construction. At settle the MM keeps
+`collateral − payout` and the LP receives `payout` from the MM's own pool — never
+protocol funds.
+
+<Note>
+**The settlement core does not branch on the rail.** `settle`
+infers Path B purely from the stored counterparty (`s.mm != address(convexityVault)`)
+and dispatches the payout from `UnderwriterVault.releaseAndDistribute`. The
+`min(IL, MaxIL)` cap, the MaxIL formula, and I1–I9 are **identical** to Path A. See
+[the lifecycle](/protocol/lifecycle).
+</Note>
+
+## How the router uses a Path-B quote without ever reverting
+
+`createSwapRouted` ([routing](/protocol/routing)) does **not** call the reverting
+`createSwap` gate. It calls `_quoteUsableAndPremiumB` —
+a **`view` mirror** of every check above that returns `(false, 0)` instead of
+reverting. It reads only (`isNonceUsed`, `consumedNotional`, `availableBalance`, the
+signature via STATICCALL) and **never mutates a nonce, capacity, or lock**, so an
+unchosen quote leaves **zero trace** (I7 preserved). An MM wins only if `usableB &&
+premiumB < premiumA` — a strict beat; a tie resolves to the pool. A bad quote falls
+back to the always-on pool and never reverts the LP's transaction.
+
+## The trust model — what the engine cannot do
+
+Path B needs an off-chain quote book (Path A does not). The engine's power is strictly
+bounded ([trust model](/security/trust-model)):
+
+| The engine CAN | The engine CANNOT |
+|---|---|
+| Censor / reorder Path-B quotes (liveness) | **Steal funds** — settle is against the MM's own collateral |
+| Pick which signed quotes to surface | **Forge quotes** — every quote is MM-signed (EIP-712 / EIP-1271) |
+| Drop quotes from its book | **Force a stale quote** — `validUntil` + on-chain nonce + the I9 band |
+| | **Over-fill a quote** — capacity is on-chain and atomic (I7) |
+| | **Censor Path A at all** — Path A needs no engine |
+
+The escape hatch: because EIP-712 verification is on-chain, **any LP holding a valid
+signed quote can call `createSwap` directly**, bypassing the engine entirely. A
+censoring operator simply loses that flow. A decentralization roadmap (Arbitrum Orbit
+chain hosting the quote book on-chain) is the clean long-term answer.
+
+## Proven live on Path B
+
+The 2026-06-05 redeploy ran a real routed fill that **chose the MM**:
+
+- `createSwapRouted` (swap #2) saw `premiumA_cvamm $13.80` vs `premiumB_mm $8.93` (MM
+  `loadBps` 1000) and **chose Path B** because it strictly beat the pool.
+- MaxIL **\$3,215.65** was locked from the **MM's own `UnderwriterVault` collateral**.
+- At expiry: realized IL **\$245.66**, payout **\$245.66** — settled from the MM's
+  collateral, not protocol funds.
+
+This demonstrates the rail end to end: the MM won by beating the pool, its own
+collateral backed the fill, and the LP was paid from it.
+
+## The two separate claims
+
+The MM rail does not change which guarantees apply. The settlement core enforces the
+LP-facing guarantee identically for both rails:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to the underwriter — on Path B, the market
+maker:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The cvAMM rail" icon="layer-group" href="/protocol/path-a-cvamm">
+    Path A — the pooled, signature-free underwriter and floor of liquidity.
+  </Card>
+  <Card title="Routing in depth" icon="route" href="/protocol/routing">
+    `createSwapRouted` and the non-reverting `view` mirror, step by step.
+  </Card>
+  <Card title="Quote signing" icon="signature" href="/integrate/quote-signing">
+    How an MM constructs and signs an EIP-712 `SignedQuote`.
+  </Card>
+  <Card title="The invariants" icon="shield-halved" href="/security/invariants">
+    I5 (vault solvency), I7 (capacity authority), I9 (band), I10 (price cap).
+  </Card>
+</CardGroup>

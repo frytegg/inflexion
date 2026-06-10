@@ -1,0 +1,385 @@
+---
+title: "marketId derivation & parity"
+description: "The tight-packed keccak join key that ties contract, SDK, and subgraph together — its 47-byte pre-image, the uint32 sign-safety subtlety, and the three-way test-pinned parity."
+---
+
+`marketId` is the single join key that ties **on-chain contract ⇄ SDK ⇄ subgraph**
+together. It identifies a tradeable market — a `(token0, token1, fee, duration)`
+tuple — and it is what lets a `Swap` row (which stores no marketId) be joined back
+to its `Market` directory entry. Because three independent implementations in three
+different languages all reconstruct it, its byte layout is **load-bearing**: a
+one-byte width drift in any of them silently corrupts every join.
+
+This page documents the exact pre-image, the one non-obvious correctness subtlety
+(`uint32` sign-extension), and the three-way parity tests that freeze all of it to
+a live on-chain ground truth.
+
+<Note>
+A market is a `(token0, token1, fee, duration)` tuple, not a single position.
+Because [MaxIL](/concepts/maxil) makes positions **fungible within a market**, the
+marketId is per-market — an MM quotes a whole market, never a single NFT. See
+[two rails](/concepts/two-rails) and [the markets model](/protocol/markets).
+</Note>
+
+## The canonical formula
+
+$$
+\texttt{marketId} = \mathrm{keccak256}\!\Big(\texttt{abi.encodePacked}(\,\text{token0},\ \text{token1},\ \text{fee},\ \text{durationSeconds}\,)\Big)
+$$
+
+with on-chain types `(address, address, uint24, uint32)` and `token0 < token1` by
+address (so for the demo pair `token0 = dWETH`, `token1 = dUSDC`, the numéraire).
+
+The key word is **`abi.encodePacked`**: this is **tight** packing — no 32-byte ABI
+word padding. Each operand contributes exactly its on-chain width in big-endian
+bytes:
+
+| Field | On-chain type | Bytes |
+| --- | --- | --- |
+| `token0` | `address` | 20 |
+| `token1` | `address` | 20 |
+| `fee` | `uint24` | 3 |
+| `durationSeconds` | `uint32` | 4 |
+| **Pre-image total** | | **47** |
+
+That **47-byte** pre-image is the whole game. If any implementation pads an operand
+to 32 bytes — for example by reaching for an ABI encoder that pads by default — the
+bytes shift and the keccak digest changes entirely. The contract registers a market
+under one id; the SDK and subgraph then compute a *different* id and find nothing to
+join to.
+
+<Warning>
+**Limit → Why → Mitigation.** The pre-image has no self-describing structure (it is
+raw concatenated bytes), so a width mistake produces a *valid-looking but wrong*
+32-byte hash — failure is silent, not a revert. **Why it matters:** a wrong id
+doesn't error, it just joins to nothing, so the Swap↔Market link goes quietly
+empty. **Mitigation:** the width contract is pinned by [three-way parity
+tests](#the-three-way-test-pinned-parity) — including an explicit
+`packed.length == 47` assertion on-chain — so any drift fails CI before it ships.
+</Warning>
+
+### Why duration is in the id
+
+The duration is baked into the id on purpose. The same position geometry
+`(token0, token1, fee)` yields a **different marketId per duration**, and therefore
+a different price — the cvAMM publishes three prices (7d / 30d / 90d) for the same
+[MaxIL](/concepts/maxil), because all of the vol/time dependence lives in
+[fairRate](/concepts/fair-value), an S-curve in $\sigma_{\text{ref}}^2 \cdot T$.
+MaxIL itself is duration-independent; the marketId is what
+separates the three term points.
+
+## The three implementations, side by side
+
+All three build the identical 47-byte tight-packed pre-image and keccak it. The
+only difference is the encoding primitive each language reaches for.
+
+<CodeGroup>
+
+```solidity InflexionCore — the ground truth
+// registerMarket (and re-derived at _prepareSwap, _marketForSwap, _marketIdForSwap)
+bytes32 marketId = keccak256(
+    abi.encodePacked(
+        cfg.token0,          // address  → 20 bytes
+        cfg.token1,          // address  → 20 bytes
+        cfg.fee,             // uint24   → 3 bytes
+        cfg.durationSeconds  // uint32   → 4 bytes
+    )
+);
+```
+
+```typescript SDK — computeMarketId
+import { encodePacked, keccak256, type Hex } from 'viem'
+
+/** The exact keccak256(abi.encodePacked(...)) the contract uses at registration. */
+export function computeMarketId(
+  token0: `0x${string}`,
+  token1: `0x${string}`,
+  fee: number,
+  durationSeconds: number,
+): Hex {
+  return keccak256(
+    encodePacked(
+      ['address', 'address', 'uint24', 'uint32'],
+      [token0, token1, fee, durationSeconds],
+    ),
+  )
+}
+```
+
+```typescript Subgraph — deriveMarketId (AssemblyScript)
+// NOT ethereum.encode — that ABI-pads every operand to 32 bytes and would
+// produce a different, non-matching hash. We concat raw big-endian bytes.
+export function deriveMarketId(
+  token0: Address,
+  token1: Address,
+  fee: i32,
+  durationSeconds: i32,
+): Bytes {
+  let packed = changetype<ByteArray>(token0)       // Address is already a 20-byte ByteArray
+    .concat(changetype<ByteArray>(token1))
+    .concat(uintBytesBE(fee, 3))                    // uint24 → 3 big-endian bytes
+    .concat(uintBytesBE(durationSeconds, 4))        // uint32 → 4 big-endian bytes
+  return changetype<Bytes>(crypto.keccak256(packed))
+}
+```
+
+</CodeGroup>
+
+The subtlety is in the AssemblyScript port. The Graph's `ethereum.encode` is the
+obvious tool — and it is **wrong here**, because it ABI-pads every operand to 32
+bytes. The subgraph instead hand-rolls a fixed-width
+big-endian byte slice, `uintBytesBE`, and concatenates raw bytes at the on-chain
+widths (20 / 20 / 3 / 4). Viem's `encodePacked` does the tight packing natively, so
+the SDK side is a direct call; AssemblyScript has no such primitive, hence the
+hand-rolled helper.
+
+```typescript Subgraph — uintBytesBE
+function uintBytesBE(value: i64, width: i32): ByteArray {
+  const out = new ByteArray(width)
+  for (let i = 0; i < width; i++) {
+    // Most-significant byte first; & 0xff isolates exactly one byte.
+    out[i] = u8((value >> ((width - 1 - i) * 8)) & 0xff)
+  }
+  return out
+}
+```
+
+## The `uint32` sign-safety subtlety
+
+This is the one place the AssemblyScript port could quietly diverge, and the helper
+is written specifically to defeat it.
+
+`durationSeconds` is a `uint32` on-chain — its full domain is $[0, 2^{32})$. But
+AssemblyScript has no unsigned 32-bit type in this path: the value arrives as an
+`i32` after `BigInt.toI32()`. A duration $\ge 2^{31}$ (about 68 years — outside any
+real market, but inside the type's domain) therefore arrives **negative**, and when
+it widens to `i64` for the shift it **sign-extends**: the high bits fill with ones.
+
+A naive byte extraction would then write those phantom sign bits into the pre-image
+and produce a hash that does not match the contract's `uint32` packing.
+
+`uintBytesBE` is immune by construction:
+
+<Steps>
+<Step title="Only the low `width` bytes are emitted">
+The loop runs exactly `width` times (4 for a `uint32`), writing only bytes at
+shift offsets $0 \ldots (\text{width}-1)\cdot 8$ — i.e. only the low 32 bits.
+</Step>
+<Step title="`& 0xff` masks each byte independently">
+Every extracted byte is masked with `& 0xff`, isolating exactly 8 bits regardless
+of the sign of `value`.
+</Step>
+<Step title="The sign bits live *above* `width` and are never written">
+Sign-extension only contaminates bits at position $\ge 32$. Those are never read by
+the loop and never masked into the output. So the 4-byte `uint32` pre-image stays
+**bit-for-bit correct across the entire on-chain domain**, negative-looking i32 or
+not.
+</Step>
+</Steps>
+
+<Tip>
+The same masking logic makes the `uint24` fee slice (`width = 3`) correct too: only
+the low 3 bytes are written, so a fee value never bleeds extra bytes into the
+pre-image. The width contract — 20 / 20 / 3 / 4 — is enforced by the call sites
+`uintBytesBE(fee, 3)` and `uintBytesBE(durationSeconds, 4)`.
+</Tip>
+
+## The three-way, test-pinned parity
+
+The 47-byte pre-image must stay identical across the **contract**, the **SDK**
+`computeMarketId`, and the **subgraph** `deriveMarketId`. That identity is not left
+to vigilance — it is frozen by two parity test suites that both pin to **live
+Arbitrum Sepolia marketIds** read from the on-chain address registry.
+
+| Side | Test suite | What it pins |
+| --- | --- | --- |
+| **On-chain** | Contract parity test | `abi.encodePacked` layout + `packed.length == 47` |
+| **SDK / width contract** | SDK parity test | `computeMarketId` == live marketId == hand-built tight pack |
+
+Both files assert the same two vectors:
+
+| Vector | Inputs | Pinned marketId |
+| --- | --- | --- |
+| **fee-500 / 7d** | dWETH, dUSDC, fee `500`, `604800`s | `0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69` |
+| **fee-500 / 300s** | dWETH, dUSDC, fee `500`, `300`s | `0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2` |
+
+The 7d vector is the [demo market](/reference/markets-grid) (`marketId_fee500_7d`
+in the registry); the 300s vector is the short lifecycle market used for the live
+create→settle proof. Pinning to addresses straight from the deployment registry
+means the tests fail the moment a field width drifts away from the deployed ground
+truth.
+
+<CodeGroup>
+
+```solidity Contract parity test — on-chain side
+// Demo pair: dWETH < dUSDC ⇒ token0 = dWETH.
+address internal constant DEMO_WETH = 0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D;
+address internal constant DEMO_USDC = 0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d;
+uint24  internal constant FEE       = 500;
+
+function test_marketId_fee500_7d_matchesLiveDeployment() public pure {
+    bytes32 id = keccak256(abi.encodePacked(DEMO_WETH, DEMO_USDC, FEE, uint32(604_800)));
+    assertEq(id, bytes32(0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69));
+}
+
+// Guard the pre-image WIDTH itself: 20 + 20 + 3 + 4 = 47 (no ABI padding).
+function test_packedPreimage_is47Bytes() public pure {
+    bytes memory packed = abi.encodePacked(DEMO_WETH, DEMO_USDC, FEE, uint32(604_800));
+    assertEq(packed.length, 47);
+}
+```
+
+```typescript SDK parity test — SDK side
+it('fee-500 / 7d (604800s) matches the seeded demo marketId', () => {
+  const got = computeMarketId(tokens.demoWeth, tokens.demoUsdc, demo.poolFee, 604800)
+  expect(got.toLowerCase()).toBe(demo.marketId_fee500_7d.toLowerCase())
+})
+
+it('computeMarketId equals a hand-built tight-packed (20+20+3+4) keccak', () => {
+  // Independent re-derivation of the exact pre-image the subgraph helper builds,
+  // proving computeMarketId is plain abi.encodePacked tight packing (no padding).
+  const manual = keccak256(
+    encodePacked(
+      ['address', 'address', 'uint24', 'uint32'],
+      [tokens.demoWeth, tokens.demoUsdc, demo.poolFee, 604800],
+    ),
+  )
+  expect(computeMarketId(tokens.demoWeth, tokens.demoUsdc, demo.poolFee, 604800)).toBe(manual)
+})
+```
+
+</CodeGroup>
+
+The subgraph's `deriveMarketId` is the third corner of the triangle: it has no
+separate test file, but it is held to the same ground truth by *construction* — its
+hand-rolled 20/20/3/4 tight packing must reproduce the exact pre-image the other two
+sides pin. The on-chain `packed.length == 47` assertion and
+the SDK's "hand-built tight-packed keccak" check together freeze the width contract
+the subgraph relies on. Any field-width change that breaks the match fails the
+on-chain and SDK tests, which is the early-warning that the subgraph would
+otherwise have diverged.
+
+<Note>
+The `0x67c4…9d69` demo marketId appears in three places that must agree: the
+deployment registry, the two parity test suites above, and every GraphQL query
+against the [subgraph](/integrate/subgraph). It is the
+canonical example id used throughout these docs.
+</Note>
+
+## How the subgraph recovers the marketId from a `SwapCreated`
+
+The marketId derivation is not just a registration concern — it is exercised on
+**every fill**, because the on-chain `SwapRecord` deliberately carries **no
+marketId** to stay compact. Both the SDK and the subgraph must reconstruct it from
+the swap's stored fields.
+
+The subgraph does this inside `handleSwapCreated`:
+
+<Steps>
+<Step title="Decode the position geometry">
+`eth_call` to `NonfungiblePositionManager.positions(tokenId)` to recover
+`(token0, token1, fee)` — three of the four pre-image fields.
+</Step>
+<Step title="Recover the duration">
+`eth_call` to `InflexionCore.swaps(swapId)` for `expiry` and `createdAt`, then
+`durationSeconds = expiry − createdAt` — the fourth field.
+</Step>
+<Step title="Derive the id">
+Call `deriveMarketId(token0, token1, fee, durationSeconds)`, **reusing the NPM
+contract bind** rather than re-binding.
+</Step>
+</Steps>
+
+Both reads must succeed — the geometry decode *and* the swap-record read — because
+all four fields are required for the keccak. Each
+`eth_call` uses the `try_*` pattern so a revert degrades the field gracefully (the
+marketId stays unrecovered, `durationSeconds` stays null) instead of failing the
+whole handler.
+
+The [SDK does the equivalent](/sdk/data-client) in `resolveMarket`: read
+`NPM.positions(tokenId)` for `(token0, token1, fee)`, compute
+`durationSeconds = Number(expiry − createdAt)`, call `computeMarketId`, then read
+back `markets(marketId)` to get the full config.
+
+```typescript resolveMarket — recover the market for a swapId
+const pos = await client.readContract({
+  address: npmAddress, abi: npmAbi, functionName: 'positions', args: [swap.tokenId],
+})
+const token0 = pos[2]
+const token1 = pos[3]
+const fee = pos[4]
+const durationSeconds = Number(swap.expiry - swap.createdAt)
+const marketId = computeMarketId(token0, token1, fee, durationSeconds)
+// → markets(marketId) for the full MarketConfig
+```
+
+This is why marketId parity is *operationally* load-bearing, not just at
+registration: every per-fill data row in the SDK and the subgraph re-derives the id
+to join the `Swap` to its `Market`. A divergence wouldn't just orphan one market —
+it would orphan **every fill**.
+
+## Querying by marketId
+
+Once derived, the marketId is the `Market.id` (its hex string) and the `where`
+filter for every per-market query. See the full surface in
+[the subgraph integration page](/integrate/subgraph).
+
+```graphql Market directory + swaps, keyed by marketId
+query MarketSwaps {
+  market(id: "0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69") {
+    fee
+    durationSeconds
+    active
+    cvammEnabled
+    totalSwaps
+    pathBFills
+    swaps(orderBy: createdAtTimestamp, orderDirection: desc, first: 50) {
+      id
+      path            # POOL_A | MM_B | UNKNOWN
+      mm              # ConvexityVault on Path A, MM EOA on Path B
+      v0
+      maxIL
+      premium
+      cappedAtMaxIL
+      mmLoadBps       # non-null only on Path B
+      poolLoadWad
+      spreadWad       # poolLoad − mmLoad(WAD); non-null only on a Path-B win
+    }
+  }
+}
+```
+
+<Warning>
+**Limit → Why → Mitigation.** The subgraph deploy is **pending** until the Studio
+slug `inflexion-arb-sepolia` is created. **Why:** the rich moat events
+(`QuoteFilled`, `SwapPriced`) are coded but only began firing at the 2026-06-05
+full-fresh redeploy, so the dataset genesis is the redeploy block `274081134` —
+indexing from there avoids scanning blocks that
+emit no moat data. **Mitigation:** the schema and manifest are finalised and the
+start block is known, so the indexer is ready to go the moment the slug exists;
+until then the SDK and API degrade history to a **typed `pending` state**, never an
+error.
+</Warning>
+
+<Maturity />
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
+    The full entity catalogue, the event-order fix, and the query surfaces that all
+    join on marketId.
+  </Card>
+  <Card title="Decimals & units" icon="ruler" href="/reference/decimals-units">
+    The numéraire conventions — dUSDC 6-dec, dWETH 18, feeds 8, WAD 1e18 — that
+    every value crossing this boundary obeys.
+  </Card>
+  <Card title="The markets model" icon="layer-group" href="/protocol/markets">
+    Why a market is a (pair, fee, duration) tuple and why MaxIL makes positions
+    fungible within one.
+  </Card>
+  <Card title="Deployments" icon="server" href="/reference/deployments">
+    The live Arbitrum Sepolia registry — the single source of truth the parity
+    tests pin against.
+  </Card>
+</CardGroup>

@@ -1,0 +1,293 @@
+---
+title: "DepositorClient — underwrite the pool"
+description: "The typed surface for passive/active cvAMM underwriting: vault-state and position reads, deposit / requestWithdrawal / withdraw / rebalance, the staged-write WriteResult pattern, and the junior-first-loss waterfall — all carrying capital-not-guaranteed (Claim B)."
+---
+
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+`DepositorClient` is the SDK surface for the **pooled cvAMM underwriter — Path A**. It is how a depositor supplies USDC to the [`ConvexityVault`](/protocol/vaults), reads the live state of the pool and their own position, and moves capital between tranches. Every state and yield read it returns carries `capitalNotGuaranteed: true` — because, unlike the LP, **the depositor is the one taking the risk**.
+
+<CardGroup cols={2}>
+  <Card title="Reads are graceful" icon="shield-halved">
+    Vault state, position, regime, and σ_ref reads return a typed `Degraded<T>` envelope (`{ available:false, reason }`) instead of throwing when the RPC or the vol oracle is unavailable.
+  </Card>
+  <Card title="Writes never crash at construction" icon="pen-to-square">
+    With no `walletClient`, deposits/withdrawals return `WriteResult { status:'deferred-no-wallet' }` carrying the unsigned tx for an external signer — they do not throw.
+  </Card>
+</CardGroup>
+
+<Note>
+**Which claim this surface carries.** `DepositorClient` carries **Claim B** (`DEPOSITOR_CLAIM_B`): depositor capital is **not** guaranteed. The LP's no-bad-debt guarantee (Claim A) lives only on the [LP surface](/sdk/lp-client). The two are **never merged** — see [no-bad-debt](/concepts/no-bad-debt) for why they are strictly separate claims.
+</Note>
+
+---
+
+## Defaults and addresses
+
+The client wires its three contract handles from the SDK's address registry — **never hardcoded**:
+
+| Default | Address symbol | Role |
+| --- | --- | --- |
+| `vaultAddress` | `core.convexityVault` | the pooled dual-tranche underwriter (deposit/withdraw target) |
+| `usdcAddress` | `tokens.demoUsdc` | the **numéraire — 6 decimals** (every `amount`, `assets`, locked figure) |
+| `sigmaToken` | `tokens.demoWeth` | the token whose σ_ref drives the regime band |
+
+You construct it through the one-call factory; it is exposed as `sdk.depositor`:
+
+```ts
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient }) // walletClient optional
+const dep = sdk.depositor
+```
+
+<Warning>
+**Decimals are load-bearing.** dUSDC is **6 decimals**, so `10,000 dUSDC = 10_000_000_000n` raw. Every `amount`, `assets`, and locked figure on this surface is a **6-dec raw `bigint`**; share counts are also raw `bigint`. Ratios (`utilWad`, `concWad`, the load components, `sigmaRefWad`) are **WAD = 1e18**. Mixing the two is the single most common integration bug — see [addresses & units](/sdk/addresses-units) and [decimals & units](/reference/decimals-units).
+</Warning>
+
+---
+
+## Method reference
+
+| Method | Args | Returns | R/W | Contract fn(s) | Degradation |
+| --- | --- | --- | --- | --- | --- |
+| `getLoadParams` | — | `LoadParams` (cached) | R | Core `loadParams` | — |
+| `getVaultState` | `opts?{marketIds?}` | `Degraded<VaultState>` | R | ConvexityVault `inventory` / `seniorAssets` / `juniorAssets` / `lockedByMarket`, VolOracle `sigmaRef` | `no-rpc` / `vol-uninitialized` |
+| `getPosition` | `owner` | `Degraded<DepositorPosition>` | R | ConvexityVault `senior/juniorBalanceOf` / `senior/juniorWithdraw` / `convertToAssets` | `no-rpc` |
+| `convertToAssets` | `tranche, shares` | `bigint` | R | ConvexityVault `convertToAssets` | returns `0n` for 0 shares |
+| `getWithdrawalCooldown` | — | `bigint` (seconds) | R | ConvexityVault `withdrawalCooldown` | — |
+| `getRegime` | — | `{available, regime, sigmaRefWad} \| {available:false}` | R | VolOracle `sigmaRef`, Core `loadParams` | `vol-uninitialized` |
+| `watchUtilization` | `thresholdWad, handlers{onTick?,onThreshold?,onError?}, opts?{intervalMs?}` | `() => void` (stop) | R (poll, 12s default) | ConvexityVault `utilizationWad` | swallows poll errors → `onError` |
+| `buildDeposit` | `tranche, amount` | `{to,data,value}` | build | ConvexityVault `deposit` calldata | — |
+| `buildApprove` | `amount` | `{to,data,value}` | build | ERC20 `approve(vault, amount)` calldata | — |
+| `deposit` | `tranche, amount, opts?{autoApprove?,owner?}` | `WriteResult` | **W** | ERC20 `allowance` / `approve` (if autoApprove), ConvexityVault `deposit` | `deferred-no-wallet` / `error` |
+| `requestWithdrawal` | `tranche, shares` | `WriteResult` | **W** | ConvexityVault `requestWithdrawal` | `deferred-no-wallet` |
+| `withdraw` | `tranche` | `WriteResult` | **W** | ConvexityVault `withdraw` (reverts `JuniorBelowLocked` → `error` result) | surfaces revert as `error` |
+| `rebalance` | `from, to, shares` | `StagedWrite` | **W** (staged) | step 1 `requestWithdrawal` (sent); steps 2 `withdraw` + 3 `deposit` returned **unsent** across the cooldown | — |
+
+`Tranche = 'senior' | 'junior'`; `TRANCHE_ENUM = { senior: 0, junior: 1 }`.
+
+---
+
+## Vault-state and position reads
+
+These are the read surfaces a depositor dashboard is built on. Both the pool-wide view and the per-depositor view carry Claim B explicitly, so the disclosure is always available wherever the numbers are rendered.
+
+### `getVaultState` — the pool, in one read
+
+`getVaultState(opts?)` returns `Degraded<VaultState>`. On `available: true` it carries the full accounting plus the [load](/math/load-stack) decomposition:
+
+<ResponseField name="VaultState" type="Degraded<VaultState>">
+  <Expandable title="fields">
+    <ResponseField name="totalAssets" type="bigint">`seniorAssets + juniorAssets`, the pool's total USDC backing (6-dec raw).</ResponseField>
+    <ResponseField name="seniorAssets / juniorAssets" type="bigint">USDC backing each tranche.</ResponseField>
+    <ResponseField name="totalLocked" type="bigint">USDC committed to live swaps across all markets.</ResponseField>
+    <ResponseField name="freeAssets" type="bigint">`totalAssets − totalLocked` — headroom for a new lock.</ResponseField>
+    <ResponseField name="utilWad" type="bigint">utilization `u = totalLocked / totalAssets`, WAD.</ResponseField>
+    <ResponseField name="concWad" type="bigint">normalized coverage HHI (concentration), WAD.</ResponseField>
+    <ResponseField name="baseLoadWad / utilSkewWad / dispSkewWad / totalLoadWad" type="bigint">the live [load stack](/math/load-stack) decomposition, WAD.</ResponseField>
+    <ResponseField name="lockedByMarket" type="Record<bytes32, bigint>">a **colour map** keyed by the **caller-supplied** `marketIds` only.</ResponseField>
+    <ResponseField name="sigmaRefWad" type="bigint">the σ_ref EWMA for the regime band, WAD.</ResponseField>
+    <ResponseField name="regime" type="Regime">`'low' | 'normal' | 'high'` — which base-load band is active.</ResponseField>
+    <ResponseField name="instYieldWad" type="bigint | undefined">instantaneous yield — **subgraph-only**, omitted live.</ResponseField>
+    <ResponseField name="capitalNotGuaranteed" type="true">always set — render the disclosure wherever this is shown.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+**Limit:** `lockedByMarket` is **not a per-market collateral budget.** **Why:** free collateral in the cvAMM is **pool-wide fungible** — one USDC pool backs all 9 marketIds of a pair, so there is no per-market allotment to read. **Mitigation:** treat `lockedByMarket` as **concentration colour (HHI)** keyed by the marketIds *you* pass in `opts.marketIds`, not as a spendable balance. The single authoritative headroom figure is the pool-wide `freeAssets` (further bounded by the senior-protection invariant below). See [the markets model](/protocol/markets).
+</Warning>
+
+<Info>
+`instYieldWad` is omitted on the live deployment because instantaneous yield needs event history to compute. Until [the subgraph](/integrate/subgraph) indexes the pool, it is simply absent from `VaultState` — a typed omission, never a fabricated number. Realized yield lands as a `pending` state on [`data.getNavHistory`](/sdk/data-client). <Maturity />
+</Info>
+
+### `getPosition` — one depositor's stake
+
+`getPosition(owner)` returns `Degraded<DepositorPosition>`. It reads each tranche's `balanceOf` (shares), the **redeemable assets** via the vault's own `senior/juniorWithdraw` / `convertToAssets`, so the asset figures are the vault's conversion, not an off-chain estimate:
+
+```ts
+const me = await dep.getPosition(owner)
+if (me.available) {
+  console.log(me.seniorShares, me.seniorAssets) // shares (raw) + redeemable USDC (6-dec)
+  console.log(me.juniorShares, me.juniorAssets)
+  console.log(me.capitalNotGuaranteed)          // true — Claim B
+}
+```
+
+### `getRegime` and `getWithdrawalCooldown`
+
+- `getRegime()` → `{ available, regime, sigmaRefWad }` or `{ available:false }` (degrades `vol-uninitialized` if σ_ref is unset). The regime is which [σ_ref](/math/sigma-ref) band is live, and therefore which `baseLoad` the pool is charging.
+- `getWithdrawalCooldown()` → cooldown in **seconds** (`bigint`). This is the run-defense delay between `requestWithdrawal` and `withdraw`, sourced from the calibrated risk-parameter set — never hardcoded.
+
+### `watchUtilization` — a polling subscription
+
+`watchUtilization(thresholdWad, handlers, opts?)` polls `ConvexityVault.utilizationWad` (default every 12s) and fires `onTick(uWad)` each poll, `onThreshold(uWad)` when `u` crosses the threshold you pass, and `onError` on a failed poll — it **swallows** poll errors into `onError` rather than tearing down the loop. It returns an unsubscribe `() => void`. This is the depositor-side mirror of the MM's `streamPoolLoadToBeat`: as utilization climbs, the [`util_skew`](/math/load-stack) rises and the pool earns more per unit of marginal capacity — but it is also approaching the senior-protection ceiling.
+
+---
+
+## The staged-write pattern: `WriteResult`
+
+Every write on this surface returns a **`WriteResult`** rather than throwing or returning a bare hash:
+
+```ts
+type WriteResult = {
+  tx: { to: Hex; data: Hex; value: bigint } // the (built) transaction, always present
+  txHash?: Hex                               // present only when status === 'sent'
+  status: 'sent' | 'deferred-no-wallet' | 'error'
+  detail?: string                            // human-readable reason on 'error' / 'deferred'
+}
+```
+
+This is the deliberate counterpart to the LP/MM surfaces, which **throw** a clear error when called without a signer. The depositor surface instead **degrades the write**:
+
+<AccordionGroup>
+  <Accordion title="status: 'sent' — the write went out">
+    A signer was available, the tx was submitted, and `txHash` is populated. `tx` still carries the calldata that was sent.
+  </Accordion>
+  <Accordion title="status: 'deferred-no-wallet' — no signer, here is the tx">
+    There is no `walletClient`. Instead of throwing, the client returns the **unsigned `tx`** (`{ to, data, value }`) so an external signer — a wagmi `walletClient`, a multisig, a backend relayer — can submit it. This is what makes the surface safe to call from a read-only browser session before the user connects a wallet.
+  </Accordion>
+  <Accordion title="status: 'error' — the call reverted or pre-flight failed">
+    A signer was present but the call failed — most importantly, `withdraw` surfaces an on-chain `JuniorBelowLocked` revert as `{ status:'error', detail }` instead of throwing, so a UI can show the reason without a try/catch.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+For an explicit "build now, sign later" flow, skip the write methods entirely and use `buildDeposit(tranche, amount)` / `buildApprove(amount)`. They return the same `{ to, data, value }` shape with no signer involved — ideal for wagmi `useSendTransaction` or constructing a multicall. See [degradation & guardrails](/sdk/degradation).
+</Tip>
+
+### `rebalance` — a staged write across the cooldown
+
+`rebalance(from, to, shares)` is special: a tranche move is **not atomic**, because withdrawing is cooldown-gated. It returns a `StagedWrite`:
+
+<Steps>
+  <Step title="Step 1 — requestWithdrawal (SENT)">
+    The client immediately submits `requestWithdrawal(from, shares)`. Its `WriteResult` is returned with `status:'sent'` (or deferred if no wallet).
+  </Step>
+  <Step title="Step 2 — withdraw (UNSENT)">
+    Returned **unsent** as a built tx. You submit it only **after** the on-chain `withdrawalCooldown` elapses.
+  </Step>
+  <Step title="Step 3 — deposit (UNSENT)">
+    Returned **unsent**, depositing the withdrawn assets into the `to` tranche. Submit after step 2 confirms.
+  </Step>
+</Steps>
+
+The two later steps are returned unsent because they straddle the cooldown — the SDK cannot honestly send them in one breath. This makes the cooldown visible in the type, not a surprise revert.
+
+---
+
+## The tranche waterfall — the "why" of Claim B
+
+The depositor takes the underwriter's side of every [capped-IL swap](/concepts/in-range-convexity-hedge). The two tranches split that risk asymmetrically, and the split is the entire reason senior can be the calm tranche and junior the high-yield one:
+
+<CardGroup cols={2}>
+  <Card title="Junior — first-loss" icon="chart-line">
+    Absorbs **all** underwriting loss before senior is touched, and earns the **bulk** of every premium for doing so. A genuine vol-seller position.
+  </Card>
+  <Card title="Senior — protected from underwriting loss only" icon="piggy-bank">
+    Structurally shielded from *underwriting* loss while the junior buffer covers what is locked — but still exposed to the **systemic tail**.
+  </Card>
+</CardGroup>
+
+The protection is enforced on-chain, not by convention. Every payout is bounded by its own locked `MaxIL`, and the vault holds the senior-protection invariant at lock time:
+
+$$
+\sum \texttt{payouts} \;\le\; \texttt{totalLocked} \;\le\; \texttt{juniorAssets}.
+$$
+
+So underwriting losses are paid junior-first and never reach senior while `totalLocked ≤ juniorAssets`. The `withdraw` path enforces the same constraint *through* a withdrawal: it reverts `JuniorBelowLocked` if a junior exit would push `juniorAssets` below `totalLocked`, which the SDK surfaces as `status:'error'`. This is the SDK-visible edge of the pool-side half of [invariant I5](/security/invariants); the full mechanism — the lock check, the loss waterfall, and the run defense — lives on [the vaults page](/protocol/vaults).
+
+<Warning>
+**Limit:** senior is *not* risk-free. **Why:** the invariant protects senior only from **underwriting** loss while `totalLocked ≤ juniorAssets`; it cannot protect either tranche from a **systemic** failure — USDC depeg, an oracle/settlement fault, or a contract bug. **Mitigation / honest framing:** that is exactly why **both** tranches carry `capitalNotGuaranteed`. The single-asset numbers (`u = 0.40`): **senior P(loss) = 0** holds *only* while `u ≤ 1 − sf`; **junior worst case −67%**. Never imply either tranche is risk-free.
+</Warning>
+
+<ClaimB />
+
+---
+
+## Worked example — deposit, read, withdraw, rebalance
+
+This is the full depositor loop against the live deployment, end to end. Amounts are 6-dec raw `bigint`.
+
+```ts
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient })
+const dep = sdk.depositor
+const owner = walletClient.account.address
+
+// 1. Read the pool first — util, regime, and the load it is charging (Claim B carried).
+const state = await dep.getVaultState()
+if (!state.available) throw new Error(`vault degraded: ${state.reason}`)
+console.log(state.utilWad, state.regime, state.totalLoadWad)
+console.log(state.capitalNotGuaranteed) // true
+
+// 2. Deposit 10,000 dUSDC (= 10_000_000_000n raw) into JUNIOR; auto-approve to the vault.
+const dposit = await dep.deposit('junior', 10_000_000_000n, { autoApprove: true })
+//   spender is the ConvexityVault, NOT InflexionCore.
+switch (dposit.status) {
+  case 'sent':                console.log('tx', dposit.txHash); break
+  case 'deferred-no-wallet':  console.log('sign me:', dposit.tx); break // unsigned tx
+  case 'error':               console.error(dposit.detail); break
+}
+
+// 3. Read my position — redeemable assets come from the vault's own conversion.
+const me = await dep.getPosition(owner)
+if (me.available) console.log(me.juniorShares, me.juniorAssets)
+
+// 4. Withdraw is cooldown-gated: request, wait the on-chain cooldown, then withdraw.
+const cooldown = await dep.getWithdrawalCooldown() // seconds (bigint)
+await dep.requestWithdrawal('junior', 5_000_000_000n)
+// …after `cooldown` seconds elapse on-chain:
+const w = await dep.withdraw('junior')
+if (w.status === 'error') console.error(w.detail) // e.g. 'JuniorBelowLocked'
+
+// 5. Move capital senior → junior across the cooldown (staged, NOT atomic).
+const staged = await dep.rebalance('senior', 'junior', 2_000_000_000n)
+//   staged.step1 is SENT (requestWithdrawal); staged.step2 (withdraw) and
+//   staged.step3 (deposit) are returned UNSENT — submit them after the cooldown.
+```
+
+<Note>
+**The deposit spender is the `ConvexityVault`, not `InflexionCore`**. This is the opposite of the LP flow, where the spender is `InflexionCore`. With `autoApprove: true` the client reads `allowance(owner, vault)` and only sends `approve(vault, amount)` if it is short, then calls `deposit(tranche, amount)`. See the one-glance [approvals table](/sdk/addresses-units).
+</Note>
+
+---
+
+## Degradation cheat-sheet for this surface
+
+| Envelope | Where | Meaning |
+| --- | --- | --- |
+| `Degraded<VaultState>` | `getVaultState` | `available:false` with `no-rpc` / `vol-uninitialized` |
+| `Degraded<DepositorPosition>` | `getPosition` | `available:false` with `no-rpc` |
+| `WriteResult.status` | `deposit` / `requestWithdrawal` / `withdraw` | `'sent' \| 'deferred-no-wallet' \| 'error'` |
+| `instYieldWad: undefined` | `VaultState` | subgraph-pending — typed omission, never a fabricated number |
+
+**Live today** (no subgraph needed): vault state, position, regime, σ_ref, withdrawal cooldown, utilization stream, all writes. **Subgraph-pending** (degrade to a typed state — not an error): instantaneous yield and NAV history (via [`data.getNavHistory`](/sdk/data-client)). See the full [degradation reference](/sdk/degradation).
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The vaults" icon="vault" href="/protocol/vaults">
+    The on-chain ConvexityVault — the senior-protection invariant, the loss waterfall, and run defense in full.
+  </Card>
+  <Card title="Tranches (product framing)" icon="layer-group" href="/concepts/tranches">
+    Senior vs junior as two products on one pool — yield, risk, and the first-loss waterfall.
+  </Card>
+  <Card title="The load stack" icon="sigma" href="/math/load-stack">
+    How utilization and concentration price marginal pool capacity — the numbers behind `VaultState`.
+  </Card>
+  <Card title="DataClient — the moat" icon="database" href="/sdk/data-client">
+    NAV history and the load surface — the depositor-relevant slices of the data moat.
+  </Card>
+  <Card title="SDK overview" icon="cube" href="/sdk/overview">
+    The five surfaces, the factory, and the graceful-degradation contract.
+  </Card>
+  <Card title="Addresses & units" icon="ruler" href="/sdk/addresses-units">
+    Decimals, the 6-dec numéraire, WAD ratios, and the one-glance spenders table.
+  </Card>
+</CardGroup>

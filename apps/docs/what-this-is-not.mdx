@@ -1,0 +1,167 @@
+---
+title: "What Inflexion is NOT"
+description: "The honest perimeter: not Bancor, not GammaSwap, not Panoptic, not 'insurance' — and why Claim A (LP no-bad-debt) and Claim B (depositor capital risk) are two separate claims that are never merged."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The fastest way to mis-sell Inflexion — to an LP or a depositor — is to reach for a familiar analogy that does not fit. This page draws the perimeter precisely. Each distinction is framed the same way: **what we are not → why that thing exists → what we do instead.** A naked "we're not X" is useless; the value is in the mechanism that replaces it.
+
+It also fixes the one framing error that does real damage: collapsing the two guarantees Inflexion makes into one. **Claim A — LPs are always paid in FULL mode — and Claim B — depositor and MM capital is not guaranteed — are separate claims.** They are both true; neither implies the other; merging them is a defect.
+
+<Note>
+Inflexion is an **in-range convexity hedge**: a European, fixed-maturity, in-range claim that pays $\min(\text{realized IL},\ \text{MaxIL})$ from pre-locked collateral. Entry requires $P_a \le P_0 \le P_b$ — out-of-range positions are rejected at creation. For the positive definition, start at [the three pillars](/concepts/three-pillars) and [MaxIL](/concepts/maxil).
+</Note>
+
+## The two claims, kept separate
+
+This is the load-bearing distinction on the whole page, so it comes first.
+
+<CardGroup cols={2}>
+  <Card title="Claim A — LPs are always paid" icon="shield-check">
+    In FULL mode, an LP's covered position pays out with **no bad debt** — qualified by the full clause (capped payoff + solvent USDC + oracle/settlement liveness + no rehypothecation breach). This is structural and code-enforced by invariant [I1](/security/invariants).
+  </Card>
+  <Card title="Claim B — depositor capital is at risk" icon="triangle-exclamation">
+    The cvAMM is a **volatility seller**. Depositor and MM capital is **not guaranteed** for either tranche — junior is first-loss, senior is protected from underwriting loss only, never from the systemic tail.
+  </Card>
+</CardGroup>
+
+<Warning>
+**Never merge Claim A and Claim B.** "No bad debt" is a guarantee to the **LP being paid** — it says nothing about whether the underwriter's capital survives. A wrong $\sigma_{\text{ref}}$ can cost depositors money (bad pricing → NAV compression → junior absorbs first, senior in the tail) but can **never** create LP bad debt in FULL, because collateral $=$ MaxIL $\ge$ payout by construction, regardless of what $\sigma$ was. These are two guarantees, not one.
+</Warning>
+
+The disclosures below are the canonical wording for each claim. Use them verbatim wherever the claims appear.
+
+<ClaimA />
+
+<ClaimB />
+
+## Not Bancor — the single most important "not"
+
+This is the comparison most people reach for, and it is the one that most badly misrepresents the design.
+
+<Steps>
+  <Step title="Limit — Bancor's IL protection was the canonical failure">
+    Bancor v2.1 offered "impermanent-loss protection," and it is the reference point everyone has in mind when they hear "hedge IL on-chain." Inflexion is **not** that, and the difference is mechanical, not cosmetic.
+  </Step>
+  <Step title="Why it failed — protection funded by token inflation">
+    Bancor covered losses by **minting new BNT** — token inflation as the funding source. Inflation-funded coverage is a death-spiral mechanism: in the exact stress scenario where many positions need to be paid, the protocol prints into a falling token, diluting holders and accelerating the decline. It is not a collateralized hedge; it is a promise backed by the protocol's own equity.
+  </Step>
+  <Step title="What we do instead — pre-locked USDC, mints nothing">
+    The cvAMM pays claims in **pre-locked USDC and mints nothing**. Before a swap exists, the underwriter has already locked exactly `MaxIL` of USDC for the life of the position. In FULL the pool **cannot become insolvent** (collateral $=$ MaxIL $\ge$ payout, [I1](/security/invariants)) and **cannot be run** (withdrawal delay + locked/free accounting). There is no token to inflate and no equity to dilute.
+  </Step>
+</Steps>
+
+<Warning>
+**Limit → Why → Mitigation, in one frame.** The hard limit Bancor never had: the payout is **capped at MaxIL**. *Why:* beyond the range an LP is fully rotated into one asset, so further loss is *directional* (foregone spot upside), not the *impermanent* loss the LP set out to hedge — and unbounded payoff cannot be fully collateralized, so it cannot be trustless. *Mitigation:* the cap is precisely what lets the underwriter lock exactly `MaxIL` and makes [no-bad-debt](/concepts/no-bad-debt) a construction rather than a hope. LPs who want beyond-range protection [re-cover after re-ranging](/concepts/in-range-convexity-hedge). The cap is the feature that fixes Bancor's flaw.
+</Warning>
+
+## Not GammaSwap, not Panoptic
+
+Both are real, good products. Neither is what an Inflexion LP signs up for.
+
+<AccordionGroup>
+  <Accordion title="Not GammaSwap — that is perpetual vol trading needing active management">
+    **Limit.** GammaSwap is perpetual volatility trading. **Why it exists:** there is genuine demand to be long or short gamma on a rolling basis, and a perpetual instrument serves traders who want to manage that exposure continuously. **What we do instead:** Inflexion is a **European, fixed-maturity** claim. The LP pays one premium up front, picks one of three durations, and does nothing until expiry — no funding to monitor, no position to roll, no margin to top up. Different instrument, different user, different cognitive load.
+  </Accordion>
+  <Accordion title="Not Panoptic — an options market for quants; our LP pays one number">
+    **Limit.** Panoptic is an on-chain options market built for sophisticated options traders. **Why it exists:** quants want full expressive control — strikes, structures, Greeks — and Panoptic gives them a venue to construct and manage those positions. **What we do instead:** our LP **pays one number** and the protocol computes everything else. The LP brings a position NFT, picks a duration, and pays the [`FairPremium`](/concepts/fair-value) — no strike selection, no structuring, no Greeks. Different audience entirely.
+
+    Note the relationship is not adversarial: Panoptic (and Deribit) is exactly **where a hedged market maker exports the short-gamma risk it takes on**. Pillar 3 MMs use venues like Panoptic to make the whole system's risk *smaller*. We compete with it for the LP's attention; we depend on it for the MM's hedge.
+  </Accordion>
+</AccordionGroup>
+
+## Not "insurance"
+
+This is a labeling distinction with legal and demand-side teeth, so it gets its own treatment.
+
+<Warning>
+**Limit → Why → Mitigation.** *Limit:* do not call Inflexion "IL insurance." *Why this matters:* "insurance" implies actuarial mutualization (a shared pool that pays claims out of pooled premiums against estimated frequencies) and carries regulatory ambiguity; sophisticated LPs also discount a product framed as insurance because they suspect the truncated tail. *Mitigation / what it actually is:* a **collateralized derivative** — a European claim, fully collateralized per-position at `MaxIL`, with **no actuarial mutualization and no regulatory ambiguity**. Every covered position has its own dedicated, pre-locked collateral; nothing is pooled across LPs to "average out" claims. The precise label, used everywhere, is **in-range convexity hedge** — never "insurance."
+</Warning>
+
+There is a second reason the word is wrong. Insurance pays you back for a *loss*. Inflexion does not hedge the LP's net P&L — it hedges **gross in-range IL accruing from creation onward**. The LP keeps Uniswap fee accrual during custody, and any IL borne before covering stays theirs. Total LP outcome is $\text{fees} - \text{IL} + \text{payout} - \text{premium}$, which can be positive. That is correct, not a leak: invariant [I4](/security/invariants) (LP never profits *from the swap*) concerns the payout, which is $0$ whenever IL is $0$.
+
+## The differentiators table
+
+Put side by side, the perimeter is sharp. Every row is a thing Inflexion does that the analogies do not.
+
+| Inflexion is NOT… | …because that thing | …and instead Inflexion |
+| --- | --- | --- |
+| **Bancor IL protection** | funds coverage by minting tokens (inflation death-spiral) | pays from **pre-locked USDC, mints nothing**; FULL pool cannot be insolvent ([I1](/security/invariants)) or run |
+| **GammaSwap** | is perpetual vol trading needing active management | is a **European, fixed-maturity** claim — pay once, do nothing until expiry |
+| **Panoptic** | is an options market for quants (strikes, structures, Greeks) | lets the LP **pay one number**; the protocol computes the rest |
+| **"Insurance"** | implies actuarial mutualization + regulatory ambiguity | is a **collateralized derivative**, collateralized per-position at `MaxIL` |
+| **Unbounded "IL coverage"** | cannot be fully collateralized → cannot be trustless | caps payout at **MaxIL**; the cap makes no-bad-debt a *construction* |
+| **A net-P&L hedge** | would have to claw back fees and pre-cover losses | hedges **gross in-range IL from creation onward**; LP keeps fees ([I4](/security/invariants)) |
+| **A fitted / Monte-Carlo pricer** | a calibrated surface drifts and hides assumptions | publishes an **exact closed-form $\Phi$-sum** on-chain ([the Phi-sum](/math/fair-value-phi-sum)) |
+| **A custodial market** | a matcher that holds funds can steal, forge, or force a stale quote | is **non-custodial**: Path A needs no matcher; Path B's matcher cannot steal/forge/force a quote |
+| **A risk-free yield product** | depositor capital backing a vol seller is never risk-free | tells depositors plainly: **capital is NOT guaranteed** for either tranche |
+| **A guarantee that depositors are safe** | conflating Claim A with Claim B | keeps **Claim A and Claim B separate** — LPs always paid; depositors at risk |
+
+## Three more "nots" worth stating plainly
+
+These come up in conversation and each deserves its honest framing.
+
+<AccordionGroup>
+  <Accordion title="Not a per-NFT quote market (the SignedQuote carries no tokenId)">
+    **Limit.** A market-maker quote is **per-market**, not per-position — the `SignedQuote` carries no `tokenId`. **Why:** [MaxIL is the unit of risk](/concepts/maxil) — pure geometry, frozen at creation, identical across durations — which makes positions **fungible to an underwriter within a market**. **What we do instead:** an MM signs a load plus a MaxIL-ratio band plus capacity, and the on-chain [`FairPremium`](/concepts/fair-value) is recomputed per position from its exact geometry at execution. One quote prices many positions; the MM never has to inspect individual NFTs. The old "LP knows the range, MM does not" adverse-selection story is **void**: v3 geometry is public on-chain, so both pool and MM read the exact position.
+  </Accordion>
+  <Accordion title="Not a last-look market">
+    **Limit.** There is no "last look" — an MM cannot renege after seeing the order. **Why this is a risk to manage:** a firm quote that lives too long is a free option for the taker (a stale-quote pickoff). **What we do instead:** firmness is preserved and pickoff is closed with a **short Good-Til-Date lifetime (≈5–15s) plus an oracle band** that auto-voids the quote the instant the live price drifts beyond `priceBandBps` ([Fork 2](/security/forks)), not with last look. See [Path B](/protocol/path-b-mm) and [routing](/protocol/routing).
+  </Accordion>
+  <Accordion title="Not a yield venue for locked collateral (no rehypothecation)">
+    **Limit.** Locked collateral is **never** routed to utilization-gated venues (Aave / Compound). **Why:** the no-bad-debt guarantee requires that the exact `MaxIL` backing a swap stays instantly liquid through settlement; a withdrawal queue at the moment of payout would break it. **What we do instead:** only **idle/free** USDC may earn yield, and only via instantly-redeemable wrappers (sDAI / tokenized T-bills). This is a hard project rule, not a tuning parameter — see the "no rehypothecation breach" qualifier in [Claim A](/concepts/no-bad-debt).
+  </Accordion>
+</AccordionGroup>
+
+## What is NOT yet mature (stated honestly)
+
+Two things are real and live; one is on the redeploy path. None is left naked.
+
+<Warning>
+**The on-chain moat dataset is not live yet.** *Limit:* the subgraph deploy is pending, so historical moat queries return a typed `pending` state. *Why:* the on-chain moat events (`SwapPriced` / `QuoteFilled`) and `CvammPricing.loadComponents` are coded but not yet in deployed bytecode, and the dataset begins at the single redeploy. *Mitigation:* the **structures ship day-one** and the **off-chain telemetry halves begin at the first interaction logged**; history degrades to a typed pending state, **never an error**. See [the data moat](/concepts/data-moat) and [status & caveats](/reference/status-caveats).
+</Warning>
+
+<Maturity />
+
+What is **not** uncertain: the protocol is live on Arbitrum Sepolia (chainId `421614`) with a full create→settle lifecycle proven on both rails on the fresh 2026-06-05 stack — Path A paid from the `ConvexityVault`, Path B paid from a market maker's own collateral.
+
+<AddressTable />
+
+## Common traps to avoid
+
+A quick checklist of phrasings that quietly break the perimeter.
+
+| Trap (do NOT say) | Say instead |
+| --- | --- |
+| "IL insurance" | "in-range convexity hedge" |
+| "bad debt is impossible" | "no bad debt **under** FULL + capped payoff + solvent USDC + oracle/settlement liveness + no rehypothecation breach" |
+| "depositors can't lose money" | "capital is NOT guaranteed for **both** tranches" |
+| "we cover your IL" | "we pay $\min(\text{realized IL}, \text{MaxIL})$ on **in-range** IL from creation onward" |
+| "the cap is a limitation we'd like to remove" | "the cap is **load-bearing** — it is what makes the hedge fully collateralized and trustless" |
+| "MaxIL measures how risky a position is" | "MaxIL is the **collateral / capital unit**, not a risk metric" |
+| "we invert `fairRate` for an implied-vol surface" | "the moat is **five behavioral signals**; IV-inversion is circular and dropped" |
+
+<Tip>
+If you only remember one thing from this page: **Claim A and Claim B are separate.** "LPs are always paid" is not "depositors are safe." Keep them apart and every other distinction on this page follows.
+</Tip>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="What it IS — the three pillars" icon="layer-group" href="/concepts/three-pillars">
+    The positive definition: on-chain FairValue, the cvAMM floor, MM competition.
+  </Card>
+  <Card title="MaxIL — cap and unit of risk" icon="ruler-combined" href="/concepts/maxil">
+    Why the cap is load-bearing and why it makes positions fungible.
+  </Card>
+  <Card title="No-bad-debt, stated correctly" icon="shield-halved" href="/concepts/no-bad-debt">
+    Claim A in full, with the qualifying clause that makes it exact.
+  </Card>
+  <Card title="Tranches & depositor risk" icon="layer-group" href="/concepts/tranches">
+    Claim B in full: junior first-loss, senior systemic tail.
+  </Card>
+</CardGroup>

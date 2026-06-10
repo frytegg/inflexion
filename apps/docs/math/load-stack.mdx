@@ -1,0 +1,279 @@
+---
+title: "The load stack & the I10 cap"
+description: "How Inflexion turns published FairValue into a charged premium — baseLoad + util_skew + dispersion_skew, the I10 clamp that makes overcharge impossible by code, and why maxLoad = 1/fairRate − 1."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+The [Φ-sum](/math/fair-value-phi-sum) publishes a **fair value** — `FairPremium = fairRate · MaxIL`, the risk-neutral expectation of the capped payoff. Fair value is the *floor* below which writing coverage is negative-EV. It is not the price. The **price** is fair value plus a **load**: the structural volatility-risk premium an underwriter must earn for taking the tail, plus two inventory-state skews that price scarcity and concentration. This page is the third and final layer of the [pricing stack](/protocol/pricing-stack).
+
+$$
+\textbf{premium} \;=\; \text{FairPremium} \cdot \big(1 + \underbrace{\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}}_{\text{total\_load}}\big)
+$$
+
+with the whole thing **hard-clamped** at `FairPremium · (1 + maxLoad)` — that clamp is **invariant I10**, true by construction for any inputs on both rails.
+
+<Note>
+The mental model that separates the three layers cleanly: **MaxIL is pure geometry** (the *how much capital*); **`fairRate` is pure stochastics** (the *how risky*); **the load stack is pure inventory state** (the *how scarce*). They multiply — `premium = fairRate · MaxIL · (1 + load)`. MaxIL and `fairRate` are the same for everyone seeing the same geometry and σ; only the load reflects *this* underwriter's book at *this* moment.
+</Note>
+
+Everything here is implemented in the `CvammPricing` library inside `ConvexityVault` ([deployments](/reference/deployments)) and mirrored in the Python source of truth. **No primitive on this page is hardcoded** — every regime band, every knee/slope/power/cap, and `maxLoadBps` itself are read from the calibrated risk-parameter set via `LoadParams`. Hardcoding any of these is the exact failure the [audit](/security/audits) flagged.
+
+---
+
+## 1. Why a load at all — the lone-writer CVaR gap
+
+Fair value is the **mean** of the capped payoff. A single risk-averse writer does not reserve against the mean; they reserve against the **tail** of what they may pay. That is the gap the load exists to close.
+
+Quantify the tail with **CVaR95** — the expected payout in the worst 5% of price paths, as a fraction of MaxIL. For a *lone* writer of a single contract, the model puts that number at **~91–100% of MaxIL almost everywhere**. In words: in a bad month a single uncharged writer pays out nearly the entire collateral they posted. A writer charging only fair value (which can be a small fraction of MaxIL — see the [worked example](/math/worked-example)) is **badly underpriced** against that tail.
+
+### 1.1 Diversification collapses the gap
+
+The whole reason a *pool* can underwrite cheaply where a lone MM cannot is **diversification**. Model a pool of `N` identical-geometry contracts under a one-factor correlation structure:
+
+$$
+P_{T,i} \;=\; P_0 \cdot \exp\!\Big(-\tfrac{1}{2}\sigma^2 T \;+\; \sigma\sqrt{T}\,\big(\sqrt{\rho}\,Z_{\text{common}} + \sqrt{1-\rho}\,Z_i\big)\Big)
+$$
+
+`Z_common` is the systemic factor every contract shares; `Z_i` is the idiosyncratic shock unique to contract `i`. The correlation `ρ` dials between two regimes:
+
+<Tabs>
+<Tab title="ρ = 0 — full diversification">
+Distinct durations, staggered entries, decorrelated idiosyncratic shocks. Per-contract CVaR95 **collapses from ~100% to 78.5%** as `N` grows `1 → 100` (at σ=60%, ±10%, 30d; this rounds to ~78.7%). The pool can charge well below a lone MM's ~100% reservation and still cover its own tail. **This is the pool's structural reason to exist.**
+</Tab>
+<Tab title="ρ = 1 — synchronized book">
+A single-pair book where one ETH move hits *every* contract at once. **No diversification** — per-contract CVaR stays **~100%**: the crash-correlation tail. A pool concentrated in one width/moneyness/duration corner behaves exactly like a lone writer. This is precisely why [`dispersion_skew`](#4-dispersion-skew-single-pair-concentration) exists — it prices the book back up toward the lone-writer reservation as concentration rises.
+</Tab>
+</Tabs>
+
+### 1.2 Sizing baseLoad inside the envelope
+
+`baseLoad` is sized **inside the envelope `[fair, diversified-CVaR]`**. The pool must charge **≥ fair** (else negative-EV) and *can* charge up to the diversified-pool CVaR while still undercutting a lone MM (whose CVaR is ~100%):
+
+$$
+\text{target\_rate} \;=\; \text{fair} + \text{capital\_fraction} \cdot (\text{diversified\_cvar} - \text{fair})
+$$
+
+$$
+\text{baseLoad} \;=\; \frac{\text{target\_rate}}{\text{fair}} - 1
+$$
+
+The `capital_fraction` walks the charged rate from the fair floor toward the diversified-CVaR ceiling. The result is keyed to the **σ_ref regime band** — calm books need less reserve than stressed ones.
+
+### 1.3 Calibrated baseLoad — keyed by σ_ref regime
+
+`baseLoad` is read from the calibrated risk-parameter set keyed by which volatility regime [`σ_ref`](/math/sigma-ref) is in (`CvammPricing.baseLoadWad`):
+
+| regime    | σ_ref band      | baseLoad            |
+| --------- | --------------- | ------------------- |
+| calm      | `< 0.60`        | **2000 bps (+20%)** |
+| normal    | `0.60 – 1.025`  | **3000 bps (+30%)** |
+| stressed  | `≥ 1.025`       | **5000 bps (+50%)** |
+
+<Note>
+**`baseLoad` alone does not meet the depositor safety targets.** It delivers strongly positive long-run growth, but the binding tail constraints (`1-in-100 monthly loss ≤ 10%`, `P(losing month) ≤ 15%`) are intrinsic to single-asset volatility selling and need the **structural levers** — the utilization cap, the senior/junior tranche, and (roadmap) the pool hedge. See [the tranches](/concepts/tranches) and [the no-bad-debt math](/math/no-bad-debt-math). The depositor heavy run uses the same calm/normal/stressed = 0.20/0.30/0.50.
+</Note>
+
+<ClaimB />
+
+---
+
+## 2. The load stack — the full formula
+
+The two skews ride on top of `baseLoad`. Both are **inventory-state** functions — they depend on *this* pool's current book, not on the geometry of the position being priced.
+
+$$
+\textbf{premium} \;=\; \text{FairPremium} \cdot \big(1 + \text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}\big)
+$$
+
+clamped at `FairPremium · (1 + maxLoad)`. Everything is WAD-scaled — `1e18 = 1.0 = 100% load`, `1 bps = 1e14 WAD`. The contract rounds the final premium **up** (round-up favors the pool, via `CvammPricing.premiumFromLoad`).
+
+**Both rails use the same fair value.** Path A (cvAMM) computes the whole load stack on-chain. Path B (MM) carries a single `loadBps` and the contract **derives** the MM premium as `FairPremium · (1 + loadBps/1e4)`, requiring `loadBps ≤ maxLoadBps`. The LP gets the **cheaper of the two** via [`createSwapRouted`](/protocol/routing).
+
+---
+
+## 3. util_skew — utilization scarcity (the drawdown lever)
+
+`util_skew` prices marginal capacity **up as the pool nears full commitment**, on utilization `u = locked/(locked+free)`:
+
+$$
+\text{util\_skew}(u) \;=\; \min\!\Big( \text{cap},\; \text{slope} \cdot \Big(\frac{\max(0,\, u - \text{knee})}{1 - \text{knee}}\Big)^{\text{power}} \Big)
+$$
+
+It is **flat below `knee`** (spare capacity is cheap) and rises **convexly** toward full commitment. The shape matters: pricing turns up *before* the pool is over-committed, not after.
+
+**Calibrated values**:
+
+| parameter | value |
+| --------- | ----- |
+| `knee`    | 0.45  |
+| `slope`   | 0.6   |
+| `power`   | 2.0   |
+| `cap`     | 0.6   |
+
+<Info>
+**This is the same `locked/free` accounting that powers the withdrawal-delay run defense.** Pricing new coverage up before over-commitment *and* gating junior withdrawals below `totalLocked` are two uses of one accumulator in `ConvexityVault`. See [the vaults](/protocol/vaults).
+</Info>
+
+The depositor heavy run found **utilization is the dominant DRAWDOWN lever** — not a tail-feasibility lever. At base loads, `u = 0.40 → P(3y DD>50%) = 2.7%` versus `u = 0.60 → 18.0%`. That single dial is why the disciplined operating point exists; see [the depositor disclosure](/concepts/tranches).
+
+---
+
+## 4. dispersion_skew — single-pair concentration (the honest analogue)
+
+`dispersion_skew` prices the book up as outstanding coverage **clusters** in one corner of the `width × moneyness × duration` grid. It is the **honest single-pair analogue of cross-asset concentration**: many positions bunched at the same edge all hit MaxIL together in one move — exactly the `ρ → 1` regime from [§1.1](#1-1-diversification-collapses-the-gap).
+
+Concentration is measured by a **normalized Herfindahl–Hirschman index (HHI)** over the MaxIL-weighted coverage histogram across the grid: `h = 0` is perfectly dispersed, `h = 1` is all coverage in one cell. Then:
+
+$$
+\text{dispersion\_skew}(h) \;=\; \min\!\big( \text{cap},\; \text{slope} \cdot h^{\text{power}} \big)
+$$
+
+**Calibrated values**:
+
+| parameter | value |
+| --------- | ----- |
+| `slope`   | 0.5   |
+| `power`   | 1.5   |
+| `cap`     | 0.5   |
+
+A well-dispersed book is charged ~0; full concentration adds **+0.5 load**. On-chain the HHI is computed **O(1)** from an incremental `Σ lockedByMarket²` accumulator (`ConvexityVault.concentrationWad`) — no per-fill histogram scan.
+
+<Note>
+**Why this is *single-asset calibrated* and not the dead cross-asset skew.** On a single-pair (ETH/USDC) book, a cross-asset concentration skew degenerates to a useless constant (`k ≈ 1.0` — everything is correlated, so the skew never moves). `dispersion_skew` is the honest replacement: it measures concentration *within* the one pair's geometry grid, where dispersion genuinely varies.
+</Note>
+
+---
+
+## 5. The I10 clamp — overcharge impossible by code
+
+The three loads sum, then the sum is **clamped** before it touches the premium:
+
+$$
+\text{total\_load} \;=\; \min\big( \text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew},\; \text{maxLoad} \big)
+$$
+
+$$
+\textbf{premium} \;=\; \text{FairPremium} \cdot (1 + \text{total\_load})
+$$
+
+Because the sum of loads is clamped to `maxLoad`, the bound
+
+$$
+\textbf{premium} \;\le\; \text{FairPremium} \cdot (1 + \text{maxLoad})
+$$
+
+holds for **any** inputs, on **both** rails. That bound is **invariant I10**.
+
+<Card title="I10 — Price cap, by construction" icon="lock">
+`premium ≤ FairPremium · (1 + maxLoadBps)` on both paths, **by construction, upstream of `settle`**.
+
+- **Path A** — a mechanical deterministic clamp (`CvammPricing.totalLoadWad`). No MM discretion; holds for all state sequences and all price paths, in FULL and PARTIAL alike.
+- **Path B** — `require(loadBps ≤ maxLoadBps)` else `LoadExceedsMax`.
+
+I10 **never touches** `settle`, the MaxIL formula, or I1–I9. It is a pure pricing clamp in the read/pricing phase. See [the invariants](/security/invariants).
+</Card>
+
+<Warning>
+**I10 is orthogonal to I1 — never merge them.** I10 caps the *premium an LP pays* (a pricing guarantee, always-true by code). [I1, the no-bad-debt guarantee](/concepts/no-bad-debt), caps the *payout an LP receives* (`collateral = MaxIL ≥ payout`, a settlement guarantee). I1 additionally depends on oracle/settlement liveness; I10 does not depend on anything. The tranche premium split and the `totalLocked ≤ juniorAssets` constraint affect **neither** I10 nor `settle` semantics.
+</Warning>
+
+Both rails additionally cap the *charged* premium at MaxIL — "never charge more than the maximum possible payout". That second cap is the economic principle behind sizing `maxLoad` itself.
+
+---
+
+## 6. Sizing maxLoad — the principled ceiling is premium ≤ MaxIL
+
+What should `maxLoad` actually be? The principled answer falls straight out of the second cap above: **you never charge more than the maximum possible payout, MaxIL**. Set the ceiling at `premium = MaxIL`:
+
+$$
+\text{premium} \;=\; \text{fairRate} \cdot \text{MaxIL} \cdot (1 + \text{maxLoad}) \;\le\; \text{MaxIL}
+$$
+
+Cancel MaxIL and solve for the load:
+
+$$
+\boxed{\;\text{maxLoad} \;=\; \frac{1}{\text{fairRate}} - 1\;}
+$$
+
+This is **naturally width/duration/σ-conditional** — it falls as `fairRate` rises, with no extra parameters. The on-chain preferred form evaluates it live and clamps to a sane band:
+
+```text
+maxLoadBps = clamp( round((1 / fairRate(σ_ref) − 1) · 10000), floor, 16000 )
+```
+
+### 6.1 Calibrated maxLoadBps ceiling
+
+Static ceiling at `σ_ref = 0.75` (normal regime), clamped at 16000:
+
+| width | 7d        | 30d  | 90d  |
+| ----- | --------- | ---- | ---- |
+| ±5%   | 3282      | 1375 | 744  |
+| ±10%  | 8502      | 3082 | 1578 |
+| ±20%  | **16000** | 7773 | 3559 |
+
+<Tip>
+**Read the table as economic exactness, not arbitrary policy.** Tight/long cells get *tiny* load room because their `fairRate` is already near 1 — a near-certain payout cannot carry a risk premium beyond itself (you are pre-paying a near-certain loss; there is no convexity left to sell). Wide/short cells (low `fairRate`, the most convexity value) get the most room. The ±20%/7d cell hits the 16000 clamp because `1/fairRate − 1` would exceed it — the only place policy overrides the formula. See [`fairRate` and the S-curve](/math/fair-value-phi-sum).
+</Tip>
+
+---
+
+## 7. Worked example — one position, three prices
+
+A 50,000 USDC position, ±10% geometric range, `σ_ref = 60%`, `baseLoad = +15%`, both skews = 0. **MaxIL = 1,280 USDC (2.56% of V0) — identical for all three durations.** Only `fairRate` moves, and the load rides on the resulting FairPremium:
+
+| duration | fairRate | FairPremium | cvAMM publishes (@ +15%) |
+| -------- | -------- | ----------- | ------------------------ |
+| 7d       | 44.9%    | 574 USDC    | 661 USDC (1.32% of V0)   |
+| 30d      | 70.8%    | 906 USDC    | 1,042 USDC (2.08% of V0) |
+| 90d      | 82.9%    | 1,061 USDC  | 1,221 USDC (2.44% of V0) |
+
+Each published price is `FairPremium · 1.15`. Walking the 30d cell through the load dial: `@+5% → 952 USDC`, `@+15% → 1,042 USDC`, `@+30% → 1,178 USDC`, where the ceiling is `FairPremium · (1 + maxLoad)`. The collateral (MaxIL) is constant throughout — over 90d the ±10% band is touched ~75% of the time versus ~24% over 7d, and the S-curve does all the work. Full numbers on [the worked-example page](/math/worked-example).
+
+---
+
+## 8. Live on-chain confirmation
+
+The 2026-06-05 create→settle lifecycle on the fresh stack exercises the whole stack and the routing:
+
+<CardGroup cols={2}>
+<Card title="Path A — cvAMM pool" icon="layer-group">
+V0 = \$270,531.28, MaxIL = \$1,669.24, **premium = \$9.70 (0.58% of MaxIL)**, realized IL at settlement = \$148.64, payout = \$148.64 paid from the `ConvexityVault`. The tiny premium fraction reflects a wide/short position — low `fairRate`, lots of convexity value.
+</Card>
+<Card title="Path B — MM won the route" icon="gavel">
+`createSwapRouted` chose the MM: premium \$8.93 (`loadBps = 1000`) **strictly beat** the cvAMM price of \$13.80. MaxIL = \$3,215.65, the MM's **own** collateral was locked and paid the realized \$245.66 payout from `UnderwriterVault`. Floor-of-liquidity / ceiling-of-price routing, end to end.
+</Card>
+</CardGroup>
+
+A tie resolves to Path A — an MM only diverts flow by *strictly* beating the always-on pool. See [routing](/protocol/routing).
+
+---
+
+## 9. Summary
+
+<AccordionGroup>
+<Accordion title="The full formula in one line">
+$$
+\textbf{premium} = \text{FairPremium} \cdot \big(1 + \min(\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew},\; \text{maxLoad})\big),\quad \text{maxLoad} = \tfrac{1}{\text{fairRate}} - 1
+$$
+
+`CvammPricing` library, mirrored in `cvamm.clamp_load`. FairPremium comes from [the Φ-sum](/math/fair-value-phi-sum); MaxIL from [the geometry](/math/maxil-derivation).
+</Accordion>
+<Accordion title="Each term, what it prices, where it lives">
+| term | prices | shape |
+| ---- | ------ | ----- |
+| `baseLoad` | the lone-writer CVaR gap that diversification closes | step by σ_ref regime |
+| `util_skew` | scarcity as the pool fills (the drawdown lever) | flat below knee, convex above, capped |
+| `dispersion_skew` | single-pair concentration (HHI) | `slope · h^power`, capped |
+| `maxLoad` clamp | I10 — premium ≤ FairPremium·(1+maxLoad) | `1/fairRate − 1`, clamped to 16000 |
+</Accordion>
+<Accordion title="None of these are hardcoded">
+Every regime band, skew curve parameter, and `maxLoadBps` is read from the calibrated risk-parameter set (cvAMM block) via `LoadParams`, set by the owner through `InflexionCore.setLoadParams`. `fairRate` itself has **no** calibrated coefficients — it is an [exact closed form](/math/fair-value-phi-sum). Hardcoding any load/skew/σ primitive is the exact failure the [audit](/security/audits) flagged.
+</Accordion>
+</AccordionGroup>
+
+<ClaimA />
+
+<Maturity />

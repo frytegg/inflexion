@@ -1,0 +1,223 @@
+---
+title: "Math overview"
+description: "The four layered pieces of Inflexion's math and the one-line mental model: MaxIL (how much capital) x fairRate (how risky) x load (how scarce) multiply into the premium."
+---
+
+Everything Inflexion charges an LP factors into **four layered pieces** that multiply
+into a single premium. They are deliberately orthogonal — each one isolates a
+different kind of information — and that separation is what lets the protocol publish
+an **exact, closed-form** price on-chain instead of a fitted curve.
+
+<Note>
+**One-line mental model.** MaxIL is pure geometry (the *how much capital*).
+[`fairRate`](/math/fair-value-phi-sum) is pure stochastics (the *how risky*).
+The [load stack](/math/load-stack) is pure inventory state (the *how scarce*). They
+multiply:
+
+$$
+\text{premium} \;=\; \underbrace{\text{fairRate}}_{\text{how risky}}\;\cdot\;\underbrace{\text{MaxIL}}_{\text{how much capital}}\;\cdot\;\underbrace{(1 + \text{load})}_{\text{how scarce}}
+$$
+
+`fairRate · MaxIL` is the [FairValue](/concepts/fair-value) published on-chain;
+`(1 + load)` is the underwriter's charge over fair value, hard-capped by
+[invariant I10](/security/invariants).
+</Note>
+
+## The four layers, in stacking order
+
+<CardGroup cols={2}>
+  <Card title="1 — The IL formula" icon="function" href="/math/il-formula">
+    The Uniswap v3 settle-path math: `V_hold` (affine) vs `V_lp` (concave in range).
+    `realized_IL = max(0, V_hold − V_lp)`. This is the quantity `settle()` actually pays.
+  </Card>
+  <Card title="2 — MaxIL" icon="ruler-combined" href="/math/maxil-derivation">
+    The boundary IL — `max(IL(Pa), IL(Pb))`. Pure geometry, frozen at creation.
+    It is **both** the load-bearing payout cap **and** the unit of risk.
+  </Card>
+  <Card title="3 — FairValue" icon="sigma" href="/math/fair-value-phi-sum">
+    `FairPremium = E_Q[min(IL, MaxIL)]`, an exact closed-form Φ-sum.
+    `fairRate = FairPremium / MaxIL` is the dimensionless S-curve in `σ²·T`.
+  </Card>
+  <Card title="4 — The load stack" icon="layer-group" href="/math/load-stack">
+    `baseLoad + util_skew + dispersion_skew`, clamped to `maxLoad` by invariant I10.
+    The underwriter's charge over fair value, driven by inventory state.
+  </Card>
+</CardGroup>
+
+Plus two companion topics that sit alongside the stack: the
+[no-bad-debt math](/math/no-bad-debt-math) (why the cap makes FULL mode
+structurally solvent) and the [theory anchors](/math/theory-anchors) (the LVR /
+convexity results that make the IL claim *priceable* in the first place).
+
+## How the layers stack
+
+Each layer carries exactly one kind of dependence — and *only* that kind. That is
+the whole design: it lets the protocol publish three prices for one position by
+moving a single dial.
+
+| Layer | Formula | Depends on | Carries |
+| ----- | ------- | ---------- | ------- |
+| **IL** | $\max(0,\; V_{\text{hold}} - V_{\text{lp}})$ | $P_a, P_b, L, P_0, P_T$ | the realized settle quantity |
+| **MaxIL** | $\max\big(IL(P_a),\, IL(P_b)\big)$ | geometry only ($P_a, P_b, L, P_0$) | *how much capital* |
+| **fairRate** | $E_Q[\min(IL, \text{MaxIL})]\,/\,\text{MaxIL}$ | $a{=}P_a/P_0,\, b{=}P_b/P_0,\, \sigma_{\text{ref}},\, T$ | *how risky* |
+| **FairPremium** | $\text{fairRate}\cdot \text{MaxIL}$ | the above | the published fair value |
+| **load** | $\min(\text{baseLoad}+\text{util}+\text{disp},\; \text{maxLoad})$ | inventory state | *how scarce* |
+| **premium** | $\text{FairPremium}\cdot(1+\text{load})$ | all of the above | the LP's actual charge |
+
+Read top to bottom and the orthogonality is the point:
+
+- **MaxIL carries no vol and no time.** It is pure geometry, frozen at creation,
+  and *identical across the three durations* (7/30/90d) for a given position. It is
+  also `L`-independent in the fair-rate sense — `fairRate` depends only on the
+  *ratios* $a = P_a/P_0$, $b = P_b/P_0$, plus $\sigma$ and $T$, never on `L`. That
+  is exactly what makes positions [fungible to an underwriter](/concepts/maxil): an
+  MM quote is **per-market** (a load + an optional MaxIL-ratio band + capacity),
+  **never per-NFT**.
+- **`fairRate` carries *all* the vol/time dependence.** It is the
+  [S-curve in $\sigma^2 T$](/math/fair-value-phi-sum) — the *fraction of MaxIL the
+  claim is worth* under the risk-neutral measure. So one position has **one MaxIL**
+  but **three FairPremiums** (7/30/90d); only `fairRate` moves between them.
+- **The load carries only inventory state** — vol regime, utilization,
+  concentration. It never touches `settle()`, the MaxIL formula, or the no-bad-debt
+  invariants. It is bounded by code (I10).
+
+<Tip>
+The factorization `FairPremium = fairRate · MaxIL` is the single most important
+structural choice in the protocol. Because **MaxIL carries none** of the vol/time
+dependence, the cvAMM can publish three durations for the same position by computing
+the geometry **once** and evaluating only the cheap S-curve three times — and a
+market maker can quote a whole market with a single load number, because every
+position in it is normalized by its own MaxIL.
+</Tip>
+
+## A worked walk-through of the multiply
+
+One position priced end-to-end (from [the load-stack worked example](/math/load-stack);
+full numbers on [the worked-example page](/math/worked-example)): a **50,000 USDC**
+position, **±10% geometric** range, $\sigma_{\text{ref}} = 60\%$, `baseLoad = +15%`,
+skews = 0.
+
+Geometry first — **one MaxIL for all three durations**:
+
+$$
+\text{MaxIL} = 1{,}280\ \text{USDC} \quad (2.56\%\ \text{of }V_0)
+$$
+
+Then the S-curve does all the work — `fairRate` is the only thing that changes:
+
+| duration | fairRate | FairPremium = fairRate·MaxIL | premium @ +15% load |
+| -------- | -------- | ---------------------------- | ------------------- |
+| 7d  | 44.9% | 574 USDC   | **661 USDC**  (1.32% of V₀) |
+| 30d | 70.8% | 906 USDC   | **1,042 USDC** (2.08% of V₀) |
+| 90d | 82.9% | 1,061 USDC | **1,221 USDC** (2.44% of V₀) |
+
+Over 90d the ±10% band is touched ~75% of the time versus ~24% over 7d — the S-curve
+prices exactly that. The collateral (MaxIL) is constant; only the risk dial moves.
+
+## What's exact, and the one residual assumption
+
+Two of these layers are **exact closed forms**, not approximations:
+
+- **MaxIL** is exact geometry. `IL(P) = V_hold − V_lp` is **convex** on $[P_a, P_b]$
+  (affine minus a strictly concave function), so its in-range max is always at an
+  endpoint — proven for *any* entry $P_0$, centered or not. See
+  [the MaxIL derivation](/math/maxil-derivation).
+- **`fairRate`** is an exact finite **Φ-sum** (≈6–10 Black–Scholes-class terms),
+  evaluated live per quote. It has **no calibrated coefficients, no Monte Carlo, no
+  lookup table** — the capped v3 payoff is piecewise-linear/convex in the terminal
+  price, and each arm integrates to a standard lognormal interval moment in the
+  normal CDF $\Phi$. See [the Phi-sum page](/math/fair-value-phi-sum).
+
+The single modeling assumption is risk-neutral **GBM with $\mu = 0,\ r = 0$**
+(forward = $P_0$). The Φ-sum is exact *given* that model. The residual is covered two
+ways: a deliberately **conservative** [$\sigma_{\text{ref}}$](/math/sigma-ref) (an
+EWMA vol oracle with a hard floor that sits above calm ETH vol), and the
+forward-vol premium left as **MM alpha** — forward-looking MMs price off implied vol
+and correct the pool's structural backward-looking bias
+([Pillar 3](/concepts/three-pillars)).
+
+The closed form is verified ≡ the reference Python implementation (itself verified ≡ dense
+quadrature ≡ Monte Carlo) to `max_abs_err ≈ 5.1e-11`, and the on-chain Stylus Φ-sum
+matches 50-digit `mpmath` fixtures to **≤ 1e-12 on fairRate**. The Stylus
+erf is integer fixed-point and machine-precise precisely because Stylus **bans WASM
+floating point at activation**, which is why the Stylus oracle is production and the
+Solidity `FairValueOracle` is only a CI cross-check.
+
+## The two separate guarantees the math gives you
+
+The math underwrites **two distinct claims** — and they must never be merged.
+
+<ClaimA />
+
+The no-bad-debt structural core is three lines, and it is **orthogonal to the
+premium** and **oracle-independent** — it holds for any price path and any (even
+wrong) $\sigma$:
+
+$$
+\begin{aligned}
+\text{collateral}_{\text{FULL}} &= \text{MaxIL} && \text{(locked at creation)} \\
+\text{covered\_payoff} &= \min(\text{realized\_IL},\, \text{MaxIL}) \le \text{MaxIL} && \text{(by the cap)} \\
+\therefore\quad \text{payout} &\le \text{collateral} = \text{MaxIL} && \text{(no bad debt: I1, I2)}
+\end{aligned}
+$$
+
+The heavy Monte Carlo run confirmed `max_payout_frac = 1.000000` on every simulated path,
+over a ±99% (and a widened −6…+6 log-move) grid, with zero exceptions. Full treatment on
+[the no-bad-debt math page](/math/no-bad-debt-math).
+
+The **second** claim is a different animal entirely — it is about the underwriter,
+not the LP:
+
+<ClaimB />
+
+A wrong or too-low $\sigma_{\text{ref}}$ can make the pool *under-charge load*, so
+premium income stops covering payouts and NAV compresses — junior absorbs it first,
+senior in the tail. That can cost depositors money but can **never** create LP bad
+debt in FULL: collateral = MaxIL ≥ payout *regardless of what $\sigma$ was*. The vol
+oracle is solvency-load-bearing for **the I10 cap and depositor solvency only**, not
+for the FULL no-bad-debt invariant. Two separate guarantees, never merged.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The IL formula" icon="chart-line" href="/math/il-formula">
+    `V_hold` vs `V_lp`, the three regimes, the guarded subtraction, and the Q64.96
+    fixed-point implementation.
+  </Card>
+  <Card title="MaxIL derivation" icon="ruler-combined" href="/math/maxil-derivation">
+    The convexity proof, why the cap is load-bearing, the unit-of-risk argument, and
+    reference MaxIL/V₀ magnitudes.
+  </Card>
+  <Card title="The Phi-sum" icon="sigma" href="/math/fair-value-phi-sum">
+    The exact closed form: piecewise payoff, lognormal interval moments, cap-crossing
+    prices, and verification to machine precision.
+  </Card>
+  <Card title="σ_ref" icon="wave-square" href="/math/sigma-ref">
+    The EWMA vol oracle: `max(σ_short, σ_long, floor)`, why the max is mandatory, and
+    its precise load-bearing scope.
+  </Card>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    `baseLoad` (the CVaR-gap envelope), `util_skew`, `dispersion_skew`, and the I10
+    clamp that makes overcharge impossible by code.
+  </Card>
+  <Card title="No-bad-debt math" icon="shield-halved" href="/math/no-bad-debt-math">
+    The three-line structural core, the I1–I10 invariants, and the dual-tranche
+    waterfall.
+  </Card>
+  <Card title="Worked example" icon="calculator" href="/math/worked-example">
+    One position, three prices, with the verified `[80, 100, 125]` fixture numbers to
+    the wei.
+  </Card>
+  <Card title="Theory anchors" icon="book" href="/math/theory-anchors">
+    Lipton–Lucic–Sepp (2025) static replication and Milionis–Moallemi–Roughgarden
+    (2022) LVR — *why* the claim is priceable.
+  </Card>
+</CardGroup>
+
+<Info>
+Want the protocol-level picture instead of the formulas? Start at
+[the three pillars](/concepts/three-pillars) (published FairValue, the cvAMM pool,
+MM competition), or see how the math plugs into a trade on
+[the pricing stack](/protocol/pricing-stack) and
+[the lifecycle](/protocol/lifecycle).
+</Info>

@@ -1,0 +1,217 @@
+---
+title: "Addresses, decimals & units"
+description: "Import every contract address from the registry — never hardcode. The symbol → address → role map, the decimal conventions (dUSDC 6, dWETH 18, feeds 8, WAD 1e18), and the sqrtPriceX96 ⇄ price ⇄ a/b conversions the SDK ships."
+---
+
+import AddressTable from '/snippets/address-table.mdx'
+
+Two things will silently break an integration if you get them wrong: a **hardcoded address** that drifts from the live registry, and a **decimal mistake** that turns `$8.93` into `$8,930,000` (or back). This page nails both. Every address comes from the on-chain address registry via `@inflexion/sdk`, and every premium, MaxIL, and payout you read is a **6-decimal raw `bigint`** — not a float.
+
+<Note>
+  The SDK **hardcodes nothing**. It loads the registry and re-exports typed groups; `createInflexionSdk` never takes an address argument. Import from the package and you inherit the live deployment automatically. See also [Addresses & deployments](/reference/deployments) and [Decimals & units](/reference/decimals-units).
+</Note>
+
+## Import addresses — never hardcode
+
+The SDK exports the registry as **typed groups**, plus the chain id constant. Import what you need; do not paste a `0x…` literal into application code (mirrored in [the guardrails](/sdk/guardrails)).
+
+```ts title="import the registry groups"
+import {
+  core,        // InflexionCore, ConvexityVault, UnderwriterVault, OracleManager, volOracle, ilMath
+  stylus,      // fairValueOracle (the Φ-sum pricer)
+  libs,        // tickMath, cvammPricing, swapMath, quoteVerification (delegatecall-only)
+  tokens,      // demoUsdc (numéraire), demoWeth
+  demo,        // marketId_fee500_7d, lpPositionTokenId, lifecycle market id
+  chainlink,   // ethUsd, btcUsd, arbUsd, usdcUsd (8-dec feeds)
+  uniswap,     // factory, swapRouter, quoter
+  npm,         // NonfungiblePositionManager
+  CHAIN_ID,    // 421614 (Arbitrum Sepolia)
+} from '@inflexion/sdk'
+```
+
+`CHAIN_ID === 421614` is the default EIP-712 chain id for [quote signing](/integrate/quote-signing).
+
+<Warning>
+  **Limit:** these addresses are **Arbitrum Sepolia testnet** values, not Arbitrum One. **Why:** the protocol is live on Sepolia (chainId 421614) — a [fresh full redeploy on 2026-06-05](/reference/deployments). **Mitigation:** never copy a Sepolia address into a mainnet config. When the protocol ships to Arbitrum One, the registry file changes and your imports follow it for free — that is exactly why you import the symbol, not the literal. The mainnet reference feeds are migration references only, never the live deployment.
+</Warning>
+
+## The symbol → address → role map
+
+These are the addresses the SDK resolves. The canonical, always-current table lives in [the deployments reference](/reference/deployments); it is reproduced here so you can match an exported symbol to its on-chain role at a glance.
+
+<AddressTable />
+
+### Which SDK symbol maps to which row
+
+| Exported symbol | Registry entry | Role in the SDK |
+| --- | --- | --- |
+| `core.inflexionCore` | InflexionCore | State machine; the **EIP-712 `verifyingContract`** for signed quotes; default spender for `lp.buyProtection` |
+| `core.convexityVault` | ConvexityVault | Path-A pooled underwriter; default spender for `depositor.deposit`; equals `swap.mm` on a Path-A swap |
+| `core.underwriterVault` | UnderwriterVault | Per-MM Path-B collateral home (`deposited`/`locked`/`available`) |
+| `core.oracleManager` | OracleManager | Live entry/settlement price; **reverts** on stale feed / sequencer down |
+| `core.volOracle` | VolOracle | σ_ref EWMA; `sigmaRef` reverts if uninitialised |
+| `core.ilMath` | ILMath | Settle-path IL math (`computeIL`/`computeMaxIL`/`getAmountsForLiquidity`) |
+| `stylus.fairValueOracle` | FairValueOracle (Stylus) | The exact closed-form [Φ-sum pricer](/math/fair-value-phi-sum) — **never reimplemented off-chain** |
+| `libs.tickMath` | TickMath | tick → sqrtPriceX96 (**delegatecall-only**) |
+| `libs.cvammPricing` | CvammPricing | The [load stack](/math/load-stack) (**delegatecall-only** — see below) |
+| `tokens.demoUsdc` | dUSDC | **Numéraire, 6 decimals** — all premiums/collateral/payouts |
+| `tokens.demoWeth` | dWETH | Demo volatile token, **18 decimals**; oracle-priced via real Chainlink ETH/USD |
+| `npm` | NonfungiblePositionManager | `positions(tokenId)`, ownership enumeration |
+| `chainlink.ethUsd` | ETH/USD feed | Real 8-dec feed the demo prices dWETH against |
+| `demo.marketId_fee500_7d` | demo market id | The fee-500 / 7-day demo market |
+| `demo.lpPositionTokenId` | `3218` | Seeded ~\$100k unprotected LP NFT for previews |
+
+<Warning>
+  **Limit:** the deployed Solidity libraries — `libs.cvammPricing`, `libs.tickMath`, `libs.swapMath`, `libs.quoteVerification` — **revert on a direct `eth_call`**. **Why:** Solidity guards deployed library functions against being called outside a `delegatecall` context; the library image runs only inside `InflexionCore`'s delegatecall during pricing (confirmed on the 2026-06-05 deploy). **Mitigation:** the SDK never reads `CvammPricing` directly. It keeps a parity-locked TypeScript mirror of the load math — the [`cvamm` namespace](/sdk/cvamm-port) — that is byte-equal to the deployed Solidity. The [Φ-sum](/math/fair-value-phi-sum), by contrast, is **read on-chain** from the Stylus FairValueOracle and never duplicated.
+</Warning>
+
+## Decimals & units — the load-bearing conventions
+
+Get this table into your head before you write a single read or amount. The single rule: **a field named `*Wad` is 1e18-scaled; a USDC amount is a 6-decimal raw `bigint`; a price is feed-decimal raw unless the field name says `Wad`**.
+
+| Quantity | Scale | What carries it |
+| --- | --- | --- |
+| **dUSDC** (numéraire) | **6 decimals** | every `maxPremium`, `amount`, `V0`, `maxIL`, `premium`, `payout`, collateral figure — `1 dUSDC = 1_000_000n` |
+| **dWETH** (volatile token0) | **18 decimals** | token amounts (`amount0Entry`) |
+| **Chainlink price feeds** | **8 decimals** | all four USD feeds |
+| **WAD** | **1e18** (= 1.0) | σ_ref, `fairRateWad`, load components, `aWad`/`bWad` ratios, regime bands |
+| **BPS_TO_WAD** | **1e14** | one basis point in WAD |
+| **sqrtPriceX96** | Uniswap **Q64.96** | the position's sqrt price |
+| **SECONDS_PER_YEAR** | **31,536,000** | 365-day year, matches the quant model |
+
+<Warning>
+  **The single most common integration bug:** treating a 6-decimal premium as dollars. `preview.best === 8_930_000n` means **\$8.93**, not \$8,930,000. **Why:** dUSDC is the 6-decimal numéraire and the SDK returns raw on-chain integers — it never silently converts to a float, because float rounding would corrupt the on-chain `maxPremium` slippage guard. **Mitigation:** format only at the display edge — `Number(premium) / 1e6` for a label, and keep the raw `bigint` for any value you send back on-chain (e.g. `maxPremium`).
+</Warning>
+
+### Reading a premium safely
+
+```ts title="6-dec dUSDC: raw bigint in, label out"
+import { createInflexionSdk, demo } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+const preview = await sdk.lp.previewPremium(demo.lpPositionTokenId, demo.marketId_fee500_7d)
+if (!preview.priceable) throw new Error(preview.reason)
+
+// preview.best is a 6-dec raw bigint, e.g. 8_930_000n
+const usd = Number(preview.best) / 1e6           // 8.93 — DISPLAY ONLY
+const label = usd.toLocaleString('en-US', { style: 'currency', currency: 'USD' }) // "$8.93"
+
+// Slippage guard stays in raw bigint arithmetic — never round-trip through a float.
+const maxPremium = (preview.best * 10_100n) / 10_000n + 1n   // +1% slippage, round up
+```
+
+### WAD ratios and basis points
+
+Loads and rates come back in WAD. To present a load as a percentage, divide by `1e18`; to convert WAD → basis points the SDK exports `wadToBps`:
+
+$$
+\text{bps} = \left\lfloor \frac{\text{wad} \cdot 10000}{10^{18}} \right\rfloor
+\qquad\qquad
+1\ \text{bps} = 10^{14}\ \text{wad}\ (\texttt{BPS\_TO\_WAD})
+$$
+
+```ts title="WAD → %, WAD → bps"
+import { wadToBps } from '@inflexion/sdk'
+
+const totalLoadWad = 1_200_000_000_000_000_000n   // 1.2 in WAD → 120% load
+const loadPct = Number(totalLoadWad) / 1e18        // 1.2  (display)
+const loadBps = wadToBps(totalLoadWad)             // 12000n
+```
+
+<Info>
+  Internally the on-chain [Φ-sum](/math/fair-value-phi-sum) lifts WAD to **1e24** for transcendental precision and rounds back to WAD half-up at the ABI boundary. You never see 1e24 — every value the SDK hands you is already at the WAD (1e18) or 6-dec scale.
+</Info>
+
+## sqrtPriceX96 conversions
+
+Uniswap v3 stores prices as a Q64.96 fixed-point square root, `\sqrt{P}\cdot 2^{96}`. The SDK gives you both directions you need: **sqrt → human price** and **sqrt bounds → the `a`/`b` ratios** the pricer consumes.
+
+### sqrtPriceX96 → price (WAD)
+
+`sqrtToPriceWad(sqrtPX96)` returns the price of token0 in token1, WAD-scaled:
+
+$$
+P_{\text{wad}} \;=\; \left(\frac{\text{sqrtP}_{X96}}{2^{96}}\right)^{2}\cdot 10^{18}
+$$
+
+### sqrtPriceX96 bounds → `a`, `b` (the pricer inputs)
+
+The [fair-value oracle](/concepts/fair-value) and the [load stack](/math/load-stack) are **L-independent**: they depend only on the geometry ratios $a = P_a/P_0$ and $b = P_b/P_0$, σ_ref, and duration. `cvamm.abFromSqrt(sqrtP0, sqrtPa, sqrtPb)` derives them from the position's three sqrt prices:
+
+$$
+a \;=\; \left(\frac{\text{sqrtP}_a}{\text{sqrtP}_0}\right)^{2}\!,
+\qquad
+b \;=\; \left(\frac{\text{sqrtP}_b}{\text{sqrtP}_0}\right)^{2}
+$$
+
+Both returned in WAD as `{ aWad, bWad }`. Note the cancellation of the $2^{96}$ factor — `abFromSqrt` is a pure ratio, so it is unit-clean regardless of the Q64.96 scale.
+
+```ts title="sqrt → price, sqrt bounds → a/b"
+import { cvamm } from '@inflexion/sdk'
+
+// From a resolved LpGeometry (lp.resolveGeometry) you already hold the three sqrt prices.
+const { sqrtP0X96, sqrtPaX96, sqrtPbX96 } = geometry
+
+// a = (Pa/P0), b = (Pb/P0), both WAD — the FairValueOracle / load-stack inputs.
+const { aWad, bWad } = cvamm.abFromSqrt(sqrtP0X96, sqrtPaX96, sqrtPbX96)
+
+// In-range gate (the createSwap entry condition): Pa ≤ P0 ≤ Pb.
+const inRange = sqrtP0X96 >= sqrtPaX96 && sqrtP0X96 <= sqrtPbX96
+```
+
+<Tip>
+  You rarely call `abFromSqrt` by hand. `lp.resolveGeometry` (and `mm.getPositionGeometry`) already compute `aWad`/`bWad` and the `inRange` flag for you from `NPM.positions(tokenId)` + `TickMath`. The standalone helper is there for when you have raw sqrt prices and want the ratios without a position read — see the [cvAMM port](/sdk/cvamm-port).
+</Tip>
+
+### The in-range gate, in price terms
+
+The same condition the SDK derives is the on-chain `createSwap` entry gate — this is what makes it an [in-range convexity hedge, not "IL insurance"](/concepts/in-range-convexity-hedge):
+
+$$
+P_a \;\le\; P_0 \;\le\; P_b
+\quad\Longleftrightarrow\quad
+\text{sqrtP}_a \;\le\; \text{sqrtP}_0 \;\le\; \text{sqrtP}_b
+$$
+
+An out-of-range entry is rejected at creation. [MaxIL](/concepts/maxil) — the cap and the unit of risk — is then pure geometry over $a$, $b$, $L$, $P_0$, frozen at creation.
+
+## marketId — derived, not read
+
+A `marketId` is not an address you import; it is **deterministically derived** from the pair, fee, and duration, identical on-chain and in the SDK. The standalone helper is `computeMarketId`:
+
+$$
+\text{marketId} \;=\; \texttt{keccak256}\big(\texttt{abi.encodePacked}(\text{token0},\ \text{token1},\ \text{fee},\ \text{durationSeconds})\big)
+$$
+
+with `token0 = dWETH`, `token1 = dUSDC` (token0 < token1 by address), types `(address, address, uint24, uint32)`.
+
+```ts title="derive a marketId (matches InflexionCore.registerMarket exactly)"
+import { computeMarketId, tokens } from '@inflexion/sdk'
+
+const SEVEN_DAYS = 604_800
+const marketId = computeMarketId(tokens.demoWeth, tokens.demoUsdc, 500, SEVEN_DAYS)
+// === demo.marketId_fee500_7d for the fee-500 / 7d demo market
+```
+
+Because duration is baked into the id, the **same geometry yields a different marketId — and a different price — per duration** (the cvAMM publishes three prices for one MaxIL). The [9-market grid](/reference/markets-grid) is `3 fee tiers × 3 durations`. For the full parity story between on-chain `registerMarket` and the SDK, see [marketId parity](/integrate/marketid-parity).
+
+<Note>
+  A `SwapRecord` carries **no marketId** on-chain (it is compact). `resolveMarket(client, swap)` recovers it by reproducing the same `keccak256(...)` from `NPM.positions(tokenId)`. You only need this when scanning historical swaps; live pricing flows already have the marketId in hand.
+</Note>
+
+## Quick reference
+
+<CardGroup cols={2}>
+  <Card title="Full deployments registry" icon="book" href="/reference/deployments">
+    Every live address with its role — the canonical table this page draws from.
+  </Card>
+  <Card title="Decimals & units reference" icon="ruler" href="/reference/decimals-units">
+    The numéraire conventions, WAD/bps constants, and Q64.96 internals in one reference page.
+  </Card>
+  <Card title="The cvAMM math port" icon="calculator" href="/sdk/cvamm-port">
+    `abFromSqrt`, the load stack, and why the off-chain mirror is parity-locked to the delegatecall-only library.
+  </Card>
+  <Card title="Getting started" icon="rocket" href="/sdk/getting-started">
+    Wire `createInflexionSdk` for the browser (wagmi) or a server (key-based) and read your first premium.
+  </Card>
+</CardGroup>

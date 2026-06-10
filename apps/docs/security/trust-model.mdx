@@ -1,0 +1,139 @@
+---
+title: "Trust model — what the matcher can & cannot do"
+description: "Settlement is non-custodial and on-chain. The off-chain engine matches Path-B quotes only — it can censor or reorder, but it can never steal, forge, or force-stale, and Path A is immune to it entirely."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+A common question about any DeFi protocol with an off-chain component is: *"isn't the matcher centralized — can't the operator rug you?"* For Inflexion the answer is precise: the off-chain engine exists for **Path B only**, it **never settles and never holds a wallet**, and its power is bounded to **liveness and fairness** — it can censor or reorder Path-B quotes, but it can never steal, forge, or force-stale. [Path A](/protocol/path-a-cvamm) — the cvAMM — needs no engine at all and is immune to it.
+
+The load-bearing point:
+
+<Info>
+**The FULL no-bad-debt guarantee is independent of matching.** It is enforced at on-chain settlement — collateral locked at `MaxIL`, payout capped at `min(realized_IL, MaxIL)` — regardless of *how* the quote was discovered or *which* rail opened the swap.
+</Info>
+
+## Settlement is non-custodial and on-chain
+
+Everything that moves money lives in the contracts. There is no relayer in the settlement path, no admin key that can redirect a payout, and no off-chain ledger that the chain trusts.
+
+- The LP's position NFT is held by `ILVault` during the swap and returned at settle via `ilVault.returnNFT`. `onERC721Received` accepts NFTs **only** from the canonical NonfungiblePositionManager configured at deploy, and `claimFees` forces the recipient to the registered LP — the LP keeps fee accrual the whole time, with **no rehypothecation**.
+- Collateral sits in the counterparty's own vault: the [`ConvexityVault`](/protocol/vaults) (pooled, Path A) or the per-MM [`UnderwriterVault`](/protocol/vaults) (Path B). On settle, the LP receives `payout` and the counterparty keeps `collateral − payout`.
+- `settle(swapId, hintRoundId)` is **callable by anyone** at `block.timestamp ≥ expiry`. It pins the settlement price to the Chainlink **round-at-T** on-chain — never from calldata — and applies the cap with the `L` **stored at creation** (I6). The settlement core is identical regardless of which rail opened the swap.
+
+Because settlement is permissionless and the price is oracle-pinned, no off-chain party is ever *in the path* of a payout. The matcher's only product is a Path-B quote book.
+
+## The engine is Path-B matching only
+
+The off-chain matching engine ([the relayer](/integrate/engine)) does exactly one thing: it surfaces and matches MM-signed Path-B quotes. It is deliberately *not* trusted with anything else.
+
+- It **never settles.** Settlement is the permissionless on-chain `settle()` above.
+- It **never holds a wallet** in the value path. Premium, collateral, and payout all move contract-to-vault-to-LP on-chain; the engine touches none of them.
+- [Path A — the cvAMM](/protocol/path-a-cvamm) needs **no engine at all**: `createSwapPathA` is signature-free, with no relayer, no keeper, no validity clock, no quote book. The LP transacts directly on-chain against the always-on pool. The engine cannot touch Path A in any way.
+
+What gives the engine even its bounded Path-B power is that an MM's [`SignedQuote`](/integrate/quote-signing) is a **bearer instrument** — a signed EIP-712 payload that anyone holding the bytes can submit. The engine is just the most convenient distributor of those bytes. That convenience is also its only leverage, and the protocol's design caps that leverage to nothing that touches solvency.
+
+## What the engine can and cannot do
+
+This is the table to internalize. Every "cannot" is backed by an on-chain mechanism.
+
+| The engine **CAN** | The engine **CANNOT** | Why it cannot |
+| --- | --- | --- |
+| Censor / reorder Path-B quotes (liveness, fairness) | **Steal funds** | Settlement is against the counterparty's own collateral — the pool on Path A, the MM's `UnderwriterVault` on Path B. The engine never holds value. |
+| Pick which signed quotes to surface | **Forge quotes** | Every Path-B quote is MM-signed; verified on-chain by `SignatureChecker.isValidSignatureNow` (EIP-712 ECDSA **or** EIP-1271 contract signer). |
+| Drop quotes from its book | **Force a stale quote to fill** | A quote auto-voids on-chain via three deterministic checks: `validUntil` (band `[5s, 15s]`), the Permit2-style bitmap **nonce**, and the **oracle-anchored price band** (I9). |
+| Order its book however it likes | **Bypass the price band (I9)** | `absBps(P_live, quote.quotePrice) ≤ priceBandBps` is enforced in PHASE 2 of `createSwap`, on-chain, against the live oracle read. No off-chain party can disable it. |
+| — | **Over-consume a quote's capacity** | Atomic check-and-increment in PHASE 3 effects, before any external call: `consumedNotional[quoteId] + V0 ≤ maxNotionalV0` (I7). |
+| — | **Censor Path A *at all*** | Path A needs no engine; the LP transacts directly on-chain against the pool. The engine has no surface on Path A whatsoever. |
+
+The three on-chain mechanisms behind "cannot force a stale quote" deserve a name each, because they are also what makes the firm-quote rail **not** a last-look rail — there is no MM discretion at fill, only deterministic on-chain gates:
+
+<Steps>
+<Step title="Oracle-anchored price band (I9 / Fork 2)">
+The MM signs the oracle price it saw (`quotePrice`) plus a `priceBandBps`. At fill the contract reads the live oracle once — the same read that pins `P0`, zero extra oracle cost — and reverts `PriceOutOfBand` if the live price has drifted outside the band. Bounds: `PRICE_BAND_MIN_BPS = 25` (0.25%), `PRICE_BAND_MAX_BPS = 500` (5%), MM default 100 (1%). This kills the dominant stale-quote pickoff. See [Fork 2](/security/forks) and [price pinning](/security/price-pinning).
+</Step>
+<Step title="Short validity window">
+`validUntil` is bounded to `[5s, 15s]` (`VALIDITY_MIN_S/MAX_S`), default 8s. It bounds the leakage interval during which a leaked payload could be submitted at all.
+</Step>
+<Step title="On-chain selective nonce invalidation">
+A Permit2-style bitmap (`nonce = word<<8 | bit`) lets an MM cancel **one** quote by flipping **one** bit — never cancel-all (via `cancelNonces`, `isNonceUsed`, and `_useNonce`). The on-chain bitmap is authoritative over the off-chain book.
+</Step>
+</Steps>
+
+<Note>
+**No last-look — by design and by hard rule.** All three protections are deterministic and evaluated at fill with **no MM discretion**, which is exactly what distinguishes a firm-quote-plus-oracle-band rail from a last-look rail. There is no last-look path. See [Fork 2](/security/forks) for why firm + band beats last-look.
+</Note>
+
+## The direct-to-contract fallback
+
+The engine's *only* real power is over Path-B liveness and fairness — it can censor, reorder, or simply go down. The protocol neutralizes even that, because EIP-712 verification is **on-chain**.
+
+<Warning>
+**Limitation:** the off-chain matcher can censor or reorder Path-B flow — it could refuse to surface your quote, or order its book unfairly.
+
+**Why it exists:** a quote book is an off-chain convenience (see the decentralization roadmap below). The engine is the distributor of bearer-instrument signed quotes, so it sits between MMs and LPs by default.
+
+**Mitigation — direct-to-contract fallback:** because the EIP-712 signature is verified on-chain, **any LP holding a valid signed quote can call `createSwap` directly**, bypassing the engine entirely. The [SDK](/sdk/lp-client) exposes this path. A censoring operator simply loses that flow — it cannot capture an LP who routes around it. Two further mitigations harden fairness: an **append-only quote log** (the engine publishes its full quote stream and match decisions to a rotating append-only log, making ordering auditable) and **deterministic price-time / FIFO matching rules**.
+</Warning>
+
+So the worst the operator can do is degrade Path-B liveness for users who choose to rely on it — never seize funds, never forge a fill, never force a stale quote through, and never touch Path A.
+
+## The FULL guarantee is independent of matching
+
+This is the crux, and it is why "isn't the matcher centralized?" is a non-threat to solvency. The no-bad-debt invariant ([I1](/security/invariants)) is **structural** — it is a property of the settlement arithmetic, not of how the quote was discovered.
+
+$$
+\text{payout} \;=\; \min(\text{realized\_IL},\; \text{MaxIL}) \;\le\; \text{MaxIL} \;=\; \text{collateral}
+$$
+
+```solidity
+uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
+```
+
+Every difference between Path A and Path B lives in `createSwap` pricing and locking — **upstream of settle**. The settlement core (`settle`, the `min(IL, MaxIL)` cap, the MaxIL formula, [I1–I9](/security/invariants)) is **identical regardless of which rail opened the swap**, and identical regardless of whether the matching engine was involved at all. A swap created via the engine, via the direct-to-contract fallback, or via signature-free [Path A](/protocol/path-a-cvamm) all settle through the same untouched core.
+
+The proof is also **oracle-independent**: `settle` caps payout at `MaxIL == collateral` no matter what any pricing oracle returns. The [FairValueOracle](/concepts/fair-value) and `VolOracle` are load-bearing for the [I10 price cap](/concepts/no-bad-debt) and for depositor solvency — they are **not** part of the I1 proof.
+
+The live lifecycle on Arbitrum Sepolia demonstrates this end to end: the 2026-06-05 redeploy ran a real create→settle on **both** rails — Path A swap #1 settled \$148.64 from the `ConvexityVault`, and routed swap #2 picked the MM (\$8.93 vs cvAMM \$13.80) and paid \$245.66 from the **MM's own** `UnderwriterVault` collateral. The counterparty's own collateral pays — never protocol funds, never the matcher.
+
+<ClaimA />
+
+This is **separate** from the depositor-capital claim — never merge the two. The matcher cannot create LP bad debt; depositor capital, meanwhile, is a different risk entirely:
+
+<ClaimB />
+
+## The signature surface, stated explicitly
+
+The only EIP-712 schema changes in the v4.0 hybrid are stated explicitly:
+
+- Signature verification broadened from `ECDSA.recover` to OZ `SignatureChecker.isValidSignatureNow`, which supports **EIP-1271 contract signers** (including a vault-signer) while EOA-signed quotes still validate identically — non-breaking. This is what lets the `ConvexityVault` own its collateral directly with no keeper EOA.
+- The `premiumRate → loadBps` field swap, which bumped `SIGNED_QUOTE_TYPEHASH`.
+
+Both are documented in [quote signing](/integrate/quote-signing). Note that the `SignedQuote` carries **no `tokenId`** — it is per-market, never per-NFT — which is the mechanical consequence of [MaxIL being the fungible unit of risk](/concepts/maxil).
+
+## Decentralization roadmap
+
+The clean answer to "but the matcher is still off-chain": yes, for Path B, and the protocol is designed so that this costs you nothing on solvency today and can be removed entirely tomorrow.
+
+<Warning>
+**Limitation:** the Path-B quote book runs off-chain at launch.
+
+**Why:** a bearer-instrument quote model is the right primitive for an off-chain quote book at launch.
+
+**Mitigation / path forward:** an Arbitrum **Orbit chain** could host the Path-B quote book fully on-chain (the Hyperliquid pattern), removing the off-chain component entirely. Until then, the [direct-to-contract fallback](#the-direct-to-contract-fallback) means no user can be captured by a censoring operator, and **the cvAMM is already fully on-chain today** — Path A is the always-on, signature-free floor that needs no engine at all.
+</Warning>
+
+So the decentralization story is a two-step: Path A is already fully on-chain; Path B is off-chain-matched but bearer-instrument-trustless (direct fallback + auditable log), with Orbit as the path to fully on-chain matching. At no point does the matcher gain power over funds.
+
+## Where this is enforced — live
+
+<AddressTable />
+
+<Maturity />
+
+## One-paragraph summary
+
+Settlement is non-custodial and on-chain: `settle()` is permissionless, the price is pinned to the Chainlink round-at-T, and payout is capped at `MaxIL == collateral` (I1/I2) against the *counterparty's own* vault — so no off-chain party is ever in the value path. The matching engine exists for [Path B](/protocol/path-b-mm) only; it never settles and never holds a wallet, and it **can** only censor or reorder quotes (liveness, fairness) — it **cannot** steal (settlement is against the counterparty's collateral), forge (every quote is MM-signed, verified on-chain via `SignatureChecker`), or force-stale (the `validUntil` window, bitmap nonce, and oracle-anchored I9 band auto-void on-chain). Even its bounded liveness power is neutralized by the [direct-to-contract fallback](#the-direct-to-contract-fallback) plus an append-only quote log, and [Path A](/protocol/path-a-cvamm) is fully on-chain and immune to the engine entirely. Above all, the [FULL no-bad-debt guarantee is independent of matching](/security/invariants): it is a structural, oracle-independent property of the settlement core, identical no matter which rail — or whether the engine — opened the swap.

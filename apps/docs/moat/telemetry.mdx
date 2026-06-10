@@ -1,0 +1,331 @@
+---
+title: "Off-chain telemetry pipeline"
+description: "Two of the five moat signals can never live fully on-chain — invariant I7 guarantees an unchosen quote leaves no trace. DEMAND_LOG and COMPETITION_LOG capture the latent and dynamic halves from the first interaction, PII-free and best-effort, so the data that the chain never sees is never lost."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Two of the [five behavioral signals](/moat/five-signals) need data that **never reaches the chain by design**. An LP who priced a position but did not buy, and an MM quote that lost or was withdrawn, leave **no on-chain trace** — because invariant [I7](/security/invariants) guarantees an *unchosen* quote touches no nonce and no capacity. So the **latent** half of Signal 4 (demand) and the **dynamic** half of Signal 2 (quote competition) live in **off-chain engine telemetry**, captured from the very first interaction — because they are **unreconstructable retroactively**.
+
+This page is the deep treatment of that pipeline: why these two signals can never be on-chain, the two append-only JSONL sinks, the PII-free bucket scheme, the best-effort write contract, the SDK preview ping, and how the API later reads the sinks. For where these two halves sit in the full taxonomy, see [the five signals](/moat/five-signals); for the relayer they ride on, see [the engine](/integrate/engine).
+
+<CardGroup cols={2}>
+  <Card title="DEMAND_LOG — Signal 4 latent half" icon="magnifying-glass-chart">
+    Every priced-but-not-bought interest: `GET /quote` requests and `previewPremium`
+    pings. `filled` is **always `false`** — this is exactly the demand the chain never
+    sees.
+  </Card>
+  <Card title="COMPETITION_LOG — Signal 2 dynamic half" icon="arrows-left-right">
+    Every inbound MM quote, **winners AND losers/stale/withdrawn** — the competing field
+    (who else quoted, how wide, who retreated) that `store.ts` would otherwise discard.
+  </Card>
+</CardGroup>
+
+## Why two signals can NEVER be on-chain — invariant I7
+
+The data moat rests on a structural fact: **on-chain, Inflexion only ever observes realized fills.** Everything that did *not* clear is invisible to the chain — and that is not an accident, it is a guarantee.
+
+Invariant [**I7 — capacity authority**](/security/invariants) states that on-chain `consumedNotional[quoteId] ≤ maxNotionalV0`, and that a cancelled bitmap-nonce bit cannot fill. The corollary is that an *unchosen* quote — one that lost the route, expired, or was withdrawn — **touches no nonce and no capacity**. It mutates no state, so it leaves no event, no storage write, nothing.
+
+That makes two of the five signals fundamentally off-chain:
+
+<AccordionGroup>
+  <Accordion title="Signal 4 latent half — the demand that did not clear" icon="magnifying-glass-chart">
+    On-chain we see only **realized purchases** — `SwapCreated` fires when an LP actually
+    buys. But that is biased by quote availability: a geometry queried 100× but filled 10×
+    because it was too expensive reads as *low demand* when it is really *high demand at the
+    wrong price*. The **true demand including unfilled interest**
+    lives in relayer `GET /quote` requests and SDK `previewPremium` calls that never hit the
+    chain. The realized half is reconstructable from on-chain events later; the latent half
+    is gone forever if not logged now.
+  </Accordion>
+  <Accordion title="Signal 2 dynamic half — the quotes that lost" icon="arrows-left-right">
+    A Path-B fill reveals the *winning* MM's load (via [`QuoteFilled`](/moat/primitives)) and
+    the *losing pool quote* it beat (via [`SwapPriced`](/moat/primitives)) — the spread of one
+    fill. But the **competitive distribution** — who else quoted, how wide they were, who
+    widened or withdrew under stress — touches no chain state because those quotes were never
+    chosen (I7). Only the realized fill is on-chain; the full competing field is captured only
+    in telemetry.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+**These two signals are unreconstructable retroactively — so they must be captured from the first interaction.**
+
+- **Limit:** unfilled interest and losing quotes leave no on-chain trace. If they are not
+  logged in real time, they cannot be recovered — there is no archive to backfill from.
+- **Why:** putting unfilled interest on-chain would both **cost gas** and **break I7** — an
+  unchosen quote must not consume capacity or burn a nonce, or the capacity-authority
+  invariant no longer holds. The chain is deliberately the wrong place
+  for this data.
+- **Mitigation / path-forward:** capture it off-chain from day one. The two JSONL sinks are
+  **live now** and have been writing since the first interaction — long before any `/data`
+  endpoint, subgraph, or API exists to serve them. The capture *is* the point; the serving
+  comes later.
+</Warning>
+
+This is the design boundary, drawn precisely:
+
+| Half of the signal | Where it lives | Why |
+| --- | --- | --- |
+| Signal 4 **realized** demand | On-chain (`SwapCreated` + geometry decode) → subgraph | A purchase is a state change; the chain records it |
+| Signal 4 **latent** demand | Off-chain `DEMAND_LOG` | Priced-but-not-bought touches no chain state (I7) |
+| Signal 2 **structural** spread | On-chain (`SwapPriced` + `QuoteFilled`) → subgraph | One fill's pool-vs-MM spread is two emitted events |
+| Signal 2 **dynamic** competition | Off-chain `COMPETITION_LOG` | Losing/withdrawn quotes touch no chain state (I7) |
+
+## The pipeline — diagram in prose
+
+The telemetry pipeline is a thin, append-only path that runs *alongside* the relayer, never *in* its trust path. End to end:
+
+<Steps>
+  <Step title="The actor interacts off-chain">
+    An MM streams a firm quote to the engine over WebSocket, **or** an LP previews a premium
+    through the SDK, **or** a taker reads `GET /quote` for a market. None of these is an
+    on-chain transaction — they are pure off-chain reads/pushes against the relayer.
+  </Step>
+  <Step title="The relayer handles the interaction normally">
+    It verifies the EIP-712 signature, applies a light freshness gate, and stores the
+    cheapest live quote — its [actual job](/integrate/engine#the-websocket-protocol-mm-relayer).
+    The store keeps only the *latest* quote per `(market, MM)`, so by itself it forgets the
+    competing field.
+  </Step>
+  <Step title="The TelemetrySink writes a record — best-effort">
+    The `TelemetrySink` appends one JSONL line to the
+    relevant sink: a `CompetitionRecord` for **every** inbound quote (winner or loser), a
+    `DemandRecord` for **every** `GET /quote` and **every** preview ping. The write is
+    best-effort: a telemetry failure **never** breaks the quote ack, the preview, or the
+    `/quote` request.
+  </Step>
+  <Step title="The API reads the sinks and serves aggregates">
+    Post-redeploy, [`@inflexion/api`](/integrate/api-overview) reads the JSONL files (not a
+    subgraph entity, not a contract event) and serves `GET /data/demand-requests` (latent)
+    and `GET /data/quote-competition` (dynamic), each carrying the maturity disclaimer.
+  </Step>
+</Steps>
+
+```
+  MM quote (WS)  ──┐
+  /quote  (HTTP) ──┼──►  engine relayer  ──►  TelemetrySink.appendJsonl  ──►  DEMAND_LOG (JSONL)
+  previewPremium ──┘     (verify+freshness)    (best-effort, never throws)     COMPETITION_LOG (JSONL)
+                                                                                       │
+                                                                                       ▼
+                                                              @inflexion/api reads files (no subgraph,
+                                                              no event) ──► /data/demand-requests
+                                                                           /data/quote-competition
+```
+
+<Note>
+**This is a structured log/telemetry pipeline — NOT a subgraph entity and NOT an on-chain
+event.** The
+subgraph indexes the *on-chain* halves of the signals; the telemetry sinks capture the
+*off-chain* halves the chain can never carry. They are complementary layers, joined only at
+the API.
+</Note>
+
+## `DEMAND_LOG` — Signal 4, the latent half
+
+Written on **every `GET /quote` request** and **every `POST /telemetry/preview` ping**. The defining field is `filled`, which is **always `false`** at write time — this log is precisely the demand the chain never sees. Realized fills are reconstructed separately, later, from on-chain `SwapCreated`/`SwapPriced`.
+
+The `DemandRecord` schema:
+
+```jsonc DemandRecord
+{ "ts": 1900000000,
+  "marketId": "0x…",            // bytes32, lowercased
+  "widthBucket": "tight",       // tight | medium | wide | full | unknown
+  "distanceBucket": "at-edge",  // at-edge | near | mid | deep | unknown
+  "durationBucket": "week",     // hour | day | week | month | longer | unknown
+  "previewedPremium": "777",    // optional decimal string; absent for a bare /quote
+  "filled": false,              // ALWAYS false — the latent / unfilled half
+  "source": "preview" }         // "preview" | "quote-request"
+```
+
+Two write paths feed it:
+
+- **`logQuoteRequest(marketId, now)`** — emitted by `GET /quote`. A bare lookup carries no
+  geometry, so all three buckets are `'unknown'` and `source` is `'quote-request'`.
+  This captures *interest in a market* even when the requester
+  supplies no position.
+- **`ingestPreview(input, now)`** — emitted by `POST /telemetry/preview`. It validates and
+  normalizes the loosely-typed body: `normalizeMarketId` requires bytes32 hex,
+  `normalizePremium` coerces a string/number/bigint into a bigint-safe decimal string or
+  drops it; `source` is `'preview'`. It returns `{ ok, logged, reason? }`. This is the rich
+  path — it carries the actual geometry buckets the LP previewed.
+
+## `COMPETITION_LOG` — Signal 2, the dynamic half
+
+Written for **every** inbound WS quote — **winners AND losers/stale/withdrawn-equivalent** (`logQuote`), called from both the WS handler and `POST /quote`. The `CompetitionRecord` schema:
+
+```jsonc CompetitionRecord
+{ "ts": 1900000000,
+  "marketId": "0x…",            // bytes32, lowercased
+  "mm": "0x…",                  // MM address, lowercased
+  "loadBps": 500,
+  "validUntil": "1900000010",   // uint64 as decimal string
+  "accepted": true,             // true iff stored as a live candidate (verify+freshness passed)
+  "reason": "bad-signature" }   // present only when accepted=false (mirrors the WS rejection)
+```
+
+<Info>
+**Why log the losers at all.** The quote [`store`](/integrate/engine#the-quote-store) keeps
+only the *latest* stored quote per `(market, MM)` — so by itself it loses the competition:
+who else quoted, how wide, who widened or withdrew under stress. The chain only ever sees the
+realized fill (I7), so the **full competing field is captured only here**. `accepted` marks
+whether the relayer stored the quote as a live candidate (signature + freshness valid); a
+*rejected* quote still competed and is still logged, with `reason` mirroring the WS rejection.
+</Info>
+
+This `accepted=false` row is what makes the dynamic half real: an MM that quotes wide and gets passed over, or whose stale quote is dropped, is exactly the behavior that — across competing MMs — reads as *the market widening under stress*. None of it is on-chain. None of it is reconstructable after the fact.
+
+## PII-free buckets — the labels, never the geometry
+
+The telemetry sinks hold **no PII, no raw geometry, no `tokenId`, and no addresses on the demand path** — only coarse buckets plus the `marketId`. The privacy property is structural: **the SDK computes the buckets client-side and POSTs only the labels.** The raw range never leaves the LP's machine.
+
+The three bucket dimensions:
+
+| Bucket | Values | Meaning |
+| --- | --- | --- |
+| `WidthBucket` | `tight \| medium \| wide \| full \| unknown` | tick-span of the LP range |
+| `DistanceBucket` | `at-edge \| near \| mid \| deep \| unknown` | how near spot is to going out of range |
+| `DurationBucket` | `hour \| day \| week \| month \| longer \| unknown` | $\text{expiry} - \text{createdAt}$ |
+
+Unknown or invalid input coerces to `'unknown'` via `asWidthBucket` / `asDistanceBucket` / `asDurationBucket` — a malformed bucket never becomes a fake data point, it becomes an honest `unknown`. These are the same geometry primitives the moat buckets every signal by — **width × distance-to-edge × duration** — but reduced to labels before they ever leave the client:
+
+$$
+\text{width} = \log\!\frac{P_b}{P_a},
+\qquad
+\text{distance-to-edge} = \frac{\min(P_0 - P_a,\; P_b - P_0)}{P_0},
+\qquad
+\text{duration} = \text{expiry} - \text{createdAt}
+$$
+
+<Note>
+**Why bucketing makes the data both private and useful.** Because [MaxIL](/concepts/maxil) is
+the unit of risk and makes positions *fungible within a market*, the informative dimension
+is not the exact range — it is the **geometry class** (tight near-edge week vs wide centered
+month). Bucketing throws away the identifying detail while keeping precisely the dimension
+the [demand-skew signal](/moat/five-signals) reads. Privacy and signal point the same way
+here, not against each other.
+</Note>
+
+## Best-effort writes — graceful degradation as a first-class property
+
+The writer (`appendJsonl`) is **best-effort: it never throws.** A full disk, a bad path, or an unconfigured sink must not break a quote ack, a preview, or a `/quote` request.
+
+<Warning>
+**A telemetry write can silently fail — by design, this never propagates to the caller.**
+
+- **Limit:** a write to `DEMAND_LOG` or `COMPETITION_LOG` can fail (disk full, bad path) or
+  be skipped entirely (no sink configured). When it does, that data point is lost.
+- **Why:** telemetry is a **side channel**, not the relayer's job. The relayer's contract is
+  to verify and serve quotes; making a quote ack depend on a successful log write would
+  couple a convenience surface to the critical path and could break quoting on a disk error.
+  Graceful degradation is a first-class property of the whole access layer.
+- **Mitigation / path-forward:** the writer is wrapped so it never throws; on failure the
+  surface reports `logged:false` rather than erroring, and the interaction completes
+  normally. The two sinks **must be configured from the first deploy** (`DEMAND_LOG` /
+  `COMPETITION_LOG` env vars) — because the data is
+  unreconstructable, an unconfigured sink is the only real loss, and that is operational,
+  not a code path failure.
+</Warning>
+
+Sink status is observable, never silent: `get demandEnabled` / `get competitionEnabled` report whether each sink path is configured, and `GET /health` surfaces both:
+
+```json
+{ "ok": true,
+  "markets": 3,
+  "telemetry": { "demand": true, "competition": true } }
+```
+
+A `false` here is the honest signal that a sink is unconfigured — capture is degraded, and it shows.
+
+## The SDK preview ping
+
+The LP-side trigger for the latent-demand half is `LpClient.previewPremium`, which fires a best-effort, fire-and-forget `POST ${engineBaseUrl}/telemetry/preview` that **never blocks or fails the preview**. The LP gets their premium estimate whether or not the ping lands; the ping is pure upside for the moat.
+
+The endpoint reads at most **4096 bytes** and accepts only bucketed geometry plus `marketId` — no PII:
+
+<CodeGroup>
+```bash POST /telemetry/preview (curl)
+# Day-one demand ping — buckets only, no PII, no tokenId, no address
+curl -s -X POST http://localhost:8787/telemetry/preview \
+  -H 'content-type: application/json' \
+  -d '{"marketId":"0x...","widthBucket":"tight","distanceBucket":"at-edge","durationBucket":"week","previewedPremium":"777"}'
+# → 202 {"ok":true,"logged":true}
+# logged:false when no DEMAND_LOG sink is configured
+```
+
+```typescript SDK (conceptual)
+// LpClient.previewPremium computes the buckets client-side, then fires
+// the ping in the background — it does NOT await it, and a failed ping
+// never affects the returned premium.
+const preview = await lp.previewPremium({ tokenId, durationSeconds });
+// preview = { fairPremium, poolPremium, mmLoadBps?, ... }
+// side effect (fire-and-forget): POST /telemetry/preview with
+//   { marketId, widthBucket, distanceBucket, durationBucket, previewedPremium }
+```
+</CodeGroup>
+
+Outcomes: a valid `marketId` returns `202 { ok:true, logged:true|false }` — `logged:false` when no sink is configured; a missing or invalid `marketId` returns `400 { ok:false, reason:"marketId (bytes32 hex) required" }`. It **always 202-acks fast and never blocks the preview**.
+
+<Tip>
+The `GET /quote` path *also* writes a `DemandRecord` (with `'unknown'` buckets) before it
+answers, so even a taker who never previews through the SDK leaves a latent-demand trace for
+the market they looked at. The preview ping is the *rich*
+demand source; the `/quote` log is the *broad* one.
+</Tip>
+
+## How the API serves the two halves
+
+The two sinks are read by [`@inflexion/api`](/integrate/api-overview), which reads the JSONL **files** directly — not a subgraph entity, not a contract event — and serves aggregated views:
+
+| Sink | API route | Signal | Aggregation |
+| --- | --- | --- | --- |
+| `DEMAND_LOG` | `GET /data/demand-requests` | 4 (latent half) | `demandSurface` → per `(market × width × distance × duration)`: `{ count, previews, quoteRequests, firstSeen, lastSeen }` |
+| `COMPETITION_LOG` | `GET /data/quote-competition` | 2 (dynamic half) | `competitionSurface` → per `(market × MM)`: `{ quotes, accepted, rejected, minLoadBps, maxLoadBps, avgLoadBps, lastSeen }` |
+
+The reader degrades as gracefully as the writer: an absent or unreadable sink yields `[]` and the handler emits a typed `pending('telemetry-sink-absent', …)`; a malformed JSONL line is skipped so a partial last write never breaks the read; **the reader never throws**.
+
+Crucially, the **latent demand half is LIVE now** — `/data/demand-requests` returns the latent half from the telemetry sink even while the realized half is subgraph-`pending`, each carrying its own availability flag. Signal 4 is the one intrinsically split surface, and telemetry is why half of it is already real.
+
+```bash GET /data/quote-competition (winners AND losers)
+curl -s 'http://localhost:8088/data/quote-competition?marketId=0x...&since=1900000000'
+# → {"available":true,"competition":[{"mm":"0x...","quotes":12,"accepted":10,"rejected":2,
+#     "minLoadBps":480,"avgLoadBps":510,"maxLoadBps":540,...}],"enabled":true,"disclosure":"..."}
+# sink absent → {"available":false,"reason":"telemetry-sink-absent","detail":"COMPETITION_LOG not configured..."}
+```
+
+## Maturity — what telemetry gives you today
+
+<Maturity />
+
+The telemetry **capture** is live and complete from the first interaction — that is the part that *had* to ship first, because it is unreconstructable. What matures with volume is the **read**: a single MM's competition log is one quoter, not a market; the dynamic forward-vol signal of Signal 2 needs **≥3 competing MMs** before the dispersion of loads becomes a market view rather than one undercut. Likewise, latent demand sharpens into a *leading indicator* only once the request stream has enough volume to separate demand from price-sensitivity.
+
+<Note>
+**The honest framing.** The two off-chain halves of the moat are *being recorded right now*,
+structured and PII-free, from interaction one. The dynamics they will eventually reveal are a
+function of MM competition and flow — but the irreversible decision (to capture before there
+was anything to serve) is already made and already running.
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The five signals" icon="list-ol" href="/moat/five-signals">
+    Where the latent demand (4) and quote competition (2) halves sit in the full taxonomy.
+  </Card>
+  <Card title="On-chain primitives" icon="cube" href="/moat/primitives">
+    The two on-chain moat events (`SwapPriced`, `QuoteFilled`) that carry the structural halves.
+  </Card>
+  <Card title="Circular vs behavioral" icon="scale-balanced" href="/moat/circular-vs-behavioral">
+    Why these are non-circular signals, and why inverting `fairRate` is not.
+  </Card>
+  <Card title="The engine" icon="satellite-dish" href="/integrate/engine">
+    The Path-B relayer the telemetry pipeline rides on, end to end.
+  </Card>
+  <Card title="The public REST API" icon="server" href="/integrate/api-overview">
+    The read-only facade that aggregates the two JSONL sinks into `/data/*` surfaces.
+  </Card>
+  <Card title="State and limits" icon="circle-info" href="/moat/state-and-limits">
+    The exact state of the dataset and the full set of honest limits.
+  </Card>
+</CardGroup>

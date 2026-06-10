@@ -1,0 +1,322 @@
+---
+title: "Decimals & units"
+description: "The numéraire conventions — dUSDC 6, dWETH 18, Chainlink 8, WAD 1e18, BPS_TO_WAD, sqrtPriceX96, the FVO 1e24 scale, SECONDS_PER_YEAR — and how to convert between them safely."
+---
+
+Inflexion mixes several fixed-point conventions on purpose: an ERC-20 numéraire
+that is **6 decimals**, a volatile token that is **18**, Chainlink feeds that are
+**8**, and an internal **WAD (1e18)** world for every rate. Getting these wrong is
+the single most common integration bug, so this page is the canonical decoder
+ring.
+
+<Note>
+The naming rule is mechanical: a field whose name ends in **`Wad`** is 1e18-scaled
+fixed point (`1e18 = 1.0`). A **USDC amount** is a 6-decimal raw `bigint`. A
+**price** is a feed-decimal raw integer **unless** the field name says `Wad`.
+</Note>
+
+## The numéraire conventions table
+
+| Quantity | Scale | What it measures |
+| --- | --- | --- |
+| **dUSDC** (numéraire, `token1`) | **6 decimals** | All premiums, MaxIL, V0, payouts — denominated in the numéraire as 6-dec raw integers |
+| **dWETH / WETH** (volatile, `token0`) | **18 decimals** | The volatile leg of the pair |
+| **Chainlink USD feeds** | **8 decimals** | ETH/USD, BTC/USD, ARB/USD, USDC/USD answers |
+| **WAD** | **1e18** | The fixed-point unit for every rate: σ_ref, fairRate, load components, the `a`/`b` price ratios |
+| **BPS_TO_WAD** | **1e14** | One basis point expressed in WAD (`1 bp = 1e14`) |
+| **sqrtPriceX96** | Uniswap **Q64.96** | The Uniswap v3 √price (a `uint160` carrying a 96-bit fractional part) |
+| **ILMath internal** | **Q64.96** | Settle-path IL math runs in pure Q64.96 fixed point |
+| **FairValueOracle internal** | **1e24** | The Stylus FVO lifts WAD → 1e24 for precision, then rounds back to WAD half-up |
+| **SECONDS_PER_YEAR** | **31,536,000** | A 365-day year, used to annualise σ_ref and T; matches the Python model |
+
+<Tip>
+The numéraire (`token1 = dUSDC`) is the unit of account for **everything an LP or
+underwriter sees in dollars**: the premium they pay, the MaxIL collateral that
+gets locked, the entry value V0, and the payout at expiry. If a number is "in
+USD," it is a 6-decimal raw integer.
+</Tip>
+
+## Why three different worlds (6 / 18 / 8) coexist
+
+These are not arbitrary — each scale is fixed by an external system Inflexion does
+not control:
+
+<CardGroup cols={3}>
+<Card title="6 — the token's own decimals" icon="dollar-sign">
+dUSDC mirrors Circle's native USDC, which is a 6-decimal ERC-20. The numéraire
+**must** match the token contract or transfers would be off by 12 orders of
+magnitude.
+</Card>
+<Card title="18 — the token's own decimals" icon="ethereum">
+dWETH mirrors WETH, an 18-decimal ERC-20. token0 &lt; token1 by address, so
+`token0 = dWETH` and `token1 = dUSDC` (see [the markets grid](/reference/markets-grid)).
+</Card>
+<Card title="8 — Chainlink's convention" icon="link">
+Every Chainlink USD aggregator on Arbitrum reports an 8-decimal `answer`. This is
+their convention, not ours; the [OracleManager](/protocol/oracles) consumes it
+as-is.
+</Card>
+</CardGroup>
+
+WAD (1e18) is the **internal lingua franca** that decouples rate math from any
+token's decimals. σ_ref, fairRate, the load multipliers, and the `a = Pa/P0` /
+`b = Pb/P0` ratios are all dimensionless rates, so they live in WAD where
+`1e18 = 1.0`. This is why a `*Wad` suffix is load-bearing: it tells you the value
+has already been normalised out of token-decimal space.
+
+<Warning>
+**Limit:** dWETH and dUSDC are *demo* tokens on Arbitrum Sepolia, not canonical
+WETH/USDC. **Why:** there is no pre-seeded WETH/USDC v3 pool with material
+liquidity on Sepolia, so the deployment ships its own numéraire-correct mock pair.
+**Mitigation:** dWETH is oracle-priced via the **real Chainlink ETH/USD feed**, so
+it still moves with live ETH, and the decimal conventions (6 / 18 / 8) are
+identical to the eventual Arbitrum One deployment — see
+[deployments](/reference/deployments).
+</Warning>
+
+## WAD, basis points, and the rate stack
+
+Every rate Inflexion publishes — `fairRate`, each load component, σ_ref — is a WAD
+value. The conversion `BPS_TO_WAD = 1e14` bridges the on-chain basis-point inputs
+(an MM signs a `loadBps`; the I10 cap is a `maxLoadBps`) into the WAD math:
+
+$$
+1\ \text{bp} = 10^{-4} = \frac{10^{14}}{10^{18}}\ \text{WAD}
+\qquad\Longrightarrow\qquad
+\texttt{BPS\_TO\_WAD} = 10^{14}
+$$
+
+The constants are exported directly from the SDK's parity-locked load-stack port:
+
+```ts
+export const WAD = 1_000_000_000_000_000_000n  // 1e18  (1e18 = 1.0)
+export const BPS_TO_WAD = 100_000_000_000_000n // 1e14  (1 bp)
+```
+
+So a 10% MM load (`loadBps = 1000`, the value on the live Path-B swap — see
+[lifecycle](/protocol/lifecycle)) converts to WAD as
+`1000 × 1e14 = 1e17 = 0.10` in WAD. The load stack then computes:
+
+$$
+\texttt{premium} = \texttt{FairPremium} \cdot \bigl(1 + \texttt{loadWad}\bigr),
+\qquad
+\texttt{loadWad} = \texttt{loadBps} \cdot \texttt{BPS\_TO\_WAD}
+$$
+
+<Note>
+`loadBps` and `maxLoadBps` are the **basis-point** twins of the WAD load values —
+the same quantity in two units. The on-chain I10 cap is expressed in bps
+(`maxLoadBps`) and as a rate (`maxLoad`); see [the load stack](/math/load-stack)
+and [the invariants](/security/invariants).
+</Note>
+
+## sqrtPriceX96 and the Q64.96 fixed-point world
+
+Uniswap v3 stores price as a **`sqrtPriceX96`** — the square root of the price of
+`token0` in `token1`, scaled by $2^{96}$:
+
+$$
+\texttt{sqrtPriceX96} = \sqrt{P}\cdot 2^{96}
+\qquad\Longrightarrow\qquad
+P = \left(\frac{\texttt{sqrtPriceX96}}{2^{96}}\right)^{2}
+$$
+
+This is a `uint160` carrying a 96-bit fractional part — the "Q64.96" format (64
+integer bits, 96 fractional bits). Inflexion's settle-path IL math
+([ILMath](/math/il-formula)) runs **entirely in Q64.96** so it never touches
+floating point: `computeMaxIL`, `computeIL`, and `getAmountsForLiquidity` are pure
+Q64.96.
+
+<Warning>
+**Important:** the price $P$ recovered from `sqrtPriceX96` is **token0-in-token1 in
+raw token units** — it has *not* been adjusted for the 18-vs-6 decimal gap between
+dWETH and dUSDC. To get a human "ETH price in USD" you must additionally divide by
+$10^{(18-6)} = 10^{12}$. This decimal-gap adjustment is the second most common
+integration bug after confusing `*Wad` fields with raw amounts.
+</Warning>
+
+## The FairValueOracle 1e24 scale
+
+The Stylus [FairValueOracle](/protocol/oracles) speaks **WAD on its ABI** but
+computes internally in **1e24**. Stylus bans WASM floating point at activation, so
+every transcendental in the Φ-sum (erf/Φ, exp, ln, sqrt) is integer fixed point;
+the contract lifts its WAD inputs to 1e24 for headroom and rounds the result back
+to WAD **half-up**.
+
+<Info>
+You never see 1e24 from the outside. The FVO takes WAD inputs (`a`, `b`, σ_ref via
+STATICCALL) and returns a WAD `fairRate` / a numéraire-scaled `FairPremium`. The
+1e24 lift is an internal precision device that keeps the Φ-sum machine-precise to
+≤ 1e-12 — it is not part of any ABI you call. Treat the FVO as a WAD black box and
+read [the Φ-sum page](/math/fair-value-phi-sum) for the math.
+</Info>
+
+## SECONDS_PER_YEAR and time
+
+σ_ref and the time-to-expiry $T$ are both annualised over a **365-day year**:
+
+$$
+\texttt{SECONDS\_PER\_YEAR} = 365 \times 24 \times 3600 = 31{,}536{,}000
+$$
+
+This value is shared by the on-chain [VolOracle](/protocol/oracles) and the Stylus
+FVO, and it matches the Python quant model — so the annualisation is identical
+across the off-chain research notebook, the vol oracle, and the pricer. The market
+durations feed into $T$ as raw seconds: `7d = 604,800`, `30d = 2,592,000`,
+`90d = 7,776,000` (see [the markets grid](/reference/markets-grid)).
+
+<Note>
+Durations are stored as raw seconds and are part of the `marketId` preimage
+(`uint32 durationSeconds`). The fairRate S-curve is a function of $\sigma^2 \cdot T$,
+so the same geometry produces a different price per duration — which is exactly why
+the 9 markets exist. See [MaxIL](/concepts/maxil) and
+[the markets grid](/reference/markets-grid).
+</Note>
+
+## Practical conversions
+
+Worked, copy-pasteable conversions for the four scales you actually touch.
+
+<Tabs>
+<Tab title="USDC (6-dec) ⇄ dollars">
+
+dUSDC, MaxIL, premiums, V0, and payouts are 6-decimal raw `bigint`s. The live
+Path-A swap (swapId 1) had `V0 = 270,531.28` and `MaxIL = 1,669.24` (see
+[lifecycle](/protocol/lifecycle)). On the wire those are:
+
+```ts
+// human → raw 6-dec bigint
+const usdc = (dollars: number): bigint =>
+  BigInt(Math.round(dollars * 1e6))
+
+usdc(270_531.28) // => 270531280000n   (V0 on swapId 1)
+usdc(1_669.24)   // => 1669240000n     (MaxIL = collateral locked)
+usdc(9.70)       // => 9700000n        (premium the LP paid)
+
+// raw 6-dec bigint → human (display)
+const fromUsdc = (raw: bigint): number => Number(raw) / 1e6
+fromUsdc(1669240000n) // => 1669.24
+```
+
+<Warning>
+**Never** use `Number()` on a USDC `bigint` before dividing if the value can exceed
+`2^53` (~9.007e15 raw, i.e. ~9.007 billion dUSDC). For display of normal amounts it
+is fine; for arithmetic, stay in `bigint`.
+</Warning>
+
+</Tab>
+<Tab title="WAD (1e18) ⇄ rate">
+
+fairRate, σ_ref, and every load component are WAD. At the fresh deploy σ_ref sits
+at the `0.5e18` floor and `fairRate ≈ 0.847` (see
+[status & caveats](/reference/status-caveats)):
+
+```ts
+import { WAD, BPS_TO_WAD } from '@inflexion/sdk'
+
+// rate → WAD
+const toWad = (x: number): bigint =>
+  BigInt(Math.round(x * 1e18))
+
+toWad(0.847) // => 847000000000000000n  (fairRate at floor vol)
+toWad(0.5)   // => 500000000000000000n  (σ_ref floor)
+
+// WAD → rate (display)
+const fromWad = (w: bigint): number => Number(w) / 1e18
+
+// basis points → WAD (the load conversion)
+const bps = 1000n                       // 10% MM load (loadBps)
+const loadWad = bps * BPS_TO_WAD        // => 100000000000000000n = 0.10 WAD
+```
+
+</Tab>
+<Tab title="Chainlink (8-dec) → numéraire">
+
+A Chainlink USD feed returns an 8-decimal `answer`. To express an ETH amount (18
+dec) in dUSDC (6 dec) you combine all three scales:
+
+```ts
+// ethWei: 18-dec amount of token0; priceE8: Chainlink ETH/USD answer (8-dec)
+// result: dUSDC value as a 6-dec raw bigint (the numéraire)
+function ethValueInUsdc(ethWei: bigint, priceE8: bigint): bigint {
+  // (ethWei / 1e18) * (priceE8 / 1e8) * 1e6, kept in bigint
+  return (ethWei * priceE8) / 10n ** 20n
+  //         18  +  8  -  20  =  6  decimals out
+}
+
+// 1 ETH at $3,000.00  ->  3000.000000 dUSDC
+ethValueInUsdc(10n ** 18n, 300_000_000_000n) // => 3000000000n
+```
+
+The exponent bookkeeping: `18 (ETH) + 8 (feed) − 20 = 6 (USDC)`. Change the target
+decimals and you change the `20` divisor accordingly.
+
+</Tab>
+<Tab title="sqrtPriceX96 → human price">
+
+Recover the raw token0/token1 price, then strip the 12-decimal gap to get a human
+"ETH in USD":
+
+```ts
+const Q96 = 2n ** 96n
+
+// raw price of token0 in token1 (still in raw token units), as a float
+function priceFromSqrtX96(sqrtPriceX96: bigint): number {
+  const r = Number(sqrtPriceX96) / Number(Q96)
+  return r * r
+}
+
+// human ETH/USD: divide out the (18 - 6) = 12 decimal gap
+function ethUsdFromSqrt(sqrtPriceX96: bigint): number {
+  return priceFromSqrtX96(sqrtPriceX96) / 1e12
+}
+```
+
+For exact (non-float) work, do the squaring in `bigint` against `Q96 = 2^96` and
+defer the `Number()` cast to the last display step.
+
+</Tab>
+</Tabs>
+
+## Common pitfalls
+
+<AccordionGroup>
+<Accordion title="Treating a *Wad field as a USDC amount (or vice-versa)">
+A `fairRateWad` of `847000000000000000n` is **0.847**, not "847 quadrillion USDC."
+Check the field name: `*Wad` ⇒ divide by `1e18`; a plain dollar amount ⇒ divide by
+`1e6`. The SDK encodes this in its type comments.
+</Accordion>
+<Accordion title="Forgetting the 18-vs-6 decimal gap in prices">
+A price derived from `sqrtPriceX96` or from raw token reserves is in **raw token
+units** and is off by `10^(18−6) = 10^12` from a human ETH/USD figure. Always
+apply the decimal-gap adjustment for display.
+</Accordion>
+<Accordion title="Assuming Chainlink is 18-decimal">
+Chainlink USD feeds on Arbitrum are **8-decimal**, not 18. The
+[OracleManager](/protocol/oracles) consumes the 8-dec answer directly.
+</Accordion>
+<Accordion title="Using a 360-day year">
+σ_ref and $T$ annualise over **365 days** (`SECONDS_PER_YEAR = 31,536,000`). A
+360-day convention would silently mis-scale every fairRate. The on-chain VolOracle,
+the Stylus FVO, and the Python model all agree on 365.
+</Accordion>
+</AccordionGroup>
+
+## See also
+
+<CardGroup cols={2}>
+<Card title="Deployments" icon="server" href="/reference/deployments">
+The live Arbitrum Sepolia registry — token addresses with their decimals.
+</Card>
+<Card title="Markets grid" icon="grid" href="/reference/markets-grid">
+The 9 markets, fee tiers, and the duration-in-seconds values.
+</Card>
+<Card title="SDK addresses & units" icon="code" href="/sdk/addresses-units">
+How the SDK exposes these constants and loads the on-chain address registry.
+</Card>
+<Card title="The Φ-sum" icon="function" href="/math/fair-value-phi-sum">
+Where the WAD → 1e24 lift and the half-up rounding live.
+</Card>
+</CardGroup>
+
+<AddressTable />

@@ -1,0 +1,299 @@
+---
+title: "Markets & marketId"
+description: "The 9 markets (3 fee tiers x 3 durations) over one fungible-capital ConvexityVault, and the tight-packed keccak marketId that ties contract, SDK and subgraph into one join key."
+---
+
+import AddressTable from '/snippets/address-table.mdx';
+import Maturity from '/snippets/maturity-disclaimer.mdx';
+
+A **market** in Inflexion is a `(token0, token1, fee, durationSeconds)` tuple — a
+specific Uniswap v3 pair, a specific fee tier, and a specific contract maturity. The
+deploy registers **9 markets for one pair**: 3 fee tiers crossed with 3 durations, all
+underwritten by a **single [`ConvexityVault`](/protocol/vaults)** with fungible USDC
+capital. Each market has a deterministic identity — its `marketId`, a tight-packed
+`keccak256` hash that is **byte-for-byte identical** across the contract, the SDK, and
+the subgraph.
+
+<Note>
+The market grid is intentionally small and dense: **9 product lines, one treasury.**
+The duration is baked into the `marketId`, so the *same* position geometry prices
+differently in the 7d, 30d and 90d markets — the
+[S-curve in $\sigma^2 T$](/concepts/fair-value) does the work, while
+[MaxIL](/concepts/maxil) (pure geometry) is identical across all three. One pair, one
+pool of collateral, three prices for the same risk.
+</Note>
+
+## Why 9 markets over one vault
+
+The two axes are the two things that change the *risk* of underwriting a position
+without changing its *geometry*:
+
+- **Fee tier** selects which Uniswap v3 pool the LP's position lives in. Different fee
+  tiers have different tick spacing and different liquidity profiles, so they are
+  genuinely different markets even for the same token pair.
+- **Duration** is the contract maturity. A longer maturity gives the price more time to
+  diffuse, so the same range is more likely to realize a larger fraction of its
+  [MaxIL](/concepts/maxil). This is the entire reason the cvAMM publishes **three
+  different prices for the same position** — see [the grid](#the-9-markets-grid).
+
+Crucially, **all 9 markets are backed by the same `ConvexityVault`** with **fungible
+capital**. One vault per pair acts like a single insurer's
+treasury backing nine product lines — capital flows to wherever the demand is, and
+intra-pair diversification (different fees, different durations) lowers the pool's
+aggregate tail. The per-market locked amount is tracked in
+`lockedByMarket[marketId]`, but the free capital that backs new fills is shared.
+
+<Tip>
+Adding a token pair multiplies the grid: each pair gets its **own** `ConvexityVault`
+and its **own** 9-market grid. The dWETH/dUSDC pair is the live pair; the registry
+architecture (`registerMarket`) generalizes to any oracle-priced numéraire pair.
+</Tip>
+
+## The 9 markets grid
+
+The deploy registers **9 markets = 3 fee tiers x 3 durations** for the dWETH/dUSDC
+pair. The axes:
+
+- **Fee tiers** (`uint24`): `500` (0.05%), `3000` (0.30%), `10000` (1.00%).
+- **Durations**: `7d` (604,800 s), `30d` (2,592,000 s), `90d` (7,776,000 s).
+
+The frontend builds the grid as `FEES.flatMap(fee => DURATIONS.map(...))`, iterating
+**fee-outer, duration-inner**, which fixes the index
+layout of `MARKETS[0..8]`:
+
+| | **7d** (604,800 s) | **30d** (2,592,000 s) | **90d** (7,776,000 s) |
+| --- | --- | --- | --- |
+| **fee 500 (0.05%)** | `MARKETS[0]` — demo `0x67c4…9d69` | `MARKETS[1]` | `MARKETS[2]` |
+| **fee 3000 (0.30%)** | `MARKETS[3]` | `MARKETS[4]` | `MARKETS[5]` |
+| **fee 10000 (1.00%)** | `MARKETS[6]` | `MARKETS[7]` | `MARKETS[8]` |
+
+`MARKETS[0]` is the live, three-way-parity-pinned market:
+`0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69` (dWETH, dUSDC,
+fee `500`, `604800` s = 7d) — it matches the on-chain address registry's
+`marketId_fee500_7d`, and `DEMO_MARKET_ID = demo.marketId_fee500_7d` sanity-checks
+against `MARKETS[0]`.
+
+<Warning>
+**The short 300s lifecycle market is NOT one of the 9.** The live create→settle run
+used a *separate, extra* market (`0xb8bbd684…`) registered only to exercise the full
+lifecycle without a 7-day wait. **Why** the extra market:
+a 7d minimum maturity makes a same-session settle impossible. **Mitigation:** the
+300s market shares the exact same code path and settlement core — it is the 9-market
+grid run at an accelerated clock, not a different product.
+</Warning>
+
+### Same geometry, three prices
+
+Because the duration is part of the `marketId`, a single LP position fills against a
+**different marketId per duration** and is priced **per duration** — while its
+[MaxIL](/concepts/maxil) is identical across all three (MaxIL is pure geometry, frozen
+at creation, [L-independent in the fair-rate sense](/math/maxil-derivation)). All three
+prices share the **same MaxIL** but a **different `fairRate`**:
+
+$$
+\text{FairPremium}(T) = \text{fairRate}(\sigma_{\text{ref}}^2\, T)\cdot \text{MaxIL},
+\qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\ \text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+`fairRate` is an **S-curve in $\sigma_{\text{ref}}^2\, T$** — it carries all of the
+volatility and time dependence, and $\approx 0$ for a calm/short market, $\to 1$ for a
+violent/long one. MaxIL carries none of it. The
+7d / 30d / 90d markets are exactly the three points $T \in \{604800, 2592000, 7776000\}$
+on that one curve. The duration axis of this grid **is** the
+[convexity term structure](/concepts/data-moat) the data moat publishes as Signal 3.
+
+## The marketId derivation
+
+`marketId` is the join key that ties the **contract**, the **SDK**, and the
+**subgraph** together, so its byte layout is **load-bearing** — a single field-width
+mismatch produces a different, non-matching hash and silently breaks every cross-system
+lookup.
+
+$$
+\text{marketId} = \texttt{keccak256}\big(\texttt{abi.encodePacked}(\text{token0},\ \text{token1},\ \text{fee},\ \text{durationSeconds})\big)
+$$
+
+with `token0 = dWETH`, `token1 = dUSDC` (ordered so `token0 < token1` by address). The
+ABI types are `(address, address, uint24, uint32)`.
+
+<Warning>
+`abi.encodePacked` is **TIGHT packing — no 32-byte ABI padding.** The preimage is
+exactly **20 + 20 + 3 + 4 = 47 bytes**. **Why this matters:**
+if any reimplementation used standard (padded) ABI encoding — e.g. the subgraph's
+`ethereum.encode`, which pads every operand to 32 bytes — it would hash a **128-byte**
+preimage and produce a **different `marketId`**, silently de-syncing the indexer from
+the chain. **Mitigation:** all three implementations use raw big-endian field widths,
+and two parity tests pin the result (see [three-way parity](#three-way-parity)).
+</Warning>
+
+### Where it lives in code
+
+<CodeGroup>
+```solidity registerMarket
+// Owner registers each market; marketId is derived, never supplied
+bytes32 marketId = keccak256(
+    abi.encodePacked(cfg.token0, cfg.token1, cfg.fee, cfg.durationSeconds)
+);
+```
+
+```solidity create cross-check
+// On every create, the contract re-derives the marketId from the LIVE
+// token0/token1/fee read off positions(tokenId) plus the market's duration,
+// and requires it equals the requested marketId else `MarketMismatch`.
+// The LP cannot lie about which market they are filling.
+```
+
+```ts SDK / frontend mirror
+import { encodePacked, keccak256 } from "viem";
+
+function computeMarketId(
+  token0: `0x${string}`,
+  token1: `0x${string}`,
+  fee: number,            // uint24
+  durationSeconds: number // uint32
+): `0x${string}` {
+  return keccak256(
+    encodePacked(
+      ["address", "address", "uint24", "uint32"],
+      [token0, token1, fee, durationSeconds]
+    )
+  );
+}
+```
+</CodeGroup>
+
+On-chain, the `marketId` is **derived, never trusted from calldata**: `registerMarket`
+hardens it three ways:
+
+1. **The oracle token must be one of the pair.**
+2. **Decimals are read on-chain**, never trusted from calldata — one wrong digit would
+   mis-scale every price ~10x.
+3. **Price-config immutability** — the oracle orientation is frozen once set, so
+   re-registering a market can never re-price an active swap.
+
+Path A markets must additionally be opted in via `setCvammEnabled`.
+
+### The subgraph's hand-rolled replication
+
+The subgraph cannot import the contract, so it re-derives the `marketId` in AssemblyScript
+inside `deriveMarketId`: it concatenates the raw big-endian bytes
+of each field **at its on-chain width** — address → 20 bytes, `uint24 fee` → 3 bytes,
+`uint32 durationSeconds` → 4 bytes — then `crypto.keccak256`.
+
+<AccordionGroup>
+  <Accordion title="Why a hand-rolled uintBytesBE, not ethereum.encode">
+    The subgraph deliberately uses a hand-rolled `uintBytesBE`,
+    **not** `ethereum.encode`, because `ethereum.encode` ABI-pads every operand to 32
+    bytes and would produce a *different, non-matching* hash.
+    This is the same `abi.encodePacked` vs padded-ABI trap, flagged at the
+    implementation level.
+  </Accordion>
+  <Accordion title="The uint32 sign-safety subtlety (durationSeconds ≥ 2³¹)">
+    `durationSeconds` is a `uint32` on-chain but arrives in AssemblyScript as an `i32`.
+    A value ≥ 2³¹ arrives **negative** after `BigInt.toI32()` and sign-extends to
+    `i64`. Because `uintBytesBE` emits only the low `width` bytes and `& 0xff` masks
+    each one, the sign bits (which live *above* `width`) are never written — so the
+    `uint32` preimage stays bit-for-bit correct across the full on-chain domain.
+    None of the live durations approach 2³¹ s, but the encoder
+    is correct across the entire type domain regardless.
+  </Accordion>
+  <Accordion title="How the mapping recovers the marketId from a SwapCreated event">
+    A `SwapRecord` carries **no marketId**, so the subgraph
+    reconstructs it: (1) it reads `token0/token1/fee` from the NPM `positions()`
+    enrichment call, (2) reads `expiry`/`createdAt` from `InflexionCore.swaps()` to
+    compute `durationSeconds`, then (3) calls `deriveMarketId` — reusing the NPM bind,
+    not re-binding. It needs **all four** fields, so both
+    the geometry decode and the swap-record read must succeed.
+  </Accordion>
+</AccordionGroup>
+
+## Three-way parity
+
+The 47-byte tight-packed preimage must stay identical across all three systems, or the
+join key breaks:
+
+| System | Implementation |
+| --- | --- |
+| **Contract** | `abi.encodePacked` in `registerMarket` + the create cross-check |
+| **SDK** | `computeMarketId` (also mirrored in the frontend) |
+| **Subgraph** | `deriveMarketId` (hand-rolled `uintBytesBE`) |
+
+All three are pinned by **two parity tests** to the live market `marketId`
+`0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69`
+(dWETH, dUSDC, fee `500`, `604800` s = 7d):
+
+- An on-chain parity test covers the contract side.
+- An SDK parity test covers the SDK / width-contract side.
+
+That pinned value matches the on-chain address registry exactly. **Any
+field-width change that breaks the match fails those tests** — the parity is enforced
+by CI, not by convention. See [marketId parity](/integrate/marketid-parity) for the
+integrator-facing checklist.
+
+<Info>
+**Why the duration is *inside* the id, not a side parameter.** Folding
+`durationSeconds` into the hash makes each (geometry, duration) pair its own first-class
+market with its own price, its own capacity, and its own row in every aggregate. It is
+what lets the [data moat](/concepts/data-moat) read a clean term structure: the 7d / 30d
+/ 90d rows of one geometry are three distinct `marketId`s that the
+[subgraph](/integrate/subgraph) keys on directly.
+</Info>
+
+## How a market is used downstream
+
+The `marketId` threads through the whole protocol as the single coordinate that names a
+product line:
+
+<Steps>
+  <Step title="Quote — Path B">
+    A [SignedQuote](/protocol/path-b-mm) carries `marketId` (**never a `tokenId`**) —
+    an MM quotes a `(load, MaxIL-ratio band, capacity)` for an entire market, and any
+    in-band position in that market fills against it. This
+    is the mechanical consequence of [MaxIL making positions fungible](/concepts/maxil).
+  </Step>
+  <Step title="Create — cross-check">
+    Every `create*` entry point re-derives the `marketId` from the live position
+    geometry and requires it equals the requested one,
+    so the rail can only fill the market the LP actually owns a position in.
+  </Step>
+  <Step title="Lock — per-market accounting">
+    On Path A, `ConvexityVault.lockCollateral(marketId, maxIL)` increments
+    `lockedByMarket[marketId]` and the O(1) HHI accumulator, while the **free** capital
+    that backs the lock is shared across all 9 markets.
+  </Step>
+  <Step title="Index — the join key">
+    The [subgraph](/integrate/subgraph) keys `Market`, `MarketStateSnapshot`, and the
+    per-fill `Swap` rows on `marketId`, and the API joins the
+    on-chain facts to off-chain telemetry on that same key.
+  </Step>
+</Steps>
+
+## Live registry
+
+<AddressTable />
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The markets grid (reference)" icon="table-cells" href="/reference/markets-grid">
+    The full 9-cell grid with every marketId, fee, duration, and index laid out.
+  </Card>
+  <Card title="marketId parity (integrators)" icon="equals" href="/integrate/marketid-parity">
+    The integrator checklist for reproducing the 47-byte preimage in any language.
+  </Card>
+  <Card title="MaxIL — the fungible unit" icon="ruler" href="/concepts/maxil">
+    Why MaxIL frozen-at-creation is what makes a per-market (not per-NFT) quote possible.
+  </Card>
+  <Card title="The vaults" icon="vault" href="/protocol/vaults">
+    One ConvexityVault per pair, fungible capital across all 9 markets, dual-tranche.
+  </Card>
+  <Card title="Fair value &amp; the S-curve" icon="chart-line" href="/concepts/fair-value">
+    Why the same geometry prices differently per duration — the S-curve in σ²·T.
+  </Card>
+  <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
+    How marketId becomes the join key that ties the indexer to the chain.
+  </Card>
+</CardGroup>

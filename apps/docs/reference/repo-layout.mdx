@@ -1,0 +1,185 @@
+---
+title: "Repo layout & conventions"
+description: "The monorepo package map — contracts, engine, SDK, subgraph, API, web, docs, quant — plus the language/version conventions, and why Stylus builds are WSL2-only."
+---
+
+Inflexion is a single pnpm + cargo workspace: one repository holds the on-chain code (Solidity + a production Rust/Stylus pricer), the off-chain Path-B relayer, the typed SDK, the subgraph, the public API, the dApp, these docs, and the quant model. This page is the map — what lives where, the language and version conventions enforced across packages, and the one platform constraint worth flagging up front: the Stylus toolchain builds only on WSL2/Linux.
+
+## The package map
+
+The repo splits into `packages/*` (libraries and services), `apps/*` (the two deployed front-ends), and a handful of top-level support directories.
+
+<CardGroup cols={2}>
+  <Card title="packages/contracts" icon="file-contract">
+    Foundry — all on-chain code. Solidity stack + the Rust/Stylus FairValueOracle, the test suites, and the deploy script.
+  </Card>
+  <Card title="packages/engine" icon="server">
+    The off-chain Path-B matching relayer (Node/TS): WS quote intake, ranking, signed-payload API. Plus the MM bot.
+  </Card>
+  <Card title="packages/sdk" icon="cube" href="/sdk/overview">
+    `@inflexion/sdk` — the LP / MM-quoter / cvAMM-depositor / data surfaces. The integration entry point.
+  </Card>
+  <Card title="packages/subgraph" icon="diagram-project" href="/integrate/subgraph">
+    The Graph subgraph (schema + mappings). Deploy is <b>pending</b> (described below).
+  </Card>
+  <Card title="packages/api" icon="globe" href="/integrate/api-overview">
+    Public REST API (Railway/Fly) over the subgraph, with live-read fallbacks.
+  </Card>
+  <Card title="apps/web" icon="window" href="/app/prerequisites">
+    The dApp: React + Vite, wagmi/viem, RainbowKit, Apollo, shadcn/ui, Recharts.
+  </Card>
+  <Card title="apps/docs" icon="book">
+    docs.inflexion.xyz — this Mintlify site.
+  </Card>
+  <Card title="quant" icon="chart-line">
+    Python → the cvAMM params schema; <b>gates PARTIAL</b>. The Monte Carlo that produces every load/skew constant.
+  </Card>
+</CardGroup>
+
+The full annotated tree:
+
+```text title="repository tree"
+packages/contracts/   Foundry — Solidity + Stylus; test/ (unit, fork, Invariants.t.sol); script/Deploy.s.sol
+  stylus/ILMath/      Rust Stylus IL math (REJECTED benchmark artifact — NOT deployed; revm CI cross-check only)
+  stylus/FairValueOracle/  Rust Stylus PRODUCTION fairRate Φ-sum pricer (DEPLOYED)
+packages/engine/      Off-chain Path-B matching relayer (Node/TS): WS quote intake, ranking, signed-payload API
+packages/sdk/         @inflexion/sdk — LP / MM-quoter / cvAMM-depositor / data surfaces
+packages/subgraph/    The Graph subgraph (schema + mappings) — deploy PENDING
+packages/api/         Public REST API (Railway/Fly) over the subgraph
+apps/web/             React + Vite, wagmi/viem, RainbowKit, Apollo, shadcn/ui, Recharts
+apps/docs/            docs.inflexion.xyz (Mintlify)
+quant/                Python → cvAMM params schema (params.cvamm.schema.json); gates PARTIAL; legacy/ = multi-asset
+docs/                 Root-level: MATH, SECURITY, INTEGRATION, API
+scripts/              Cross-platform helpers (.sh + .ps1)
+deployments/          Per-network address registries (arbitrum-sepolia.json, etc.)
+```
+
+## Package responsibilities
+
+Each package owns one surface of the protocol. The dependency direction is roughly: contracts publish state and prices on-chain → the subgraph indexes them → the API serves them → the SDK reads contracts (live) and the API/subgraph (history) → the dApp and integrators consume the SDK. The engine sits beside this as the Path-B signing rail.
+
+<AccordionGroup>
+  <Accordion title="packages/contracts — the on-chain core">
+    Foundry project holding the entire on-chain system. The **Solidity stack** is `InflexionCore` (the state machine — `createSwapPathA` / `createSwap` / `createSwapRouted`, CEI settlement, the [10 invariants](/security/invariants)), `OracleManager`, `VolOracle`, `ILMath` (the **production** settle-path math), `ILVault`, `UnderwriterVault`, and `ConvexityVault`. Tests live in `test/` — unit, fork, and `Invariants.t.sol`; the broadcast is `script/Deploy.s.sol`.
+
+    Two Rust/Stylus crates live under `stylus/`:
+    - `stylus/FairValueOracle/` — the **DEPLOYED, production** closed-form `fairRate` [Φ-sum pricer](/math/fair-value-phi-sum).
+    - `stylus/ILMath/` — a **rejected benchmark artifact**, **not deployed**; it survives only as a revm CI cross-check. The production IL math is the Solidity `ILMath`, not this crate.
+
+    See [Protocol overview](/protocol/overview) for how these compose.
+  </Accordion>
+  <Accordion title="packages/engine — the Path-B relayer">
+    The off-chain matching relayer for [Path B](/protocol/path-b-mm) (Node/TS): WebSocket quote intake from MMs, ranking, and a signed-payload API the dApp/SDK calls. It is a **convenience and discovery layer, not a trust layer** — every quote is a firm EIP-712 signature verified on-chain, and capacity/replay defense is on-chain authoritative ([I7](/security/invariants)). The engine also ships the MM bot and the two day-one telemetry sinks (`DEMAND_LOG`, `COMPETITION_LOG`) that feed two of the [five moat signals](/moat/five-signals). See [the engine architecture](/integrate/engine).
+  </Accordion>
+  <Accordion title="packages/sdk — @inflexion/sdk">
+    The typed integration entry point, with four surfaces: LP, MM-quoter, cvAMM-depositor, and data. It **hardcodes nothing** — `addresses.ts` loads the [deployment registry](/reference/deployments) and re-exports typed groups. It **never reimplements the Φ-sum** off-chain — it reads the on-chain FairPremium; the only off-chain duplication permitted is the *load* math, kept as a parity-locked TS mirror because the deployed Solidity libraries are delegatecall-only. Start at [the SDK overview](/sdk/overview).
+  </Accordion>
+  <Accordion title="packages/subgraph — The Graph">
+    Schema + mappings that index `InflexionCore` events into the queryable history that powers fill attribution and the moat dataset. **The deploy is pending** — three additions (`QuoteFilled`, `SwapPriced`, `CvammPricing.loadComponents()`) are coded on `main` and await a single redeploy. See [the subgraph integration page](/integrate/subgraph) and [pending state, below](#pending-state-the-subgraph).
+  </Accordion>
+  <Accordion title="packages/api — the public REST API">
+    A thin REST service (deployable to Railway/Fly) over the subgraph, with live-read fallbacks so it degrades to a typed `pending` state rather than erroring while the subgraph is undeployed. Reads `SUBGRAPH_URL` and an RPC from `process.env`. See [the API overview](/integrate/api-overview).
+  </Accordion>
+  <Accordion title="apps/web — the dApp">
+    React + Vite, wagmi/viem, RainbowKit, Apollo, shadcn/ui, Recharts. Hosts the [Protect](/app/protect), [Earn](/app/earn), [Underwrite](/app/underwrite), [Markets](/app/markets), and [Data](/app/data) surfaces. The market grid mirrors the on-chain `marketId` derivation exactly — see [marketId parity](/integrate/marketid-parity).
+  </Accordion>
+  <Accordion title="apps/docs — these docs">
+    The Mintlify site for docs.inflexion.xyz. Shared disclosures live in `snippets/` and are imported, not re-worded — `claim-a-disclosure`, `claim-b-disclosure`, `maturity-disclaimer`, `address-table`.
+  </Accordion>
+  <Accordion title="quant — the Monte Carlo that gates PARTIAL">
+    Python notebook → the cvAMM parameters (`params.cvamm.schema.json`). Every PARTIAL parameter and every cvAMM **load/skew/σ primitive** is produced here, never hardcoded — that is the exact failure the [audit](/security/audits) flagged. `fairRate` itself has **no** calibrated coefficients; only the load stack is calibrated. `legacy/` holds the older multi-asset model. See [the load stack](/math/load-stack).
+  </Accordion>
+</AccordionGroup>
+
+### Support directories
+
+| Directory | What it holds |
+| --- | --- |
+| `docs/` | Root-level deep docs: `MATH`, `SECURITY`, `INTEGRATION`, `API` |
+| `scripts/` | Cross-platform helpers — `.sh` **and** `.ps1` for every task |
+| `deployments/` | Per-network address registries (`arbitrum-sepolia.json`, …) — the single source of truth the SDK loads |
+
+<Note>
+  `deployments/arbitrum-sepolia.json` is the **one** place an address is allowed to live as a literal. Everything else — SDK, dApp, engine, API — reads from it. That is why these docs never inline an address; they use the shared snippet. See [Deployments](/reference/deployments) and [Addresses, decimals & units](/sdk/addresses-units).
+</Note>
+
+## Language & version conventions
+
+Conventions are enforced repo-wide; the versions below are pinned.
+
+<Tabs>
+  <Tab title="Solidity">
+    - **Version:** `0.8.24`.
+    - **Compiler:** `via_ir = true`, optimizer at **1M runs** (`optimizer_runs=1500` was used for the size-constrained 2026-06-05 deploy).
+    - **Format:** `forge fmt`.
+    - **Toolchain:** Foundry — `forge` / `cast` / `anvil`, `1.6.0`–`1.7.0`.
+  </Tab>
+  <Tab title="TypeScript">
+    - **Mode:** strict, ES2022, NodeNext.
+    - **Bans:** no implicit `any`, no unchecked indexed access.
+    - **Lint/format:** Prettier + ESLint.
+    - **Runtime:** node ≥ 20 (24.15.0 installed), pnpm ≥ 9.
+  </Tab>
+  <Tab title="Rust (Stylus)">
+    - **Edition:** 2021, rustc **1.88 pinned**.
+    - **Format:** `cargo fmt`.
+    - **Toolchain:** `cargo-stylus` `0.10.x`; target `wasm32-unknown-unknown`.
+    - **Platform:** **WSL2 / Linux only** — see [the Stylus note below](#stylus-builds-on-wsl2-only).
+    - **No floats:** Stylus bans WASM floating point at activation, so every transcendental is integer fixed point (1e24 internal, WAD 1e18 ABI).
+  </Tab>
+  <Tab title="Python (quant)">
+    - **Version:** 3.12+ (3.14.5 installed).
+    - **Deps:** `uv` (or poetry); `pip` works as a fallback.
+    - **Lint:** ruff.
+    - **Output:** the cvAMM params that gate PARTIAL.
+  </Tab>
+</Tabs>
+
+<Note>
+  `pnpm fmt` runs prettier + `forge fmt` + `cargo fmt` together; `pnpm test` runs `forge test` plus the workspace `pnpm -r test`. The repo ships a `.sh` and a `.ps1` for cross-platform helpers, so Windows and Unix contributors share one workflow — with one exception, next.
+</Note>
+
+## Stylus builds on WSL2 only
+
+The Rust/Stylus crates under `packages/contracts/stylus/` — including the **production** [FairValueOracle](/concepts/fair-value) — build only on WSL2 or Linux, never natively on Windows.
+
+<Warning>
+  **Limit:** the Stylus toolchain (`rustc 1.88` + `cargo-stylus`) does **not** build on native Windows.
+
+  **Why:** the build chain depends on `alloy-primitives`, which references the Stylus VM hostio `native_keccak256` — a symbol only defined at WASM runtime. Linux's `ld` tolerates it as an undefined external; Windows MSVC `link.exe` rejects it (`LNK2019` / `LNK1120`) and breaks the `stylus-proc` proc-macro DLL build. OffchainLabs patch `alloy-primitives` / `ruint` for their own Windows builds but never upstreamed those patches, and the official [Stylus Quickstart](https://docs.arbitrum.io/stylus/quickstart) targets Linux only.
+
+  **Mitigation:** do all Stylus work inside **WSL2 Ubuntu 22.04/24.04**. The setup is one block — apt deps, `rustup default 1.88` + `wasm32-unknown-unknown`, `cargo install --force cargo-stylus`. The Solidity stack, SDK, engine, API, web, and quant all build fine on native Windows; only the two Stylus crates need WSL2. The deployed Stylus contract is already live and the SDK only **reads** it, so day-to-day integration work never touches the Stylus toolchain.
+</Warning>
+
+This is a build-environment constraint, not a protocol limitation — the FairValueOracle is deployed and production, and Stylus is *why* the exact closed-form Φ-sum is affordable on-chain at all ([three pillars](/concepts/three-pillars)).
+
+## Pending state: the subgraph
+
+One package ships in a deliberately degraded state, and it is framed end-to-end so no surface ever errors on it.
+
+<Warning>
+  **Limit:** `packages/subgraph/` is **not yet deployed**, so history and precise MM fill attribution are unavailable from the indexer.
+
+  **Why:** three additions — the `QuoteFilled` and `SwapPriced` events plus `CvammPricing.loadComponents()` — are coded on `main` but await a **single redeploy**, and the on-chain moat dataset begins at that redeploy. The known blocker is bytecode size: after adding the events, `InflexionCore` is **+213 B over the EIP-170 limit** (24,789 vs 24,576 B), so a size pass precedes the redeploy.
+
+  **Mitigation:** the SDK and API **degrade to a typed `pending` state** (`'rich-events-absent'` / `'no-history-source'`) rather than throwing — live on-chain reads keep working, and history returns a typed sentinel callers can branch on. See [SDK degradation](/sdk/degradation).
+</Warning>
+
+<Maturity />
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Deployments" icon="map-pin" href="/reference/deployments">
+    The live Arbitrum Sepolia address registry — the single source of truth this repo loads.
+  </Card>
+  <Card title="Decimals & units" icon="ruler" href="/reference/decimals-units">
+    dUSDC 6, dWETH 18, feeds 8, WAD 1e18, sqrtPriceX96 Q64.96 — the numéraire conventions.
+  </Card>
+  <Card title="Environment variables" icon="gear" href="/reference/env-vars">
+    The `.env` keys for contracts, engine, API, and the dApp.
+  </Card>
+  <Card title="Constants" icon="hashtag" href="/reference/constants">
+    Settlement windows, staleness, lone-spike, and the load/cap constants.
+  </Card>
+</CardGroup>

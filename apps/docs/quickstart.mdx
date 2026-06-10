@@ -1,0 +1,245 @@
+---
+title: "Quickstart — pick your door"
+description: "Four ways into Inflexion: protect an LP position, earn in the cvAMM, underwrite as a market maker, or integrate the SDK, API, and subgraph. Each links into its full path."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion is a [collateralized bilateral derivatives market](/introduction) on Arbitrum One — live on **Arbitrum Sepolia (chainId 421614)**. A Uniswap v3 LP pays a fixed upfront premium to transfer the **in-range** impermanent-loss risk of a specific position to an underwriter, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP $\min(\text{realized\_IL},\ \text{MaxIL})$, trustlessly, from the underwriter's collateral.
+
+This is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), **not** "IL insurance" — entry requires $P_a \le P_0 \le P_b$, and [the cap](/concepts/maxil) is load-bearing for the [no-bad-debt guarantee](/concepts/no-bad-debt).
+
+The app — like this guide — has **three doors mapping to the three actors**, plus a fourth for builders. Pick yours.
+
+## Pick your door
+
+<CardGroup cols={2}>
+  <Card title="Protect an LP position" icon="shield-halved" href="/app/protect">
+    You hold a Uniswap v3 LP NFT and want to hedge its in-range IL. Pay one premium; get paid `min(IL, MaxIL)` at expiry from pre-locked collateral. **LP / claim A.**
+  </Card>
+  <Card title="Earn in the cvAMM" icon="piggy-bank" href="/app/earn">
+    Deposit dUSDC into the pooled `ConvexityVault` and earn the volatility-risk premium. Pick a tranche — senior (low-variance) or junior (first-loss, high APY). **Depositor / claim B.**
+  </Card>
+  <Card title="Underwrite as a market maker" icon="gavel" href="/app/underwrite">
+    Post collateral, stream firm EIP-712 signed quotes per-market, and win flow only by undercutting the always-on pool. No last-look. **MM / claim B.**
+  </Card>
+  <Card title="Integrate" icon="code" href="/sdk/overview">
+    Build on the protocol: the [SDK](/sdk/overview) (LP / depositor / MM / data clients), the [REST API](/integrate/api-overview), and the [subgraph](/integrate/subgraph). Reads are graceful; addresses load from the on-chain address registry.
+  </Card>
+</CardGroup>
+
+<Note>
+  New to the terminology? The [glossary primer](/concepts/glossary-primer) defines MaxIL, fairRate, σ_ref, the two rails, and the load stack in one place. The [three pillars](/concepts/three-pillars) page is the conceptual spine — read it before anything else.
+</Note>
+
+## Before you start — prerequisites
+
+These apply to every door that **writes** to the chain (Protect, Earn, Underwrite). Read-only doors — the [markets browser](/app/markets) and the [data moat](/app/data) — need no wallet at all. Full detail lives on [App prerequisites](/app/prerequisites).
+
+<Steps>
+  <Step title="Connect a wallet on Arbitrum Sepolia (chainId 421614)">
+    Every dApp page gates its write actions behind a `ConnectGate` — reads work immediately, writes need a connected wallet. The stack is RainbowKit + wagmi + viem.
+  </Step>
+  <Step title="Get demo tokens — dUSDC and dWETH">
+    You need **dUSDC** (the 6-decimal numéraire, for premiums and collateral) and **dWETH** (the 18-decimal demo volatile token). These are the protocol's own demo mocks — a numéraire-correct pair where `dWETH < dUSDC` so `token1 = dUSDC` is the numéraire — distinct from Circle's testnet USDC/WETH. Addresses are in [the deployments registry](/reference/deployments) — never hardcode them.
+  </Step>
+  <Step title="(To protect) hold an eligible, in-range v3 position">
+    To have a position to hedge, mint a Uniswap v3 NFT on the seeded **dWETH/dUSDC** pool (fee 500) that is currently **in range** ($P_a \le P_0 \le P_b$). The deploy seeded a ~\$100k unprotected demo LP (`tokenId 3218`) used for previews and the illustrative `/underwrite` pricing. Out-of-range positions are rejected at creation.
+  </Step>
+</Steps>
+
+<Info>
+  **Live deployment.** Fresh full redeploy on **2026-06-05** (replaces the 2026-06-03 stack). All addresses load from the on-chain address registry via `@inflexion/sdk` — the app never hardcodes them. See [the address table](/reference/deployments) for the full registry.
+</Info>
+
+### Optional backends — degradation is honest if absent
+
+Path B (the MM rail) and history surfaces lean on optional backends. If they're not configured, the app does **not** crash — it falls back honestly to what RPC alone can serve.
+
+| Service | Env var | If unset |
+| --- | --- | --- |
+| **Path-B engine** (MM quote relay) | `NEXT_PUBLIC_ENGINE_URL` | Path B unavailable → preview falls back to Path A only; `premiumB` undefined |
+| **Public REST API** (history) | `NEXT_PUBLIC_API_URL` | DataClient history surfaces return `{ available: false }` pending |
+| **RPC** | `NEXT_PUBLIC_RPC_URL` | no RPC; all reads fail at the transport layer |
+
+<Warning>
+  **The subgraph is not yet indexed — and that is a typed, honest state, not a bug.**
+
+  **Limit:** anything historical or aggregate (per-market volume, NAV history, the time-series [data-moat signals](/concepts/data-moat), precise MM fill attribution) is unavailable today.
+
+  **Why:** the rich on-chain events (`SwapPriced`, `QuoteFilled`) have been emitted since deploy block `274081134`, but the indexer is still pending deployment.
+
+  **Mitigation:** every such surface degrades to a typed `pending` state that names the exact future API route it will be served from — never a fake number, never a thrown error. **Live today over RPC:** premium preview, payoff, buy/settle (Path A), vault deposit/withdraw, market pricing, the current clearing-load surface, σ_ref, the book, and coarse fills. See [status & caveats](/reference/status-caveats) for the full ledger.
+</Warning>
+
+## Door 1 — Protect an LP position
+
+The shortest path from "I have an LP NFT" to "my in-range IL is hedged." Full walkthrough: [the Protect page guide](/app/protect).
+
+<Steps>
+  <Step title="Pick the market and your position">
+    Choose a fee tier (0.05% / 0.30% / 1.00%) and duration (7d / 30d / 90d) — 9 markets in all. Your eligible in-range positions list via `lp.listEligiblePositions(owner, ...)`; each row shows its tokenId, an in-range badge, V0, MaxIL (the cap), and stored `L`.
+  </Step>
+  <Step title="Preview the premium and read the payoff-with-cap chart">
+    `lp.previewPremium(tokenId, marketId)` returns `{ maxIL, fairPremium, fairRateWad, sigmaRefWad, premiumA, premiumB?, best, path }`. You see Path A · pool vs Path B · MM side by side, the on-chain [Φ-sum](/math/fair-value-phi-sum) fair premium as the floor, and σ_ref. The chart draws your payout `min(IL, MaxIL)` (teal) against true IL (dashed red), capped at the amber **MaxIL** line.
+  </Step>
+  <Step title="Buy — one click, auto-approve, routed">
+    `lp.buyProtection({ tokenId, marketId, maxPremium, approve: true })` auto-approves the NFT to Core and dUSDC to InflexionCore, then sends [`createSwapRouted`](/protocol/routing) — which picks the cheaper of pool vs MM and **never reverts on a bad MM quote** (it falls back to the pool). A 1% slippage buffer caps the premium sent.
+  </Step>
+  <Step title="Settle at expiry">
+    Once the swap is expired, `lp.settle(swapId)` walks the Chainlink feed for the bracketing round and pays your realized IL — capped at MaxIL — from the underwriter's collateral, returning the NFT to you.
+  </Step>
+</Steps>
+
+```typescript Protect: preview then buy
+import { InflexionSdk } from "@inflexion/sdk";
+
+const sdk = new InflexionSdk({ chainId: 421614, /* publicClient, walletClient */ });
+
+// 1. Preview — reads the on-chain FairPremium and routes pool vs MM.
+const preview = await sdk.lp.previewPremium(3218n, marketId);
+console.log(preview.best, preview.path); // cheaper premium, "A" | "B"
+
+// 2. Buy — auto-approves NFT + dUSDC, then createSwapRouted (1% slippage).
+const maxPremium = (preview.best * 101n) / 100n;
+const res = await sdk.lp.buyProtection({
+  tokenId: 3218n,
+  marketId,
+  maxPremium,
+  approve: true,
+});
+```
+
+<Note>
+  **Live lifecycle (ran on-chain, 2026-06-05):** Path A swap #1 — V0 \$270,531, MaxIL \$1,669.24, premium **\$9.70 (0.58% of MaxIL)**, realized IL \$148.64 paid in full from the `ConvexityVault`. Path B swap #2 — the MM beat the pool (\$8.93 vs \$13.80), locked \$3,215.65 of its own collateral, and settled \$245.66 from the `UnderwriterVault`. This is the floor/ceiling routing, demonstrated.
+</Note>
+
+<ClaimA />
+
+## Door 2 — Earn in the cvAMM
+
+Supply underwriting capital to the pooled [`ConvexityVault`](/protocol/vaults) and earn the volatility-risk premium. You choose your risk dose. Full walkthrough: [the Earn page guide](/app/earn).
+
+<Steps>
+  <Step title="Read the disclosure — it's first, not a footnote">
+    The very first panel on `/earn` is **"Capital is NOT guaranteed."** You are underwriting in-range IL: junior is first-loss; senior is protected from *underwriting* loss only (via the junior-first waterfall `totalLocked ≤ juniorAssets`), not from the systemic tail.
+  </Step>
+  <Step title="Pick a tranche">
+    **Senior** — a low-variance "convexity savings account," structurally shielded from underwriting loss while junior buffers. **Junior** — a pure vol-selling tranche that captures most of the premium yield and absorbs losses first. See [tranches](/concepts/tranches).
+  </Step>
+  <Step title="Deposit">
+    `depositor.deposit(tranche, raw, { autoApprove: true })` checks allowance, sends dUSDC `approve(convexityVault, amount)` — **spender is the `ConvexityVault`, not Core** (a common gotcha) — then `deposit(tranche, amount)`.
+  </Step>
+  <Step title="Withdraw — request, cooldown, withdraw">
+    Withdrawals are two-step and cooldown-gated: `requestWithdrawal(tranche, shares)`, then after the cooldown `withdraw(tranche)`. A junior withdraw can revert `JuniorBelowLocked` if it would breach senior protection while collateral is locked.
+  </Step>
+</Steps>
+
+```typescript Earn: deposit into the junior tranche
+import { InflexionSdk, Tranche } from "@inflexion/sdk";
+
+const sdk = new InflexionSdk({ chainId: 421614, /* publicClient, walletClient */ });
+
+// Spender is the ConvexityVault — NOT InflexionCore.
+await sdk.depositor.deposit(Tranche.Junior, 5_000_000_000n /* 5,000 dUSDC */, {
+  autoApprove: true,
+});
+
+// Withdraw is two-step + cooldown-gated.
+await sdk.depositor.requestWithdrawal(Tranche.Junior, shares);
+// ...wait out getWithdrawalCooldown()...
+await sdk.depositor.withdraw(Tranche.Junior);
+```
+
+<ClaimB />
+
+## Door 3 — Underwrite as a market maker
+
+Compete with the pool by streaming firm signed quotes that win only by undercutting it. The MM rail is the [ceiling of price](/protocol/path-b-mm); the pool is the floor of liquidity. Full walkthrough: [the Underwrite page guide](/app/underwrite).
+
+<Steps>
+  <Step title="Post collateral to the UnderwriterVault">
+    A separate, direct on-chain flow: ERC-20 `approve(UnderwriterVault, amount)` then `UnderwriterVault.deposit(amount)`. Locked == Σ MaxIL of your active fills; invariant [I5](/security/invariants) holds `locked ≤ deposited`. Collateral must stay instantly liquid — never route it to utilization-gated venues.
+  </Step>
+  <Step title="Build a PER-MARKET quote — there is no tokenId">
+    A quote is **per-market**, not per-position: it fills any in-range position in the market whose `MaxIL/V0 ∈ [min, max] bps`, up to capacity. Because [MaxIL is the unit of risk](/concepts/maxil), positions are fungible — the `SignedQuote` carries no tokenId. Set your load (bps over FairPremium), a price band (Fork 2), capacity (`maxNotionalV0`), and a validity window.
+  </Step>
+  <Step title="Stay under the pool and under the I10 cap">
+    Your `loadBps` must be **strictly below the live pool load** AND **≤ maxLoadBps** ([invariant I10](/security/invariants)). A guard banner blocks signing otherwise; the page re-reads both fresh right before you sign.
+  </Step>
+  <Step title="Sign (EIP-712) and publish">
+    The browser signs the 13-field `SignedQuote` struct via `walletClient.signTypedData` (domain `{ 'Inflexion', '1', 421614, core.inflexionCore }`) — the field order must match `InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly. It's POSTed to the engine; if the engine URL is unset, the page renders the exact wire envelope instead. See [quote signing](/integrate/quote-signing).
+  </Step>
+</Steps>
+
+<Info>
+  **Firm quotes, no last-look.** There is no "last look" path in MM quoting — firm quotes plus an oracle band only. [`createSwapRouted`](/protocol/routing) routes the LP to the cheaper rail and only the executed rail mutates nonce, capacity, and lock. An absent or stale MM quote silently routes to the pool.
+</Info>
+
+<ClaimB />
+
+## Door 4 — Integrate (SDK, API, subgraph)
+
+Build LP, depositor, MM, or data surfaces on top of the protocol. Start at [the SDK overview](/sdk/overview); for the data plane see [the architecture](/integrate/architecture).
+
+<CardGroup cols={2}>
+  <Card title="SDK — @inflexion/sdk" icon="cube" href="/sdk/getting-started">
+    Typed clients: [`lp`](/sdk/lp-client), [`depositor`](/sdk/depositor-client), [`mm`](/sdk/mm-client), [`data`](/sdk/data-client), plus [Greeks/hedge](/sdk/greeks-hedge) and the [cvAMM TS port](/sdk/cvamm-port). Addresses and units in [addresses & units](/sdk/addresses-units).
+  </Card>
+  <Card title="REST API" icon="server" href="/integrate/api-overview">
+    The public history plane. [Endpoints](/integrate/api-endpoints) serve per-market history, NAV, and the data-moat signals — typed `pending` until the subgraph indexes.
+  </Card>
+  <Card title="Subgraph" icon="diagram-project" href="/integrate/subgraph">
+    The Graph indexes `SwapPriced` / `QuoteFilled` and the lifecycle events. See [marketId parity](/integrate/marketid-parity) so your off-chain ids match the chain exactly.
+  </Card>
+  <Card title="Engine & recipes" icon="plug" href="/integrate/engine">
+    The off-chain matching relayer ([engine](/integrate/engine)), [quote signing](/integrate/quote-signing), and end-to-end [recipes](/integrate/recipes).
+  </Card>
+</CardGroup>
+
+```typescript Construct the SDK (reads work with no wallet)
+import { InflexionSdk } from "@inflexion/sdk";
+import { createPublicClient, http } from "viem";
+import { arbitrumSepolia } from "viem/chains";
+
+const publicClient = createPublicClient({
+  chain: arbitrumSepolia,
+  transport: http(process.env.NEXT_PUBLIC_RPC_URL),
+});
+
+// Reads are graceful and never throw; addresses load from the registry.
+const sdk = new InflexionSdk({ chainId: 421614, publicClient });
+
+const surface = await sdk.data.getCurrentLoadSurface({ markets });
+```
+
+<Note>
+  **Reads degrade, never crash.** Any read needing a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders an honest *pending* state — never an error. For the full behavior see [SDK degradation](/sdk/degradation) and [guardrails](/sdk/guardrails).
+</Note>
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="The three pillars" icon="columns-3" href="/concepts/three-pillars">
+    On-chain FairValue, the cvAMM, and MM competition — the conceptual spine.
+  </Card>
+  <Card title="MaxIL" icon="ruler-combined" href="/concepts/maxil">
+    The cap and the unit of risk, in one concept.
+  </Card>
+  <Card title="The two rails" icon="route" href="/concepts/two-rails">
+    How Path A and Path B share one settlement core.
+  </Card>
+  <Card title="The math overview" icon="square-root-variable" href="/math/overview">
+    IL, MaxIL, the Φ-sum, σ_ref, and the load stack.
+  </Card>
+  <Card title="Security & invariants" icon="lock" href="/security/invariants">
+    The nine never-break invariants, with proofs.
+  </Card>
+  <Card title="What this is NOT" icon="circle-xmark" href="/what-this-is-not">
+    Not Bancor, not insurance, not GammaSwap — and why.
+  </Card>
+</CardGroup>

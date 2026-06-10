@@ -1,0 +1,398 @@
+---
+title: "Status & pending flags"
+description: "The single status list — subgraph pending, the resolved EIP-170 size pass, the null Sepolia sequencer feed, sigma_ref sitting at its floor, testnet-vs-mainnet addresses, and the heartbeat note. Every item is Limit -> Why -> Mitigation."
+---
+
+import AddressTable from '/snippets/address-table.mdx';
+import Maturity from '/snippets/maturity-disclaimer.mdx';
+import ClaimA from '/snippets/claim-a-disclosure.mdx';
+import ClaimB from '/snippets/claim-b-disclosure.mdx';
+
+This is the one page that collects every live caveat in one place — what is
+pending, what was a blocker and is now resolved, and what is a deliberate
+testnet posture that must change before mainnet. Inflexion's design discipline is
+that **a naked limitation is a defect**: every item below is stated as **Limit →
+Why → Mitigation**, so nothing here is a surprise.
+
+None of these caveats touch the two headline guarantees. The
+[no-bad-debt invariant (I1)](/security/invariants) is *structural and
+oracle-independent* — it holds under any price path and is unaffected by every
+item on this page. The counterpart — that depositor capital is at risk —
+is also unchanged. Both are restated, in full, at the bottom.
+
+<Note>
+**Nothing here is a fund-loss vector.** Each item is either (a) a pending
+*data-surface* state that degrades to a typed `pending` value rather than an
+error, (b) a *resolved* blocker we still document for transparency, or (c) a
+*deliberate testnet posture* gated by an explicit pre-mainnet checklist. The
+on-chain settlement core — collateral `= MaxIL`, payout `= min(realized_IL,
+MaxIL)` — is live and unaffected.
+</Note>
+
+## Status at a glance
+
+| # | Item | State | Class | Fund-loss risk |
+| --- | --- | --- | --- | --- |
+| 1 | [Subgraph deploy](#1-subgraph-deploy-pending) | **Pending** | Data surface | None — degrades to typed `pending` |
+| 2 | [EIP-170 size pass](#2-eip-170-size-pass-resolved) | **Resolved** | Was a deploy blocker | None — resolved in the 2026-06-05 redeploy |
+| 3 | [Sepolia sequencer feed](#3-sepolia-sequencer-uptime-feed-null) | **`null` on testnet** | Deliberate posture | None on testnet; pre-mainnet checklist item |
+| 4 | [σ_ref at floor](#4-σ-ref-sits-at-its-floor-at-the-fresh-deploy) | **At floor** | Cold-start, self-healing | None — I1 is oracle-independent |
+| 5 | [Testnet vs mainnet addresses](#5-mainnet-addresses-are-spec-migration-references) | **Two registries** | Documentation hazard | None — conflation risk only |
+| 6 | [Heartbeat / staleness](#6-heartbeat-staleness-the-90-000s-window) | **By design** | Cross-chain tolerance | None — deliberately chosen |
+
+---
+
+## 1. Subgraph deploy (pending)
+
+The Graph **Studio** deploy is pending until the Studio slug
+`inflexion-arb-sepolia` is created. Until
+it lands, the API's history and precise per-fill MM attribution surfaces are not
+yet backed by an indexer.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+**Limit.** Historical series and precise MM fill attribution (the
+[subgraph](/integrate/subgraph)-backed half of the
+[data moat](/concepts/data-moat)) are not yet queryable from a deployed indexer.
+
+**Why.** The Studio slug `inflexion-arb-sepolia` has not been created yet, so
+there is no live GraphQL endpoint
+(`https://api.studio.thegraph.com/query/<id>/inflexion-arb-sepolia/<version>`).
+The schema, the manifest, and the start block are all finalized — only the deploy
+step remains.
+
+**Mitigation.** The SDK and API **degrade to a typed pending state, never an
+error**: history and attribution return `'rich-events-absent'` /
+`'no-history-source'` rather than throwing.
+The schema + manifest are finished and the redeploy start block is known
+(`274081134`), so the indexer is ready to go the moment the slug exists. See
+[SDK degradation](/sdk/degradation) for the exact typed states.
+</Warning>
+
+Two related facts that travel with the subgraph status:
+
+- **The moat dataset begins at the redeploy block.** Three additions —
+  `QuoteFilled`, `SwapPriced`, and `CvammPricing.loadComponents()` — are coded and
+  await a single redeploy; the on-chain moat dataset **begins at that
+  redeploy**. This is not lost history — it is the
+  genesis: the rich events are coded but did not fire before the FULL-FRESH
+  redeploy of 2026-06-05, so indexing from the redeploy block wastes no scan over
+  blocks that emit none of the moat data.
+- **One entity is schema-ready, not indexer-written.** `NetGammaSnapshot` is
+  reserved in the schema and listed under InflexionCore's entities,
+  but **no mapping handler currently writes a row** — there is no
+  `NetGammaSnapshot` write. The live active-set counters
+  are maintained on `ProtocolState` instead, and `ProtocolState.nextNetGammaBucket`
+  exists to drive a future net-gamma roll. **Why it is fine:** the Greeks fields on
+  this entity are *off-chain compute*, written back by the API/GreeksEngine — so it
+  is correctly an **API-populated surface**, not an indexer-populated one. Treat it
+  as such. See [Signal 5 / telemetry](/moat/telemetry).
+
+<Tip>
+The subgraph is **internal infrastructure** — in production the API is the public
+surface and the subgraph is the indexer behind it. A pending subgraph means the
+*history* surface is pending; the **live on-chain reads** the SDK does directly
+(prices, MaxIL, vault state) are unaffected.
+</Tip>
+
+---
+
+## 2. EIP-170 size pass (resolved)
+
+Adding the moat events (`SwapPriced` / `QuoteFilled`) once pushed `InflexionCore`
+over the 24,576-byte EIP-170 contract-size limit. This is **resolved**, and we
+document it here for transparency.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+**Limit.** With the moat events added, `InflexionCore` was **+213 B over the
+EIP-170 limit (24,789 B vs the 24,576 B ceiling)** — `forge build`/`test` (revm)
+were unaffected, but an on-chain *deploy* would have reverted.
+
+**Why.** EIP-170 caps deployed bytecode at 24,576 B. The extra event-emission
+code (the moat instrumentation) tipped the already-large state-machine contract
+over that ceiling.
+
+**Mitigation — resolved in the 2026-06-05 redeploy.** Two changes brought it
+under the limit: `optimizer_runs` was lowered to `1500`, and the public libraries
+`CvammPricing`, `QuoteVerification`, `SwapMath`, and `TickMath` were extracted as
+**delegatecall code** (separate deployed images, not inlined). The deployed
+`InflexionCore` is now **23,934 B — under the limit**.
+</Warning>
+
+<Info>
+**The deployment registry is authoritative for live state.** It records the
+23,934 B size and the `optimizer_runs=1500` deploy. When any reference document
+and the registry disagree on a deployment fact, trust the registry.
+</Info>
+
+The delegatecall extraction has one downstream consequence worth knowing if you
+read the libraries directly:
+
+<Warning>
+**Deployed libraries are DELEGATECALL-ONLY.** A direct `eth_call` to `TickMath`,
+`CvammPricing`, `SwapMath`, or `QuoteVerification` **reverts** — Solidity guards
+deployed library functions against direct calls. **Why** this matters: an
+integrator who tries to `eth_call` `CvammPricing.loadComponents()` straight at its
+address gets a revert, not the load stack. **Mitigation:** the SDK keeps a
+**parity-locked TypeScript mirror** of the *load* math instead of reading the
+libraries. (Note: the
+[Φ-sum fairRate](/math/fair-value-phi-sum) is *never* mirrored — only the load
+stack is; that is a hard rule, see [the pricing stack](/protocol/pricing-stack).)
+</Warning>
+
+---
+
+## 3. Sepolia sequencer uptime feed (`null`)
+
+The [OracleManager](/protocol/oracles) gates entry and settlement on L2 sequencer
+health. On Arbitrum Sepolia that gate is intentionally skipped, because the feed
+does not exist on testnet.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+**Limit.** The sequencer-uptime gate is **not active on Arbitrum Sepolia** — the
+`sequencerFeed` is `address(0)`, so
+`OracleManager` skips the sequencer health check.
+
+**Why.** Chainlink **does not publish an L2 Sequencer Uptime Feed on Arbitrum
+Sepolia** — it is a testnet with no SLA. `OracleManager` treats
+`sequencerFeed == address(0)` as "skip the sequencer check," which is the only
+correct behavior when no such feed exists.
+
+**Mitigation — a hard pre-mainnet checklist item.** The mainnet sequencer feed
+**must be set before any mainnet deploy.** The real Arbitrum One Sequencer Uptime
+Feed is `0xFdB631F5EE196F0ed6FAa767959853A9F217697D`. With it
+wired, `_requireSequencerHealthy` enforces uptime plus a 1h grace and fails-closed
+on a future `updatedAt`. This is flagged in the
+registry's `_sequencerNote` and in the OracleManager source precisely so it
+cannot be forgotten.
+</Warning>
+
+<Note>
+This is a **deliberate testnet posture, not a code defect.** The skip is the
+correct response to a non-existent feed; on mainnet the same code path enforces
+the gate the moment a real feed address is configured. Nothing about the testnet
+skip affects [I1](/security/invariants) — the no-bad-debt proof is structural and
+oracle-independent.
+</Note>
+
+---
+
+## 4. σ_ref sits at its floor (at the fresh deploy)
+
+The [VolOracle](/protocol/oracles) publishes `σ_ref = max(σ_short, σ_long,
+floor)`, a poke-based time-aware EWMA of Chainlink-tick log-returns. At a fresh
+deploy there is no realized history yet, so `σ_ref` sits at its hard floor.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+**Limit.** At the fresh deploy `σ_ref` sits at its **`0.5e18` floor** (fairRate
+≈ `0.847` at floor vol), so prices reflect the floor regime rather than live
+realized volatility.
+
+**Why.** The VolOracle is a *cold-start* EWMA: it accrues realized dynamics only
+as it is **poked** over time. Before enough pokes accumulate, the `max(...)`
+construction holds the reference at the floor. This is a deliberate design choice
+— `σ_ref` is `max(σ_short, σ_long, floor)` and **never raw realized σ**, because
+realized vol *understates* risk right before a regime change, which is exactly
+where the book would bleed. The floor is the conservative anchor.
+
+**Mitigation — it self-heals, and it cannot create bad debt.** Real dynamics
+accrue as the permissionless `poke()` runs (an O(1) EWMA update; `dt` is clamped
+to `[minSampleInterval, maxSampleInterval]`, and `poke` is a no-op below the
+minimum). Crucially, `σ_ref` is solvency-load-bearing for the **I10 price cap and
+depositor solvency only — NOT for the FULL no-bad-debt invariant I1**, which is
+structural and oracle-independent. A floor-pinned σ can *misprice
+the load* (which costs depositors, junior first), but it can **never** produce LP
+bad debt in FULL.
+</Warning>
+
+<Tip>
+The subgraph keeps the [σ_ref series continuous](/integrate/subgraph) even on
+quiet feeds: when `poke()` no-ops (`dt < minSampleInterval`, emits no `Poked`),
+every `SwapPriced` with a positive `sigmaRefWad` writes a gap-filling
+`SWAP_PRICED_BACKFILL` point, so a downstream consumer sees no holes.
+</Tip>
+
+---
+
+## 5. Mainnet addresses are spec / migration references
+
+The docs list two different sets of addresses. Mixing them up is the easiest
+mistake to make, so it gets its own caveat.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+**Limit.** The **mainnet Arbitrum One addresses** that appear in the spec —
+Chainlink feeds, the sequencer feed, NPM, the v3 factory, native USDC/WETH — are
+**not the live deployment.** They describe a *future* mainnet, not the running
+testnet.
+
+**Why.** They are carried in the docs for completeness and migration planning.
+The protocol is currently **live only on Arbitrum
+Sepolia (chainId 421614)**; the mainnet values are reference, not registry.
+
+**Mitigation.** The **single source of truth for live addresses is the
+Arbitrum Sepolia on-chain address registry** — the SDK loads it and hardcodes
+nothing. On these docs, always render the live set
+via the shared snippet (below) or link to
+[the deployments reference](/reference/deployments); never inline a contract
+address. If an address is not in the Sepolia registry, it is **not** part of the
+live deployment.
+</Warning>
+
+<Note>
+A couple of name collisions to keep straight on testnet:
+
+- The **demo tokens** `dWETH` / `dUSDC` are *mock* tokens used by the live markets
+  — distinct from the canonical Arbitrum Sepolia `WETH9` /
+  Circle-`USDC`, which exist but are **not** what the markets use (there is no
+  pre-seeded WETH/USDC v3 pool with material liquidity on Sepolia, so the demo
+  deploys its own pair). See the [markets grid](/reference/markets-grid) and
+  [decimals & units](/reference/decimals-units).
+- The **Treasury is the same EOA as the deployer** on this testnet
+  (`0x96455C9b00D530BD0629b71B674298440328b1Dd`) — a testnet convenience, not a
+  mainnet posture.
+</Note>
+
+---
+
+## 6. Heartbeat / staleness — the 90,000s window
+
+The testnet Chainlink feeds tick faster than their mainnet counterparts. The
+staleness window is chosen so the *same* `MAX_STALENESS` value works on either
+chain.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+**Limit.** The testnet ETH/USD and BTC/USD feeds have a heartbeat of **~120s**,
+whereas the mainnet equivalents heartbeat at **86,400s** — a ~700× difference in
+expected update cadence (the
+[address table](#live-registry) records per-feed heartbeats).
+
+**Why.** A staleness gate tuned to a 120s testnet heartbeat would revert
+constantly on mainnet's 86,400s cadence (and vice-versa), forcing a per-chain
+reconfiguration that is easy to get wrong.
+
+**Mitigation — one deliberately conservative window for both chains.**
+`OracleManager.MAX_STALENESS` is set to **90,000s**, comfortably above the
+mainnet 86,400s daily heartbeat with margin, so the same value is correct on
+testnet and mainnet alike. Settlement liveness
+([I8](/security/invariants)) is built on top of this and is fuzz-verified.
+</Warning>
+
+<Info>
+**The I8 window subtlety (a documented design observation, not a bug).** The
+spec-literal staleness `require` fires *before* the lone-spike backstop can
+recover the round, so the *actual* usable settle-via-round-at-T window is
+`[expiry + LIVENESS_WINDOW, expiry + MAX_STALENESS)` ≈ **1 hour wide**
+(`90,000 − 86,400 = 3,600s`), not the full additive sum the I8 wording suggests.
+**Why it is fine:** the 1h window is *symmetric* for LP and MM (it preserves
+fairness), and past `expiry + MAX_STALENESS` funds can still settle via a *newer*
+Chainlink round — Arbitrum majors tick frequently — just not via the round-at-T.
+**Mitigation:** surfaced in the OracleManager NatSpec and pinned by a
+boundary test, never papered over. See
+[the forks](/security/forks) for the full Fork-1 resolution.
+</Info>
+
+---
+
+## A couple of code-reading footnotes
+
+These are not protocol limitations — they are honest notes for anyone reading the
+mapping code, included so the source is never mis-read:
+
+<AccordionGroup>
+<Accordion title="On-chain distanceBucket is effectively mid|unknown today">
+The subgraph's geometry classifier reports `mid` for a well-formed range (and
+`unknown` for a degenerate one), because without an oracle `P0` in the handler,
+ticks alone only give the geometric *centre*. **Why:** the precise
+`at-edge / near / deep` classification needs `P0` versus `(Pa, Pb)`.
+**Mitigation:** the **API refines the distance axis** from `P0` once it joins the
+oracle price — the on-chain coarse proxy is flagged in the code comment, not
+hidden.
+</Accordion>
+
+<Accordion title="The ConvexityVault appears as a MarketMaker row">
+`handleSwapCreated` bumps the counterparty's `MarketMaker` aggregate for *every*
+swap, and on **Path A the counterparty is the ConvexityVault** — so the vault
+address shows up as a `MarketMaker` with `fills` / `exposure` / `premium`.
+**Why:** the indexer uses one counterparty code path for both rails.
+**Mitigation:** `cumulativeWinCount` and `cumulativeQuoteFillCount` increment only
+for *genuine* Path-B MMs, and the **API distinguishes the vault row** when it
+surfaces the leaderboard.
+</Accordion>
+
+<Accordion title="A misleading variable name in getDepositor (no correctness issue)">
+In the ConvexityVault mapping, `getDepositor` is correctly keyed by the composite
+`${address}-${tranche}` id, but the internal `Depositor.load(...)` is passed the
+*id* string while the local variable is named `addrHex`. **Why it is harmless:**
+the id is correct (it is the composite), so per-tranche separation holds.
+**Mitigation:** flagged here as a naming smell only — there is **no correctness
+issue**.
+</Accordion>
+</AccordionGroup>
+
+---
+
+## The two guarantees — unchanged by everything above
+
+Every caveat on this page leaves the two headline claims exactly as they are.
+They are **separate claims and must never be merged.**
+
+<ClaimA />
+
+<ClaimB />
+
+The crucial split: the no-bad-debt proof (I1) is *structural* — collateral
+`= MaxIL ≥` payout — and **orthogonal to every pricing oracle**. The
+`FairValueOracle` and `VolOracle` are load-bearing only for the
+[I10 price cap](/security/invariants) and depositor solvency, **not** for the
+FULL no-bad-debt invariant. So a σ_ref at floor (item 4), a null testnet
+sequencer feed (item 3), or a pending subgraph (item 1) **cannot** create LP bad
+debt in FULL — they can, at most, misprice the load (which costs depositors,
+junior first) or delay a data surface.
+
+---
+
+## Live registry
+
+<AddressTable />
+
+<Maturity />
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Deployments" icon="server" href="/reference/deployments">
+    The live Arbitrum Sepolia registry — the single source of truth for every
+    address on this page.
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    I1–I10 stated precisely, with why each holds and where it is enforced and
+    fuzz-verified.
+  </Card>
+  <Card title="The two forks" icon="code-branch" href="/security/forks">
+    Fork-1 settlement liveness (the 1h I8 window) and Fork-2 the oracle-anchored
+    price band — both audit-resolved.
+  </Card>
+  <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
+    The pending indexer, the redeploy genesis block, and the typed pending state
+    the API falls back to.
+  </Card>
+  <Card title="SDK degradation" icon="plug-circle-exclamation" href="/sdk/degradation">
+    The exact typed `pending` states the SDK returns while the subgraph is
+    undeployed — never an error.
+  </Card>
+  <Card title="What this is not" icon="circle-xmark" href="/what-this-is-not">
+    The scope boundary — what Inflexion deliberately does not do, framed the same
+    Limit → Why → Mitigation way.
+  </Card>
+</CardGroup>

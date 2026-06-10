@@ -1,0 +1,289 @@
+---
+title: "Circular vs behavioral — why we dropped 'implied vol'"
+description: "Inverting fairRate to 'recover implied vol' is circular — you read back our own published sigma_ref and nothing else. The non-circularity decision rule, the price-to-beat baseline, the cap-bound exclusion, and the full decision table that keeps the moat honest."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+The moat's credibility rests on one thing: **the signals must not be circular**.
+A dataset that only echoes the protocol's own published
+formulas back at the observer is not information — it is a tautology dressed as
+alpha. This page exists to demonstrate that we held that line. It shows exactly why
+the tempting "implied volatility by inverting `fairRate`" framing is circular, states
+the decision rule that separates real signal from echo, and gives the decision table
+every one of [the five signals](/moat/five-signals) is checked against.
+
+<Info>
+**The discipline, in one sentence.** A number is informative only if its degrees of
+freedom come from an **actor's free choice** — the MM's `loadBps` or the LP's
+geometry/duration — measured *against* the protocol's transparent mechanical
+baseline, **never derived from it**.
+</Info>
+
+## The circular idea we deliberately dropped
+
+An earlier draft of the moat framed the headline signal as "recover the market's
+**implied volatility** by inverting our published `fairRate` from the charged
+premium". It sounds like an options desk:
+observe a price, invert your pricing model, read out the implied vol the market is
+trading. We **dropped it as circular** — and the reason is worth showing in full,
+because the rigor is the point.
+
+### The mechanical identity that makes it a tautology
+
+Every premium the protocol charges is, *by construction*, this identity:
+
+$$
+\frac{\text{premium}}{\text{MaxIL}} \;=\; \mathrm{fairRate}(\sigma_{\text{ref}})\,\bigl(1 + \text{load}\bigr)
+$$
+
+There are only two unknowns on the right, and **the protocol publishes both of
+them**:
+
+- $\mathrm{fairRate}$ is the protocol's own closed form — the exact
+  [Φ-sum](/math/fair-value-phi-sum) computed on-chain by the Stylus
+  `FairValueOracle`. It is not a market estimate; it is a deterministic function we
+  evaluate and emit.
+- $\sigma_{\text{ref}}$ is the protocol's own published realized-vol oracle — a
+  poke-based EWMA of Chainlink-tick log-returns, readable on-chain via
+  `VolOracle.sigmaRef(token)` ([σ_ref](/math/sigma-ref)).
+
+So suppose you "invert `fairRate`" to back out the volatility implied by an observed
+premium. What do you get? You feed in a premium that *we computed* using a
+$\sigma_{\text{ref}}$ that *we published*, run our published $\mathrm{fairRate}$
+backwards, and — to within the dealer load stack — you recover exactly the
+$\sigma_{\text{ref}}$ you could have read directly off-chain for free:
+
+$$
+\underbrace{\mathrm{fairRate}^{-1}\!\left(\tfrac{\text{premium}}{\text{MaxIL}\,(1+\text{load})}\right)}_{\text{"implied} \ \sigma\text{" you back out}} \;=\; \underbrace{\sigma_{\text{ref}}}_{\text{what we already published}}
+$$
+
+<Warning>
+**This is the circular defect, named.** Inverting `fairRate` from a charged premium
+recovers **nothing but our own published $\sigma_{\text{ref}}$ plus our own dealer
+load stack** — it tells an outside observer of our oracle exactly what they already
+knew.
+
+- **Why it fails:** $\sigma_{\text{ref}}$ is an *input* we publish, not an output the
+  market discovers. Inverting a function to recover its own published input is a
+  tautology, not a market-implied quantity. There is no new information in the round
+  trip.
+- **The fix (path forward):** reframe the entire moat around **actor behavior** — the
+  free choices the protocol does *not* compute — measured against the transparent
+  mechanical baseline, never derived from it. That fix is
+  the rest of this page, and the foundation of [the five signals](/moat/five-signals).
+</Warning>
+
+### A real implied vol would have to come from somewhere we don't control
+
+The contrast sharpens the point. On a real options venue, implied vol is informative
+*because the price is set by someone other than the pricer* — the market quotes,
+you invert *your* model, and the gap between your model's vol and the quoted vol is
+the market's view. Here, the "price" you would invert is the price **we** computed
+from **our** published vol. The only genuinely external thing in the premium is the
+**load the actor chose to charge** — and that is exactly what we keep. Everything
+else is the protocol talking to itself.
+
+## The non-circularity decision rule
+
+The fix is a single rule:
+
+<Note>
+A signal is non-circular **iff** its informative degrees of freedom come from the
+MM's `loadBps` **or** the LP's geometry/duration choice — measured **against** the
+transparent mechanical baseline, **not derived from it**.
+</Note>
+
+Unpack the two clauses, because both are load-bearing:
+
+<Steps>
+<Step title="The degrees of freedom must be an actor's free choice">
+The number must vary because **a human (or an MM's algorithm) decided something the
+protocol does not compute**. Two such free choices exist in the system:
+
+- **The MM's signed `quote.loadBps`** (Path B) — an external actor's freely chosen
+  markup, capped only by `loadParams.maxLoadBps` (invariant I10), never computed by
+  the protocol.
+- **Which `tokenId` an LP brings, and the duration chosen** — LP demand choice; the
+  protocol does not pick the geometry.
+
+If a number is a deterministic function of protocol state — `fairRate`, the pool's
+load stack — it has **no free degrees of freedom**. Inverting it recovers our own
+formula. That is the circular failure mode.
+</Step>
+
+<Step title="It must be measured against the baseline, not derived from it">
+The behavioral leg only becomes legible when you place it *next to* the transparent
+mechanical baseline (the [pool's `totalLoad`](/math/load-stack)) and read the
+**difference**. The subtraction — behavioral minus mechanical — is precisely what
+removes the circular component. Derive the signal *from*
+the baseline and you are back to inverting our own formula; measure it *against* the
+baseline and the residual is the actor's view.
+</Step>
+</Steps>
+
+This rule is why an MM quote is **per-market, never per-NFT** matters here: because
+[MaxIL is the unit of risk](/concepts/maxil) and the load is quoted as a percentage
+of MaxIL, the MM's `loadBps` is a clean, range-agnostic actor choice — informative
+when bucketed by geometry rather than noisy.
+
+## The decision table
+
+Every candidate number is run through the rule. This is the table the moat is
+audited against:
+
+| Source of the number | Circular? | Why |
+| --- | --- | --- |
+| MM-signed `quote.loadBps` (Path B) | **NO** | An external actor's free choice; the protocol does not compute it. Capped only by `loadParams.maxLoadBps` (I10). |
+| Which `tokenId` an LP brings + duration chosen | **NO** | LP demand choice; the protocol does not pick the geometry. |
+| Path-A pool load `totalLoadWad(σ_ref, util, conc)` | **YES** | Pure deterministic function of protocol state-machine outputs. Inverting it recovers our own formula. **Keep as the mechanical baseline / "price-to-beat", not a behavioral signal.** |
+| `fairRate(a, b, σ_ref, T)` | **YES** | Our own published closed form. Inverting it recovers our own $\sigma_{\text{ref}}$. |
+
+Read the table as two columns of fate. The **NO** rows are the only things sold as
+signals — they are the free choices of LPs and MMs. The **YES** rows are not
+discarded; they are **demoted to the baseline** the **NO** rows are measured
+against. The circular quantities still do essential work — they are the transparent
+yardstick — they just never appear on the data product labeled as "the market's
+view."
+
+<Tip>
+**A quick litmus test for any new metric.** Ask: *"If I knew every public protocol
+getter, could I compute this number without observing a single fill?"* If yes, it is
+mechanical (a **YES** row) — keep it as the baseline. If it requires observing what
+an actor actually chose, it is behavioral (a **NO** row) — it can be a signal.
+</Tip>
+
+## The two corollaries that fall out of the rule
+
+The decision rule has two consequences that recur in every signal. Internalize them
+once here; [the five-signals page](/moat/five-signals) applies them per signal.
+
+### Corollary 1 — the mechanical pool load is the "price-to-beat", not a signal
+
+The Path-A pool load is a **YES** row — fully circular on its own. But it is not
+deleted; it is **kept as the transparent yardstick the behavioral MM load is
+subtracted from**. Its entire job is to be the
+*price-to-beat*: the mechanical quote the MM either undercuts or retreats above. The
+spread — behavioral MM load minus mechanical pool load — is what [Signal 2](/moat/five-signals)
+extracts, and the subtraction is precisely what removes the circular component.
+
+This is why the pool load surface is the **one live SDK read today**:
+`getCurrentLoadSurface` recomputes the price-to-beat client-side from public getters
+via the parity-locked `CvammPricing` TypeScript port. The mechanical baseline being
+**fully reproducible from public getters** is exactly what makes the behavioral MM
+load *measurable against it*.
+
+$$
+\text{spread} \;=\; \underbrace{\text{poolLoad}}_{\text{mechanical baseline (YES, kept)}} \;-\; \underbrace{\text{mmLoad}}_{\text{behavioral signal (NO)}}
+$$
+
+### Corollary 2 — cap-bound fills carry zero load information and MUST be excluded
+
+When a premium is truncated by the cap — `premium == MaxIL` — the number you observe
+is **the cap, not the actor's load**. The load was clipped by the geometry of MaxIL,
+so the fill carries **zero load information** and must be excluded from the load
+surfaces (Signals 1, 2, and 3).
+
+This is not an off-chain heuristic that depends on brittle floating-point equality.
+Deriving `premium == MaxIL` off-chain is fragile under rounding, so the protocol
+emits an **explicit `cappedAtMaxIL` boolean** on the `SwapPriced` event so every
+consumer can filter cap-bound fills cheaply and unambiguously:
+
+```solidity filename="InflexionCore.sol (SwapPriced, abridged)"
+event SwapPriced(
+    uint256 indexed swapId,
+    uint8   path,            // 0 = cvAMM pool (A), 1 = MM (B)
+    uint256 fairPremium,     // the WAD baseline the load multiplies
+    /* ... pool-load decomposition fields ... */
+    uint256 totalLoadWad,    // Path A: clamped pool load; Path B: MM loadBps in WAD
+    uint256 sigmaRefWad,     // the σ_ref the swap was priced against
+    bool    cappedAtMaxIL    // true ⇒ premium hit the cap ⇒ ZERO load info
+);
+```
+
+```typescript filename="exclude cap-bound fills from any load surface"
+// A cap-bound fill reports the cap, not the actor's load — drop it.
+const loadFills = pricedEvents.filter((e) => !e.cappedAtMaxIL);
+```
+
+<Warning>
+**Limit → Why → Mitigation.** The clearing **load level** is contaminated, and
+cap-bound fills are uninformative — naked, these look like defects. Framed, they are
+the discipline:
+
+- **Limit:** the observed load is contaminated by liquidity, smart-contract-risk,
+  capital-lock, and inventory-skew premia; and a cap-bound fill reports the cap, not
+  the load.
+- **Why:** the cap is [load-bearing for the no-bad-debt guarantee](/concepts/no-bad-debt)
+  — truncating the payoff at MaxIL is what makes Path A solvent — so the cap
+  legitimately overwrites the load on those fills.
+- **Mitigation:** trade the **spread** (MM minus pool, against forward vol), not the
+  level; and **exclude `cappedAtMaxIL == true`** fills via the explicit on-chain flag.
+</Warning>
+
+## How the rule classifies the five signals
+
+The decision rule and its two corollaries produce the non-circularity verdict for
+each of [the five signals](/moat/five-signals). The verdicts below are exact — each
+states which leg is behavioral and which is the kept baseline.
+
+<AccordionGroup>
+<Accordion title="Signal 1 — clearing LOAD over a transparent σ_ref: PARTIAL (Path B only)">
+The **Path-B** load (`QuoteFilled.loadBps`) is an MM free choice → **non-circular**.
+The **Path-A** load (`SwapPriced.totalLoadWad = f(σ_ref, util, conc)`) is a
+deterministic function of protocol state → **circular**; keep it as the mechanical
+baseline the MM is measured against, do not sell it as a behavioral signal. **Exclude
+cap-bound fills.**
+</Accordion>
+
+<Accordion title="Signal 2 — pool-vs-MM load SPREAD + win-rate: YES (as a spread)">
+Each side is well-defined: pool load (mechanical, `SwapPriced` on the Path-A
+candidate) and MM load (behavioral, `QuoteFilled.loadBps`). The **difference**
+isolates the actor's view relative to the transparent baseline — the subtraction is
+exactly what removes the circular component. This is the
+purest expression of Corollary 1.
+</Accordion>
+
+<Accordion title="Signal 3 — TERM STRUCTURE of convexity (slope across 7/30/90d): PARTIAL — and watch the subtlety">
+For **Path B**, the slope of `QuoteFilled.loadBps` across durations is behavioral →
+non-circular. For **Path A**, the load stack is **duration-INDEPENDENT by
+construction** — `baseLoadWad`/`utilSkewWad`/`dispSkewWad` take no `durationSeconds`,
+so a Path-A "term structure of load" is a **flat line**.
+All maturity dependence lives in `fairRate(...,T)`, our own $\sigma_{\text{ref}}\sqrt{T}$.
+Do not conflate the *published `fairRate` term structure* (mechanical) with the
+*behavioral load term structure* (Path B). **Exclude cap-bound fills.**
+</Accordion>
+
+<Accordion title="Signal 4 — moneyness / DEMAND skew by geometry: PARTIAL">
+**Realized** demand by geometry is an LP choice (which `tokenId`/duration to bring) →
+non-circular for the fills we see. But on-chain we observe **only realized
+purchases**, biased by quote availability; **true demand including UNFILLED interest
+is off-chain** (relayer `/quote` requests, SDK `previewPremium` pings). The latent
+half cannot be on-chain by design — invariant **I7** guarantees an unchosen quote
+touches no nonce/capacity.
+</Accordion>
+
+<Accordion title="Signal 5 — net convexity / GAMMA supply: YES (as a supply/quantity gauge)">
+The aggregate is built from actor positions; the **quantity** — how much convexity
+the protocol is short — is a real-world fact, not a price computation. No inversion of
+any published formula is involved, so there is no circular component. The per-swap
+Greeks are finite-differenced off the deployed `ILMath.computeIL` /
+`FairValueOracle.fairRate`, anchored to protocol math with no parallel model.
+</Accordion>
+</AccordionGroup>
+
+## Why this rigor is itself part of the moat
+
+Anyone can claim "we have an implied-vol surface." The defensible move is to **show
+the math of why the naive version is circular and then ship the version that isn't**.
+That is what separates a real microstructure dataset from a re-skinned echo of our
+own oracle. The honest framing — and the reason this page exists — is that the moat is
+credible *because* we can derive, line by line, why inverting `fairRate` recovers
+nothing, and where the genuine information actually enters: the MM's `loadBps` and the
+LP's geometry, measured against a baseline we publish in full.
+
+For the behavioral signals in depth, see [the five signals](/moat/five-signals); for
+the on-chain primitives that emit them, see [the moat primitives](/moat/primitives);
+for the live-vs-pending state of each surface, see [state and limits](/moat/state-and-limits).
+
+<Maturity />

@@ -1,0 +1,291 @@
+---
+title: "Data moat showcase (in-app)"
+description: "The /data page — a public, wallet-free view into the microstructure of the DeFi LP volatility-risk premium. Signal 1 is a live heat-matrix; Signals 2-5 are structural-now, dynamic-with-volume; every pending state is framed, never an error."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+
+The `/data` page is the **public-alpha surface** of the protocol — *"the first public
+view into the microstructure of the DeFi LP volatility-risk premium"*. It is
+**read-only and wallet-free**: no `ConnectGate`, no writes. Anyone can open it and
+inspect the same convexity risk premium an MM has to price against, with no RPC key
+and no signature.
+
+This is the in-app rendering of the data moat. For the conceptual treatment of *why*
+the flow is a defensible dataset, read [the data moat](/concepts/data-moat); for the
+rigorous, citation-by-citation signal definitions, read [the five
+signals](/moat/five-signals).
+
+<Info>
+**Data is the moat, not a paywall.** The surface is built passively from day one and
+exposed as **free public APIs** (The Graph subgraph + REST). Revenue is protocol
+fees; the data is the competitive moat. `/data` is the human-readable
+window onto the same dataset the [DataClient](/sdk/data-client) and
+[public API](/integrate/api-overview) serve.
+</Info>
+
+## Lead with the five signals
+
+Every page that touches the moat leads with the **five non-circular behavioral
+signals** and each signal's explicit non-circularity verdict — never with the
+circular idea (inverting `fairRate` to read implied vol) that was deliberately
+dropped. The `/data` page is organized around exactly these five, in order.
+
+A signal is non-circular **iff** its informative degrees of freedom come from an MM's
+freely-chosen `loadBps` or an LP's geometry/duration choice — measured **against** the
+transparent mechanical baseline, never derived from it. Four
+of the five separate a **behavioral** leg (an actor's free choice) from a
+**mechanical** baseline (the protocol's price-to-beat); the subtraction is what
+isolates the actor's view:
+
+```
+        BEHAVIORAL (the signal)              MECHANICAL (the baseline / price-to-beat)
+        ───────────────────────              ─────────────────────────────────────────
+Load:   QuoteFilled.loadBps  (Path B)   vs   SwapPriced.totalLoadWad  (Path A)
+Vol:    the MM's forward view (implied)  vs   SwapPriced.sigmaRefWad   (backward EWMA)
+Demand: which tokenId/duration LP picks  vs   (no mechanical counterpart — pure choice)
+```
+
+<Warning>
+**The circular idea — "invert `fairRate` to read an implied-vol surface" — is dropped,
+and `/data` never shows it.**
+
+- **Limit:** every premium is, by construction, $\text{charged}/\text{MaxIL} =
+  \text{fairRate}(\sigma_{\text{ref}}) \cdot (1 + \text{load})$. Inverting `fairRate`
+  from the charged premium recovers nothing but the protocol's **own** published
+  $\sigma_{\text{ref}}$ plus its **own** dealer load stack.
+- **Why:** both inputs are protocol-computed, not external. Inverting a function with
+  the function's own published inputs cannot yield independent information — it is a
+  tautology, not a market-implied vol.
+- **Mitigation:** the entire moat is reframed around **actor behavior** — the free
+  choices the protocol does *not* compute, measured against the mechanical baseline.
+  The full proof lives on [circular vs behavioral](/moat/circular-vs-behavioral).
+</Warning>
+
+## The honest split: 1 live, 4 structural-now / dynamic-with-volume
+
+The `/data` page is explicit about which signal is live today and which are
+structures-now. Signal 1's **current** load surface is served **live via RPC**;
+Signals 2-5 carry a typed `pending` state because their *history / aggregate* surfaces
+need the subgraph, with their *dynamic / latent* telemetry halves capturing now.
+
+| # | Signal | What renders on `/data` | Live today? |
+| --- | --- | --- | --- |
+| **1** | Clearing-load surface | a fee × duration **heat-matrix** (live RPC, 30s refetch, with the block number) | **LIVE** |
+| **2** | Pool-vs-MM spread + win-rate | a framed `PendingNote` naming the future route | structural-now; dynamic with ≥3 MMs |
+| **3** | Convexity term structure | a framed `PendingNote` naming the future route | structural-now; slope-as-signal with volume |
+| **4** | Demand skew by geometry | a framed `PendingNote` (latent half is off-chain by design) | realized-now; latent-half telemetry capturing |
+| **5** | Net gamma / supply depth | a framed `PendingNote` naming the future route | most launch-robust; sharpens with the open book |
+
+## Signal 1 — Clearing-load surface (LIVE)
+
+The hero of the page. A fee × duration **heat-matrix** of the pool clearing load —
+bps over fair value — computed over a transparent [σ_ref](/math/sigma-ref) and read
+**live via RPC**: `getCurrentLoadSurface` + `getSurfaceSigmaRef`, on a 30s refetch,
+rendered with the live block number of the multicall.
+
+This is the load **every Path-B market maker must undercut to win the fill**. It is
+the mechanical *price-to-beat*, surfaced so the public can see the floor an MM
+competes against. The grid draws the 3×3 with heat colouring scaled to the
+**hottest priceable cell**; each cell shows:
+
+- **`+N bps`** — the clamped pool [load stack](/math/load-stack) over fair value;
+- **pool premium** — the dollar premium at that load;
+- **regime** — calm / normal / stressed, from the σ_ref band;
+- **the fair rate** — the on-chain [Φ-sum](/math/fair-value-phi-sum) baseline the load
+  multiplies.
+
+The clamped load shown in each cell is, exactly as deployed:
+
+$$
+\text{totalLoad} \;=\; \min\!\Big(\, \text{baseLoad}(\sigma_{\text{ref}}) + \text{utilSkew}(u) + \text{dispSkew}(h),\; \text{maxLoad} \,\Big)
+$$
+
+and the pool premium is $\text{poolPremium} = \lceil \text{fairPremium} \cdot (1 +
+\text{totalLoad}) \rceil$, hard-capped at MaxIL — invariant **I10 by construction**.
+
+<Note>
+**Why Signal 1's current surface is the one live SDK exception.** Almost every other
+moat surface is history/aggregate and routes through the API → subgraph. The
+*current* load surface is the only `DataClient` method that hits **live RPC** instead:
+per market, one multicall over public getters
+(`InflexionCore.markets`, `FairValueOracle.fairPremium`, `ConvexityVault.inventory`,
+`InflexionCore.loadParams`), then the two skews are finished client-side with the
+parity-locked [CvammPricing TS port](/sdk/cvamm-port) — never by `eth_call`-ing the
+delegatecall-only library.
+</Note>
+
+### Per-cell degradation is honest, never dropped
+
+A market that is unregistered, or whose oracle is reverting (stale feed / sequencer
+down), does **not** vanish from the grid and does **not** throw. It renders inline as
+a muted cell with an honest reason — *"not registered"* or *"oracle degraded"* — while
+every priceable cell around it stays live. This is the same pending-not-error
+discipline that governs Signals 2-5; here it operates **per cell** rather than per
+signal.
+
+<Warning>
+**Read the load level in context — it is contaminated; trade the spread, not the
+level.**
+
+- **Limit:** the clearing load mixes the convexity premium with liquidity,
+  smart-contract-risk, capital-lock, and inventory-skew premia.
+- **Why:** a single observed load is a sum of several premia, not a clean vol-risk
+  number.
+- **Mitigation:** compare the **spread** (MM − pool, vs implied/forward vol), which is
+  exactly Signal 2 — the subtraction cancels the shared contamination. And exclude
+  cap-bound fills (`SwapPriced.cappedAtMaxIL == true`), which carry zero load
+  information.
+</Warning>
+
+## Signals 2-5 — structural-now, dynamic-with-volume
+
+The remaining four signals render on `/data` as **framed pending states** today: the
+on-chain *structures* exist from launch, but the *history / aggregate / dynamic*
+layers need the subgraph (built, CI-green, not yet deployed) and — for the dynamics —
+multiple competing MMs and accumulating flow. Each carries its explicit
+non-circularity verdict.
+
+<AccordionGroup>
+  <Accordion title="Signal 2 — Pool-vs-MM spread + MM win-rate (NON-CIRCULAR: YES, as a spread)">
+    The pool quotes a mechanical load; an MM undercuts when it has an edge. The spread
+    $\text{spread} = \text{poolLoad} - \text{mmLoad}$ — plus how often and how deeply
+    MMs beat the pool — is **forward-vol expectation extracted from MM behavior**, a
+    VIX-like signal for LP markets. The subtraction (behavioral MM load − mechanical
+    pool load) is exactly what removes the circular component. On `/data`:
+    `getQuoteCompetition` (subgraph `Swap.spreadWad` + `MarketMaker` win counts, plus
+    the off-chain `COMPETITION_LOG` dynamic half). **Maturity:** structural at launch;
+    the competitive distribution matures only with ≥3 MMs.
+  </Accordion>
+  <Accordion title="Signal 3 — Convexity term structure (NON-CIRCULAR: PARTIAL)">
+    The same range is protectable at 7/30/90d; the slope of the MM's `loadBps` across
+    those three duration markets is the LP-convexity-premium term structure — the
+    slope is the signal. **Watch the subtlety:** the Path-A load stack is
+    **duration-independent by construction** — none of `baseLoadWad`, `utilSkewWad`,
+    `dispSkewWad` takes `durationSeconds`, so a Path-A "term structure of load" is a
+    *flat line* (all maturity dependence lives in `fairRate(...,T)`). Only the
+    **Path-B** slope is a behavioral signal; the Path-A curve is the published
+    `fairRate` term structure, not a behavioral one. On `/data`:
+    `getLoadSurfaceHistory` (subgraph).
+  </Accordion>
+  <Accordion title="Signal 4 — Demand skew by geometry (NON-CIRCULAR: PARTIAL)">
+    Which positions LPs seek to protect (tight vs wide; centered vs near-edge) — an
+    LP-sentiment / leading-stress indicator. Realized demand (which `tokenId`/duration
+    an LP brings) is an LP choice → non-circular for the fills we see. But the **latent
+    half — geometries priced/queried but not bought — never touches the chain by
+    design**: invariant **I7** guarantees an unchosen quote touches no nonce and no
+    capacity, so it leaves no on-chain trace. That latent demand is captured
+    **off-chain** in engine telemetry (`DEMAND_LOG`), from the first interaction — it
+    is unreconstructable retroactively. On `/data`: `getDemandRequests`.
+  </Accordion>
+  <Accordion title="Signal 5 — Net gamma / supply depth (NON-CIRCULAR: YES, as a quantity gauge)">
+    The total convexity the protocol is **short** (pool + every MM) and at what
+    aggregate load, plus Σfree / Σlocked across the open swap set — a real-time gauge of
+    DeFi appetite to sell vol, tradeable vs Deribit. It is a **sum over actor
+    positions** (a real-world quantity), not a price computation, so it needs no
+    de-circularization. The per-swap Greeks are finite-differenced off the deployed
+    `ILMath.computeIL` / `FairValueOracle.fairRate` — anchored to protocol math, no
+    parallel model. On `/data`: `getNetGamma`, computed off-chain over the open swap
+    set. **Maturity:** meaningful from a handful of swaps — the most launch-robust of
+    the five.
+  </Accordion>
+</AccordionGroup>
+
+### Pool NAV history — the depositor-risk surface
+
+Below the five signals, `/data` also renders **Pool NAV history**, the depositor-risk
+surface. It is subgraph/API-backed → a framed pending today. Because it is a
+depositor-facing surface, it carries the capital-NOT-guaranteed claim.
+
+<ClaimB />
+
+## The pending-not-error pattern, framed
+
+This is the single most important UX property of `/data`: **"pending" is never
+"error," and it is never a fabricated number.** Each pending signal renders via
+a `PendingHistory` → `PendingNote` that prints `env.detail` and **the exact future API
+route + query** it will be served from, read straight off the typed `ApiPending`
+envelope. The envelope embeds the future GraphQL/REST query verbatim, so wiring the
+API at the subgraph deploy is a **one-line body swap**.
+
+<Warning>
+**The subgraph is built but not yet deployed — so Signals 2-5's history/aggregate
+layers degrade to a typed `pending` state. This is a deliberate trust signal, not a
+bug.**
+
+- **Limit:** until `SUBGRAPH_URL` is set, every history / aggregate moat surface on
+  `/data` returns a typed `pending` body naming its future route — never an error,
+  never a faked value.
+- **Why:** this is a **build gap, not a contract gap.** The contracts already emit
+  every event the moat needs — `SwapPriced`, `QuoteFilled`, and the on-chain
+  `CvammPricing.loadComponents` breakdown have been live on-chain since the
+  **2026-06-05 redeploy** (subgraph `startBlock` `274081134`). The subgraph passes its
+  full offline test suite (`graph codegen` + `tsc` + `vitest`) but is not yet pointed
+  at a hosted endpoint.
+- **Mitigation / path-forward:** Signal 1's *current* surface is served **live now** via
+  the SDK multicall, and the off-chain telemetry halves (`DEMAND_LOG`,
+  `COMPETITION_LOG`) are **capturing now** from the first interaction. The pending body
+  carries the exact query, so the swap is mechanical when the subgraph deploys —
+  history degrades to a typed pending state, it never errors (see
+  [SDK degradation](/sdk/degradation), [the status caveats](/reference/status-caveats)).
+</Warning>
+
+<Maturity />
+
+## What the footer says
+
+The `/data` footer states the thesis verbatim — *"Structures from day one, dynamics
+mature with volume"* — names the rich on-chain events already emitted since the deploy
+(`SwapPriced`, `QuoteFilled`), and repeats **both** load-bearing disclosures. They are
+kept as **separate claims** and never merged:
+
+- The **LP no-bad-debt** claim (Claim A) — qualified, capped, FULL-mode.
+- The **depositor / MM capital-not-guaranteed** claim (Claim B).
+
+<ClaimA />
+
+<ClaimB />
+
+## How to consume the same data programmatically
+
+`/data` is the human window; the same surfaces are available without the browser.
+
+<CardGroup cols={3}>
+  <Card title="DataClient (SDK)" icon="code" href="/sdk/data-client">
+    `getCurrentLoadSurface` (live RPC, Signal 1), `getQuoteCompetition`,
+    `getLoadSurfaceHistory`, `getDemandRequests`, `getNetGamma`.
+  </Card>
+  <Card title="Public REST API" icon="server" href="/integrate/api-endpoints">
+    The cached, wallet-free facade — `GET /pool/load-surface` (live), `GET
+    /data/*` (history, typed-pending until the subgraph deploys).
+  </Card>
+  <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
+    The internal indexer the API reads — `BucketAggregate`, `GeometryDemandBucket`,
+    `NetGammaSnapshot`, and the rest.
+  </Card>
+</CardGroup>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="The data moat (concept)" icon="bullseye" href="/concepts/data-moat">
+    Why the flow is a defensible dataset, and who consumes it.
+  </Card>
+  <Card title="The five signals (deep)" icon="list-ol" href="/moat/five-signals">
+    Exhaustive per-signal definitions, sourcing, verdicts, and maturity.
+  </Card>
+  <Card title="Circular vs behavioral" icon="scale-balanced" href="/moat/circular-vs-behavioral">
+    The non-circularity table and the proof of why inverting `fairRate` is circular.
+  </Card>
+  <Card title="On-chain primitives" icon="cube" href="/moat/primitives">
+    `SwapPriced`, `QuoteFilled`, and the load-breakdown library.
+  </Card>
+  <Card title="Markets browser (in-app)" icon="table-cells" href="/app/markets">
+    The action-oriented market grid — Signal 1's load surface as live action links.
+  </Card>
+  <Card title="State and limits" icon="circle-info" href="/moat/state-and-limits">
+    The exact state of the dataset and the full set of honest limits.
+  </Card>
+</CardGroup>

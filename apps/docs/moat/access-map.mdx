@@ -1,0 +1,306 @@
+---
+title: "Accessing each signal"
+description: "The access map: for each of the five behavioral signals, the SDK method, the API route, the subgraph entity, and its live-now flag — one table, the one live SDK exception, and graceful degradation everywhere."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+This page answers one operational question: **how does a consumer actually reach each
+of the [five behavioral signals](/moat/five-signals)?** It maps every signal across all
+three access layers — the [SDK](/sdk/data-client), the [REST API](/integrate/api-overview),
+and the [subgraph](/integrate/subgraph) — and tells you exactly which half is **live
+right now** versus which half degrades to a typed `pending` state.
+
+If you want the *what* and the *why-non-circular* of the signals, read
+[/moat/five-signals](/moat/five-signals) and [/moat/circular-vs-behavioral](/moat/circular-vs-behavioral).
+If you want the *primitives* that feed them, read [/moat/primitives](/moat/primitives).
+This page is the *plumbing*.
+
+## The three-layer routing rule
+
+Before the per-signal table, internalize the rule that decides which layer you reach
+for:
+
+<CardGroup cols={3}>
+<Card title="SDK" icon="signature">
+**Needs to write, or needs the exact price right now.** The SDK is the only layer that
+holds a signer and the only one that can answer *"what dollar premium will I be charged
+on THIS position if I sign in the next block?"* — a fresh on-chain read plus the
+position geometry.
+</Card>
+<Card title="Subgraph" icon="diagram-project">
+**Needs history or an aggregate.** The subgraph is *internal infrastructure* — nobody
+queries it directly in production except the API.
+</Card>
+<Card title="API" icon="globe">
+**Needs frictionless public access with no wallet and no RPC key.** A thin, cached,
+read-only facade over the subgraph (+ a small set of cached live RPC reads routed
+*through the SDK*, so pricing has exactly one implementation).
+</Card>
+</CardGroup>
+
+<Note>
+**One pricing implementation, three faces.** The current load surface ("price-to-beat")
+is computed in exactly one place — the [SDK's `CvammPricing` TS port](/sdk/cvamm-port).
+The API's live RPC reads route *through the SDK*; the subgraph never reprices, it only
+records what already cleared. There is no second pricing model to drift out of parity.
+The [Phi-sum](/math/fair-value-phi-sum) is never reimplemented anywhere — it is read
+from the on-chain `FairValueOracle`.
+</Note>
+
+## The per-signal access map
+
+This is the page's core artefact. For each signal: the `DataClient` SDK method, the API
+route, the subgraph entity, and the **live-now flag**. The API-route strings are the
+SDK↔API contract named in `DATA_API_ROUTES`.
+
+| Signal | SDK method (`DataClient`) | API route | Subgraph entity | Live now? |
+| --- | --- | --- | --- | --- |
+| **1 — Clearing load** over a transparent `σ_ref` | `getCurrentLoadSurface` (LIVE, current) · `getLoadSurfaceHistory` (history) | `GET /pool/load-surface` (current, live RPC) · `GET /data/load-surface` (history) · `GET /data/convexity-surface` (Signals 1 & 2 structural) | `MarketStateSnapshot`, `BucketAggregate` | **current = live RPC NOW**; history = subgraph-pending |
+| **2 — Pool-vs-MM spread** + win-rate | `getQuoteCompetition` | `GET /data/quote-competition` | `Swap.spreadWad`, `MarketMaker` win counts · + `COMPETITION_LOG` telemetry | **dynamic half = telemetry LIVE NOW**; structural = subgraph-pending |
+| **3 — Term structure** of convexity | (via `getLoadSurfaceHistory` / API) | `GET /data/term-structure?width&distance` | `BucketAggregate[]` across durations | subgraph-pending |
+| **4 — Demand skew** by geometry | `getDemandRequests` | `GET /data/demand-requests` | `GeometryDemandBucket` (realized) · + `DEMAND_LOG` telemetry (latent) | **latent half = telemetry LIVE NOW**; realized = subgraph-pending |
+| **5 — Net gamma supply** (protocol-wide) | `getNetGamma` | `GET /data/net-gamma`, `GET /data/supply-depth` | `NetGammaSnapshot`, `ProtocolState` | subgraph-pending (off-chain Greeks compute) |
+
+<Info>
+**Read the "Live now?" column carefully — it is not binary per signal.** Three of the
+five signals are *split* across a live half and a pending half. Signal 1's *current*
+surface is live RPC while its *history* waits on the subgraph; Signals 2 and 4 each
+have an **off-chain telemetry half that is live now** (the dynamic / latent half that
+can *never* be on-chain) and a structural half that waits on the subgraph. The split is
+the point — it is what makes the dataset *captured, not retroactive* (see [the I7
+exclusion](#why-two-halves-can-never-be-on-chain) below).
+</Info>
+
+## The one live SDK exception — `getCurrentLoadSurface`
+
+Every other `DataClient` history method is API-backed (and therefore degrades while the
+subgraph is pending). **`getCurrentLoadSurface` is the single exception**: it hits live
+RPC directly to compute the current pool load surface — the *price-to-beat*. It is the
+**live half of Signal 1**.
+
+<Steps>
+<Step title="One multicall per market, over public getters">
+Per market, a single multicall reads:
+
+- `InflexionCore.markets(marketId)` → market config;
+- `FairValueOracle.fairPremium(token, a, b, T, maxIL)` → `(premium, fairRate, σ_ref)` —
+  the [Phi-sum](/math/fair-value-phi-sum), read on-chain, never reimplemented;
+- `ConvexityVault.inventory()` → `(total, locked, free, util, conc)`;
+- `InflexionCore.loadParams()` (read once, shared across markets).
+</Step>
+<Step title="Finish the load stack client-side (parity-locked)">
+The load stack is completed client-side with the parity-locked
+[`CvammPricing` TS port](/sdk/cvamm-port), then
+
+$$
+\text{poolPremium} \;=\; \Bigl\lceil \text{fairPremium}\cdot\bigl(1 + \text{totalLoad}\bigr) \Bigr\rceil \quad\text{capped at MaxIL}
+$$
+
+This is exactly the on-chain `_pricePathAFromFair` path. The client-side
+re-evaluation is *permitted only* because the deployed `CvammPricing` library is
+**delegatecall-only** — a direct `eth_call` reverts — so the SDK keeps a byte-equal TS
+mirror asserted in `math.parity.test.ts`. The [Phi-sum is never mirrored](/concepts/fair-value);
+only the deterministic `pure` load transform is.
+</Step>
+<Step title="Per-market graceful degradation, inline">
+An unknown/inactive market or a reverting oracle yields an *inlined degraded*
+`SurfaceRow` (`oracle-degraded` / `market-unknown`) — never a thrown call. A market that
+supplies no geometry uses a neutral reference geometry, because the **load %** is
+geometry-independent; only the dollar `fairPremium`/`poolPremium` scale with `a/b/maxIL`.
+</Step>
+</Steps>
+
+```ts data-client.ts
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+
+// The one live DataClient method — no subgraph, no wallet, live RPC.
+const surface = await sdk.data.getCurrentLoadSurface({
+  markets: [{ marketId: demo.marketId_fee500_7d }], // geometry optional → neutral ref geom
+})
+
+for (const row of surface.rows) {
+  if (row.available) {
+    // The price-to-beat: fair value, the pool premium, the load decomposition, regime.
+    console.log(row.marketId, row.fairPremium, row.poolPremium, row.load.totalLoadWad, row.regime)
+  } else {
+    // Inline degraded row — never a thrown call.
+    console.log(row.marketId, 'degraded:', row.reason) // 'oracle-degraded' | 'market-unknown'
+  }
+}
+
+// σ_ref + regime are also live (the transparent reference Signal 1 measures load against).
+const sig = await sdk.data.getSurfaceSigmaRef(tokens.demoWeth) // Degraded<{ sigmaRefWad, regime }>
+```
+
+<Note>
+**Why `getCurrentLoadSurface` is the *baseline*, not a behavioral signal.** What it
+serves is the Path-A mechanical pool load — the deterministic *price-to-beat*. That leg
+is [circular by itself](/moat/circular-vs-behavioral) (inverting it recovers our own
+load stack). Its job in Signal 1 and Signal 2 is to be the **transparent yardstick**
+the behavioral MM load is *measured against* — the subtraction `mmLoad − poolLoad` is
+exactly what removes the circular component. The *historical evolution* of this same
+surface is `getLoadSurfaceHistory` (API-backed, subgraph-pending).
+</Note>
+
+## The two telemetry halves that are live now
+
+Signals 2 and 4 each have a half that is **already capturing**, served from off-chain
+engine telemetry rather than the chain or the subgraph. This is `TelemetrySink`, writing
+two append-only JSONL sinks from the first interaction. The writer is **best-effort**: a
+telemetry failure never breaks a quote ack, a preview, or a `/quote` request.
+
+<CardGroup cols={2}>
+<Card title="DEMAND_LOG → Signal 4 (latent half)" icon="magnifying-glass-chart">
+Written on every `GET /quote` and every `POST /telemetry/preview` ping. Schema
+`DemandRecord` is coarse-bucketed and **PII-free** — `{ ts, marketId, widthBucket,
+distanceBucket, durationBucket, previewedPremium?, filled:false (ALWAYS — this is the
+latent half), source }`. **No raw geometry, no tokenId, no addresses** — the SDK
+computes the buckets client-side and POSTs only the labels. The SDK
+[`LpClient.previewPremium`](/sdk/lp-client) fires this fire-and-forget; it never blocks
+or fails the preview.
+</Card>
+<Card title="COMPETITION_LOG → Signal 2 (dynamic half)" icon="users-rectangle">
+Written for **every** inbound WS quote — winners AND losers/stale/withdrawn-equivalent.
+Schema `CompetitionRecord`: `{ ts, marketId, mm, loadBps, validUntil, accepted, reason?
+}`. Without it, the engine keeps only the *latest* stored quote per (market, MM) — the
+competing field (who else quoted, how wide, who widened/withdrew) is lost.
+</Card>
+</CardGroup>
+
+### Why two halves can never be on-chain
+
+This is the structural reason the telemetry sinks exist — and why capturing them *now*
+is non-negotiable rather than a nice-to-have.
+
+<Warning>
+**Limit.** An LP who priced a position but did not buy, and an MM quote that lost or was
+withdrawn, leave **no on-chain trace**. So the *latent* half of Signal 4 and the
+*dynamic* half of Signal 2 cannot be served from the chain or the subgraph.
+
+**Why.** [Invariant I7](/security/invariants) guarantees that an *unchosen* quote
+touches no nonce and no capacity — only the executed rail mutates state. Putting unfilled
+interest on-chain would both cost gas and *break* I7. The consequence: this data is
+**unreconstructable retroactively** — once the interaction passes uncaptured, it is gone.
+
+**Mitigation / path forward.** The off-chain telemetry sinks capture both halves from
+the **first interaction**, append-only and best-effort, exactly because they cannot be
+recovered later. Engine `GET /health` reports sink
+status `{ telemetry: { demand: true, competition: true } }`. Post-redeploy the API reads these JSONL logs and
+serves `GET /data/demand-requests` (latent) and `GET /data/quote-competition` (dynamic),
+each carrying the [maturity disclaimer](#graceful-degradation-everywhere).
+</Warning>
+
+## Graceful degradation everywhere
+
+Degradation is not an edge case in the access layer — it is the **default contract** at
+every layer. Nothing throws; everything degrades to a *typed, named* state. This is what
+lets the docs, the app, and any integrator render the dataset's current maturity instead
+of showing an error.
+
+<Tabs>
+<Tab title="API layer">
+Every API endpoint returns a discriminated union and **never throws**:
+
+```ts
+type ApiResponse<T> =
+  | ({ available: true } & T)
+  | { available: false; reason: string; detail: string; query?: string }
+```
+
+- **Live RPC + telemetry routes** return real data NOW.
+- **Subgraph-backed routes** return a typed `pending` body **with the exact future
+  GraphQL query embedded**, until `SUBGRAPH_URL` is set at the redeploy. So the UI can
+  show *"coming from `<route>`"* and the route is wired later with zero re-derivation.
+</Tab>
+<Tab title="SDK layer">
+The SDK mirrors the API contract with typed envelopes that never throw on read:
+
+- `Degraded<T>` — `{ available: true } & T | { available: false, reason }` (vault state,
+  position, regime, surface σ_ref).
+- `Priceable<T>` — `{ priceable: true } & T | NotPriceable` (anything needing the live
+  price P0).
+- `ApiPending` — `{ available: false, reason: 'no-history-source', endpoint, query, detail }`
+  for the history methods: it names the **FUTURE** route + the query that *would* be
+  sent, so wiring the API later is a **one-line body swap**. The SDK **never fabricates
+  history**.
+</Tab>
+<Tab title="Subgraph layer">
+The subgraph is built and passes its offline checks but `SUBGRAPH_URL` is **not yet
+set**, so every history/aggregate surface degrades to the typed `pending` state above.
+This is a *build gap, not a contract gap* — the contracts already emit every event the
+moat needs.
+</Tab>
+</Tabs>
+
+<Warning>
+**Limit.** While the subgraph is undeployed, every *history/aggregate* surface — Signal
+1's history, Signal 3 entirely, the structural halves of Signals 2 and 4, and Signal 5
+— returns a typed `pending` state rather than data.
+
+**Why.** This is the single real blocker for the HISTORY/AGGREGATE moat surfaces, and it
+is a *build gap, not a contract gap*: the on-chain moat events (`SwapPriced`,
+`QuoteFilled`) and `CvammPricing.loadComponents` shipped in the
+[2026-06-05 redeploy](/reference/deployments) and emit every field the indexer needs.
+The redeploy block `274081134` is the subgraph `startBlock` — the dataset's genesis.
+
+**Mitigation / path forward.** Each pending body carries the exact future GraphQL query,
+so deploying the subgraph is a one-line wiring change, not a re-derivation. Meanwhile the
+**live RPC** (current load surface, σ_ref) and **telemetry** (latent demand, quote
+competition) surfaces serve real data today. One bounded follow-up remains: the
+**per-MARKET** dimension is declared but not yet populated (events carry no `marketId`
+yet), so `Market` counters stay zero-init — but the **GEOMETRY-keyed** aggregates
+(`BucketAggregate`, `GeometryDemandBucket`) are fully populated, so the
+**geometry-bucketed moat signals are unaffected**. See
+[/moat/state-and-limits](/moat/state-and-limits) and
+[/reference/status-caveats](/reference/status-caveats).
+</Warning>
+
+<Maturity />
+
+## Live-now summary
+
+A one-glance read of what serves real data today versus what degrades to a typed
+`pending` state:
+
+| Surface | Layer | Status today |
+| --- | --- | --- |
+| `getCurrentLoadSurface` (price-to-beat) | SDK live RPC / API `GET /pool/load-surface` | **LIVE** |
+| `getSurfaceSigmaRef` (σ_ref + regime) | SDK live RPC | **LIVE** |
+| Signal 4 latent demand (`DEMAND_LOG`) | Engine telemetry / `GET /data/demand-requests` | **LIVE NOW** (off-chain by I7) |
+| Signal 2 dynamic competition (`COMPETITION_LOG`) | Engine telemetry / `GET /data/quote-competition` | **LIVE NOW** (off-chain by I7) |
+| Signal 1 history (`getLoadSurfaceHistory`) | Subgraph via API | typed `pending` |
+| Signal 3 term structure | Subgraph via API | typed `pending` |
+| Signal 2 / 4 structural (realized) halves | Subgraph via API | typed `pending` |
+| Signal 5 net gamma (`getNetGamma`) | Off-chain Greeks compute via API | typed `pending` |
+
+<Note>
+**The pattern, restated.** Anything that needs the *price right now* or *who quoted what
+right now* is live (SDK live RPC + engine telemetry). Anything that needs *history or an
+aggregate distribution* degrades to a typed `pending` state until the subgraph deploys —
+with the future query embedded, never an error. The dataset's *structures* are reachable
+today; its *dynamics* mature with the subgraph deploy, more MMs, and flow.
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+<Card title="The five signals" icon="list-ol" href="/moat/five-signals">
+Each behavioral signal, defined precisely, with its non-circularity verdict, sourcing,
+and maturity caveat.
+</Card>
+<Card title="The on-chain primitives" icon="cube" href="/moat/primitives">
+`SwapPriced`, `QuoteFilled`, the load-breakdown library, and why two signals can never
+be on-chain (I7).
+</Card>
+<Card title="The DataClient" icon="code" href="/sdk/data-client">
+The SDK surface for the moat — method signatures, degradation envelopes, and the live
+load-surface read.
+</Card>
+<Card title="State and limits" icon="triangle-exclamation" href="/moat/state-and-limits">
+The framed account of what is live, what is pending, and the path forward for each
+surface.
+</Card>
+</CardGroup>

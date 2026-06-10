@@ -1,0 +1,201 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Inflexion",
+  "colors": {
+    "primary": "#14B8A6",
+    "light": "#5EEAD4",
+    "dark": "#0E9C8C"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction",
+              "why-inflexion",
+              "why-now",
+              "what-this-is-not",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/three-pillars",
+              "concepts/maxil",
+              "concepts/in-range-convexity-hedge",
+              "concepts/two-rails",
+              "concepts/fair-value",
+              "concepts/no-bad-debt",
+              "concepts/tranches",
+              "concepts/data-moat",
+              "concepts/glossary-primer"
+            ]
+          },
+          {
+            "group": "The Mathematics",
+            "pages": [
+              "math/overview",
+              "math/il-formula",
+              "math/maxil-derivation",
+              "math/fair-value-phi-sum",
+              "math/sigma-ref",
+              "math/load-stack",
+              "math/no-bad-debt-math",
+              "math/worked-example",
+              "math/theory-anchors"
+            ]
+          },
+          {
+            "group": "Protocol Mechanics",
+            "pages": [
+              "protocol/overview",
+              "protocol/pricing-stack",
+              "protocol/lifecycle",
+              "protocol/path-a-cvamm",
+              "protocol/path-b-mm",
+              "protocol/routing",
+              "protocol/vaults",
+              "protocol/oracles",
+              "protocol/collateral-models",
+              "protocol/markets"
+            ]
+          },
+          {
+            "group": "Security, Invariants & Trust",
+            "pages": [
+              "security/overview",
+              "security/invariants",
+              "security/forks",
+              "security/price-pinning",
+              "security/cei-reentrancy",
+              "security/attack-vectors",
+              "security/trust-model",
+              "security/audits",
+              "security/immutability-custody"
+            ]
+          },
+          {
+            "group": "Using the App",
+            "pages": [
+              "app/prerequisites",
+              "app/protect",
+              "app/earn",
+              "app/underwrite",
+              "app/dashboard",
+              "app/markets",
+              "app/data",
+              "app/ux-notes"
+            ]
+          },
+          {
+            "group": "The SDK",
+            "pages": [
+              "sdk/overview",
+              "sdk/getting-started",
+              "sdk/addresses-units",
+              "sdk/lp-client",
+              "sdk/depositor-client",
+              "sdk/mm-client",
+              "sdk/data-client",
+              "sdk/greeks-hedge",
+              "sdk/cvamm-port",
+              "sdk/degradation",
+              "sdk/guardrails"
+            ]
+          },
+          {
+            "group": "Integrate",
+            "pages": [
+              "integrate/architecture",
+              "integrate/engine",
+              "integrate/api-overview",
+              "integrate/api-endpoints",
+              "integrate/subgraph",
+              "integrate/marketid-parity",
+              "integrate/quote-signing",
+              "integrate/recipes"
+            ]
+          },
+          {
+            "group": "The Data Moat",
+            "pages": [
+              "moat/thesis",
+              "moat/five-signals",
+              "moat/circular-vs-behavioral",
+              "moat/primitives",
+              "moat/telemetry",
+              "moat/access-map",
+              "moat/state-and-limits"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/deployments",
+              "reference/markets-grid",
+              "reference/decimals-units",
+              "reference/env-vars",
+              "reference/repo-layout",
+              "reference/constants",
+              "reference/glossary",
+              "reference/status-caveats"
+            ]
+          },
+          {
+            "group": "Resources",
+            "pages": [
+              "faq",
+              "risk-disclosure",
+              "status"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDK Reference",
+        "groups": [
+          {
+            "group": "SDK Reference",
+            "pages": [
+              "sdk-reference/lp",
+              "sdk-reference/depositor",
+              "sdk-reference/mm",
+              "sdk-reference/data",
+              "sdk-reference/greeks-hedge",
+              "sdk-reference/quote-helpers",
+              "sdk-reference/types"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "openapi": "api-reference/openapi.json"
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/frytegg/inflexion"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Launch App",
+      "href": "https://app.inflexion.xyz"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/frytegg/inflexion"
+    }
+  }
+}

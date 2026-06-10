@@ -1,0 +1,255 @@
+---
+title: "Attack-vector to mitigation ledger"
+description: "Every audited attack vector against Inflexion, mapped to the exact mitigation and the invariant where it is enforced — from MM bad debt and lone-spike oracle to forged quotes and reentrant settle."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+This is the adversarial index of Inflexion's security: a one-row-per-vector ledger of every attack the protocol has been threat-modeled against, each mapped to its **mitigation** and to the **exact place it is enforced** — a numbered invariant, never a hand-wave. It is the companion to [the invariants](/security/invariants) (what is guaranteed and why), [the forks](/security/forks) (the two open audit items, now closed), and [the trust model](/security/trust-model) (what the off-chain matcher can and cannot do).
+
+Where a vector touches a deeper page, the row links to it. The full enforcement set is on the live deployment — see [the deployment registry](/reference/deployments) for addresses.
+
+<Info>
+**How to read this ledger.** Every row follows the same shape: **vector → mitigation → where enforced.** "Where enforced" is a Foundry-fuzzed invariant (`I1`–`I10`). Nothing here is "trust us" — each mitigation is code, and most are also driven by a fuzz test on [the invariants page](/security/invariants).
+</Info>
+
+## The master ledger
+
+The fifteen vectors below are grouped by what they attack: LP payout integrity, oracle/settlement, quote & capacity integrity, economic griefing, depositor/custody safety, and reentrancy. Audit-finding tags (`F-#N`) reference the external audit summarized on [the audits page](/security/audits).
+
+<table>
+<thead>
+<tr><th>Attack vector</th><th>Mitigation</th><th>Where enforced</th></tr>
+</thead>
+<tbody>
+
+<tr>
+<td>**MM / underwriter bad debt under a large price move**</td>
+<td>FULL collateral locked at `MaxIL` at creation + payout capped at `min(realized_IL, MaxIL)`. The cap *is* the `min`; structural, not heuristic. Holds for any price path.</td>
+<td>**I1 + I2** — [payout cap](/security/invariants) and collateral locked at creation (Path A / Path B)</td>
+</tr>
+
+<tr>
+<td>**Lone-spike Chainlink glitch at expiry** (a single bad print pins a wrong settlement price)</td>
+<td>Settlement price is the Chainlink round-at-T; a "lone spike" (a round differing from **both** neighbours by ≥ `LONE_SPIKE_BPS` = 5%) is deferred. Real fast moves persist across rounds and pass.</td>
+<td>**I8** — enforced in `OracleManager` ([Fork-1](/security/forks))</td>
+</tr>
+
+<tr>
+<td>**Permanent fund lockup if an oracle deferral never resolves**</td>
+<td>A 24h `LIVENESS_WINDOW` backstop accepts the round *unconditionally* once the window passes; a missing neighbour across a Chainlink `phaseId` boundary is read tolerantly (try/catch) and degrades to the backstop, never a revert.</td>
+<td>**I8** — enforced in `OracleManager`</td>
+</tr>
+
+<tr>
+<td>**Stale-quote pickoff** — a leaked bearer-instrument SignedQuote replayed on-chain when vol gaps (`F-#7`, Fork-2)</td>
+<td>Oracle-anchored band: the quote carries `quotePrice` + `priceBandBps`; `createSwap` auto-voids it on-chain, deterministically, if `absBps(P_live, quotePrice) > priceBandBps`. No MM discretion at fill ⇒ **not last-look**.</td>
+<td>**I9** — enforced in `InflexionCore` ([Fork-2](/security/forks))</td>
+</tr>
+
+<tr>
+<td>**LP lies about the position's range geometry** (to inflate MaxIL/premium/V0)</td>
+<td>`sqrtPa`/`sqrtPb` are derived on-chain from `positions().tickLower/tickUpper` via TickMath; the position's actual `(token0, token1, fee)` is cross-checked against the registered `marketId`. The LP can lie about neither the range nor the entry.</td>
+<td>[Enforced in `InflexionCore`](/security/price-pinning) (`MarketMismatch`)</td>
+</tr>
+
+<tr>
+<td>**Settler chooses the settlement price** (a permissionless settler sets payout anywhere in `[0, MaxIL]`)</td>
+<td>`P_T` is derived on-chain from the Chainlink round-at-T via `_oracleSqrtPriceX96`, never from calldata. Restores I2 *and* I4.</td>
+<td>**I2 / I4** — [enforced in `InflexionCore`](/security/price-pinning)</td>
+</tr>
+
+<tr>
+<td>**LP picks a favorable entry price** (to set MaxIL/premium/V0 in their favor)</td>
+<td>`P0` is the on-chain Chainlink round at the LP's block, clamped to within `priceBandBps` of the MM `quotePrice`. Bounded entry-timing freedom, blunted by premium scaling with MaxIL.</td>
+<td>[Enforced in `InflexionCore`](/security/price-pinning) (I9 clamp)</td>
+</tr>
+
+<tr>
+<td>**External `increaseLiquidity` on the custodied NFT** (inflate computed IL post-creation, `F-#2`)</td>
+<td>`L` is snapshotted **once** at creation; settle passes the *stored* `s.liquidity` to `computeIL`, never a re-read of the NFT. An attacker can grow on-chain `L` between create and settle with zero effect on payout.</td>
+<td>**I6** — enforced in `InflexionCore`</td>
+</tr>
+
+<tr>
+<td>**Bearer-quote replay after off-chain cancel** (`F-#7`)</td>
+<td>Permit2-style bitmap nonces (`nonce = word<<8 | bit`) + selective `cancelNonces([...])`: an MM voids exactly one quote by flipping one bit. A cancelled bit can never fill.</td>
+<td>**I7** — enforced in `InflexionCore`</td>
+</tr>
+
+<tr>
+<td>**Capacity over-consumption from concurrent fills** (`F-#6`)</td>
+<td>Atomic check-and-increment of `consumedNotional[quoteId]` in PHASE 3 effects, *before* any external call, guarded by the `+ g.V0 > maxNotionalV0` revert in PHASE 2. Capacity is denominated in V0, not collateral.</td>
+<td>**I7** — enforced in `InflexionCore`</td>
+</tr>
+
+<tr>
+<td>**Dust-swap MM griefing** (spam sub-economic positions, `F-#8`/`F-#13`)</td>
+<td>Floors: `MIN_POSITION_V0 = $100`, `MIN_PREMIUM = $1`. Positions and premiums below the floor are rejected at the PHASE-2 dust gate.</td>
+<td>Enforced in `InflexionCore`</td>
+</tr>
+
+<tr>
+<td>**Premium under-charge from integer division** (`F-#8`)</td>
+<td>`premium = ceilDiv(...)` — rounds **up**, never down. An attacker cannot shave a fractional unit off the premium across many fills.</td>
+<td>Enforced in `CvammPricing` and `InflexionCore`</td>
+</tr>
+
+<tr>
+<td>**Overcharge the LP** (push premium above the fair value + max load)</td>
+<td>By construction: Path A clamps `total = min(baseLoad + skews, maxLoad)`; Path B requires `loadBps ≤ maxLoadBps`. Both also cap premium at MaxIL. No MM discretion, no graceful-degradation path.</td>
+<td>**I10** — enforced in `CvammPricing` and `InflexionCore`</td>
+</tr>
+
+<tr>
+<td>**Sequencer-downtime exploitation** (settle/create against a stale L2 state)</td>
+<td>`_requireSequencerHealthy` enforces sequencer uptime + a 1h grace period and **fails closed** on a future `updatedAt`.</td>
+<td>Enforced in `OracleManager`</td>
+</tr>
+
+<tr>
+<td>**NFT custody hijack** (deposit a fake NFT, or redirect fee claims)</td>
+<td>`ILVault.onERC721Received` accepts NFTs **only** from the canonical NonfungiblePositionManager configured at deploy; `claimFees` recipient is forced to the registered LP.</td>
+<td>`ILVault` ([custody model](/security/immutability-custody))</td>
+</tr>
+
+<tr>
+<td>**Locked-collateral utilization-gated withdraw failure** (rehypothecation breach, `F-#3`)</td>
+<td>A yield adapter must be `isInstantlyRedeemable()`; locked collateral is **never** routed to Aave/Compound. Only the idle slice may go to instantly-redeemable wrappers (sDAI / tokenized T-bills).</td>
+<td>`IYieldAdapter` ([vault rules](/protocol/vaults))</td>
+</tr>
+
+<tr>
+<td>**Pool run on the cvAMM** (mass withdrawal drains collateral mid-swap)</td>
+<td>Withdrawals are cooldown-gated (`requestWithdrawal` → `withdraw` after `withdrawalCooldown`); **junior cannot be drawn below `totalLocked`**. The same locked/free accounting also drives `util_skew` up before the pool over-commits.</td>
+<td>[Enforced in `ConvexityVault`](/protocol/vaults) (`JuniorBelowLocked`)</td>
+</tr>
+
+<tr>
+<td>**Underwriting loss hits senior depositors**</td>
+<td>`totalLocked ≤ juniorAssets` is enforced at **every** `lockCollateral`; the waterfall takes `juniorLoss` first, `seniorLoss` only after — and by the invariant senior is never reached. Junior-first-loss.</td>
+<td>[Enforced in `ConvexityVault`](/concepts/tranches) (`SeniorProtectionBreached`)</td>
+</tr>
+
+<tr>
+<td>**Forged MM quote** (fabricate a SignedQuote)</td>
+<td>Every Path-B quote is EIP-712 signed and verified via OZ `SignatureChecker.isValidSignatureNow` (ECDSA + EIP-1271 contract signers). An unsigned or mis-signed quote is rejected.</td>
+<td>[Enforced in `QuoteVerification`](/integrate/quote-signing)</td>
+</tr>
+
+<tr>
+<td>**Re-entrant `settle` via a malicious `oracle`/`ilMath`**</td>
+<td>Strict CEI with status-flip-first: `s.status = SETTLED` is hoisted to immediately after the validity checks, *before* any external call, so re-entry on the same `swapId` hits the `Status.ACTIVE` precondition and reverts. (The one Slither medium that was fixed.)</td>
+<td>[Enforced in `InflexionCore`](/security/cei-reentrancy)</td>
+</tr>
+
+</tbody>
+</table>
+
+## The vectors, in a little more depth
+
+The table is the canonical artifact; the accordions below add the *why* for the rows that most reward it.
+
+<AccordionGroup>
+
+<Accordion title="MM bad debt, settler price choice, and entry-price gaming — the LP-payout cluster">
+These three rows share one root defense: **the LP can supply neither the geometry, the entry price, nor the settlement price.**
+
+- **MM bad debt** is closed structurally — collateral is `MaxIL` and the payout is `min(realized_IL, MaxIL)`, so `payout ≤ collateral` for *any* price path (the [no-bad-debt math](/math/no-bad-debt-math)). The cap is the load-bearing piece; remove it and beyond-`Pb` IL is unbounded.
+- **Settler price choice** was a real hole: a permissionless `settle` once computed payout from a caller-supplied `sqrtP_T`, so a settler could set payout anywhere in `[0, MaxIL]`. The fix derives `P_T` on-chain from the Chainlink round-at-T, restoring **I2** *and* **I4** (an LP who would have profited vs hold gets exactly zero).
+- **Entry-price gaming** is bounded the same way: `P0` is the on-chain round at the LP's chosen block, clamped to within the MM's `priceBandBps`. The residual entry-timing freedom is bounded and blunted because premium scales with MaxIL.
+
+See [price pinning](/security/price-pinning) for the full closed-hole writeup.
+</Accordion>
+
+<Accordion title="Lone-spike, permanent lockup, and sequencer downtime — the oracle/liveness cluster">
+The settlement oracle is the most subtle surface, because it must be **both** correct (no glitched price pins a wrong payout) **and** live (funds never lock permanently). [Fork-1](/security/forks) resolves the tension:
+
+- A glitched **lone spike** — a round differing from *both* neighbours by ≥ 5% — is deferred, but only until the **24h `LIVENESS_WINDOW`** elapses, after which the backstop accepts the round unconditionally.
+- A **missing neighbour round** across a Chainlink `phaseId` boundary is read tolerantly via `_tryRound` (try/catch returning `ok=false`), so it degrades to the backstop rather than reverting forever.
+- **Sequencer downtime** is gated separately by `_requireSequencerHealthy` (uptime + 1h grace, fails-closed on a future `updatedAt`).
+
+<Warning>
+**Documented design observation (not a bug):** the spec-literal staleness `require` fires before the backstop can recover the round, so the *actual* usable round-at-T window is `[expiry + LIVENESS_WINDOW, expiry + MAX_STALENESS)` ≈ 1 hour wide (90,000 − 86,400 = 3,600s on Sepolia), not the full additive sum the I8 wording suggests.
+**Why it's acceptable:** the 1h window is *symmetric* for LP and MM (preserves fairness), and past `expiry + MAX_STALENESS` funds still settle via a *newer* Chainlink round — Arbitrum majors tick frequently — just not via the round-at-T.
+**Mitigation / transparency:** surfaced in the `OracleManager` NatSpec and covered by a boundary test, not papered over. See [the invariants page](/security/invariants) for the full I8 note.
+</Warning>
+</Accordion>
+
+<Accordion title="Stale-quote pickoff, forged quote, replay, and capacity — the quote-integrity cluster">
+Path-B quotes are **bearer instruments** — signed bytes that survive in any hand that copied them, beyond the off-chain engine's cancel. Four mechanisms, all on-chain, bound what a leaked or forged quote can do:
+
+- **Forgery** is impossible — every quote is EIP-712 signed and verified via `SignatureChecker.isValidSignatureNow` (ECDSA + EIP-1271).
+- **Stale-quote pickoff** (the dominant pickoff, [Fork-2](/security/forks)) is killed by the **oracle-anchored band**: `createSwap` auto-voids the quote if the live oracle drifted beyond `priceBandBps`. Deterministic, no MM discretion ⇒ **not last-look** (a [hard protocol rule](/security/trust-model)).
+- **Replay after cancel** is blocked by **Permit2-style bitmap nonces** — an MM flips one bit to void one quote; a cancelled bit can never fill.
+- **Capacity over-consumption** from concurrent fills is blocked by **atomic check-and-increment** of `consumedNotional[quoteId]` before any external call.
+
+Together these are **I7 + I9**. The router subtlety: in `createSwapRouted`, only the *executed* rail mutates nonce/capacity/lock — a quote that loses the route consumes nothing.
+</Accordion>
+
+<Accordion title="Dust grief, under-charge, and overcharge — the economic cluster">
+Three economic-edge attacks, three deterministic clamps:
+
+- **Dust griefing** — sub-economic spam — is floored at `MIN_POSITION_V0 = $100` and `MIN_PREMIUM = $1`.
+- **Under-charge from integer division** rounds the *wrong* way only if you let it; Inflexion uses `ceilDiv` so the premium always rounds **up**.
+- **Overcharge** is impossible by construction — the load is clamped at `maxLoad` (Path A) or `loadBps ≤ maxLoadBps` (Path B), and premium is additionally capped at MaxIL. This is **I10**, lives upstream of settle, and never touches the no-bad-debt proof. See [the load stack](/math/load-stack) and [I10 on the no-bad-debt concept page](/concepts/no-bad-debt).
+</Accordion>
+
+<Accordion title="Pool run, senior loss, NFT hijack, rehypothecation, and reentrant settle — the systemic/custody cluster">
+- **Pool run:** withdrawals are cooldown-gated and **junior cannot be drawn below `totalLocked`**. The same locked/free accounting raises `util_skew` before the pool over-commits.
+- **Senior loss from underwriting:** `totalLocked ≤ juniorAssets` is enforced at every lock; the junior-first waterfall absorbs all underwriting loss before senior is touched. This is *senior protection*, not a capital guarantee — see [tranches](/concepts/tranches).
+- **NFT hijack:** `ILVault.onERC721Received` accepts NFTs only from the canonical NonfungiblePositionManager; `claimFees` is forced to the registered LP.
+- **Rehypothecation breach:** locked collateral never goes to a utilization-gated venue — a yield adapter must be `isInstantlyRedeemable()` (idle-only, sDAI/T-bills). See [collateral models](/protocol/collateral-models).
+- **Reentrant settle:** status flips to `SETTLED` *before* any external call, so a malicious `oracle`/`ilMath` re-entering `settle` reverts on the `Status.ACTIVE` precondition. Full CEI on [the reentrancy page](/security/cei-reentrancy).
+</Accordion>
+
+</AccordionGroup>
+
+## What the matcher cannot do — the structural backstop
+
+Several rows above (forged quote, stale-quote pickoff, capacity) are *also* covered by a more general fact: the off-chain matching engine exists for **Path B only**, and its power is strictly bounded. It can censor, reorder, or drop Path-B quotes; it **cannot** steal funds, forge quotes, force a stale quote past the band, or touch Path A at all (which needs no engine). Settlement is non-custodial and on-chain, against the counterparty's own collateral.
+
+This is the structural reason the table holds even against a *malicious operator*: the mitigations are enforced by the contracts, not by the relayer. Read the full [trust model](/security/trust-model) for the can/cannot grid and the direct-to-contract fallback.
+
+## Two things the ledger does *not* claim
+
+Two caveats, each with its *why* and its mitigation:
+
+<Warning>
+**Vol-only moves are not caught by a *spot* band.** A residual of [Fork-2](/security/forks): if implied vol jumps with little spot drift, the I9 spot band does not void the quote.
+**Why it's a small surface:** on crypto majors, large IV jumps almost always co-move with spot, which *does* trip the band.
+**Mitigation:** the short `validUntil` (default 8s, band [5s, 15s]) bounds the leakage window, and the MM bears within-band drift because it chose the band.
+</Warning>
+
+<Warning>
+**Depositor and MM capital is not guaranteed.** None of the mitigations above protect underwriter principal — they protect the *LP's payout* (Claim A) and the *protocol's integrity*. The pool is a volatility seller; it can lose.
+**Why:** underwriting is a paid risk transfer, not a riskless service. Junior is first-loss; senior is protected from *underwriting* loss while junior buffers, but takes the systemic tail (USDC depeg, oracle failure, contract bug).
+**Mitigation:** transparent tranching, the senior-protection invariant, and full disclosure — see [tranches](/concepts/tranches) and Claim B below.
+</Warning>
+
+<ClaimA />
+
+<ClaimB />
+
+## Where every mitigation lives — on-chain, today
+
+The entire ledger is enforced on the live Arbitrum Sepolia deployment. `InflexionCore` carries the I1–I10 enforcement and CEI settlement; `OracleManager` carries I8 and the sequencer gate; the vaults carry I5 and the senior-protection waterfall.
+
+<AddressTable />
+
+<CardGroup cols={2}>
+<Card title="The ten invariants" icon="list-check" href="/security/invariants">
+Each invariant's precise statement, why it holds, and the Foundry fuzz test that verifies it.
+</Card>
+<Card title="The two resolved forks" icon="code-branch" href="/security/forks">
+Fork-1 (oracle liveness backstop, I8) and Fork-2 (oracle-anchored band, I9) — the two open audit items, now in code.
+</Card>
+<Card title="Trust model" icon="diagram-project" href="/security/trust-model">
+What the off-chain matcher can and cannot do, and why the table holds against a malicious operator.
+</Card>
+<Card title="Audit history" icon="clipboard-check" href="/security/audits">
+The external audit (12 fixes + 2 forks), the quant audit, and the two Slither passes.
+</Card>
+</CardGroup>

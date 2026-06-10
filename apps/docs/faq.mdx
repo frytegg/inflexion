@@ -1,0 +1,312 @@
+---
+title: "Frequently asked questions"
+description: "Nine common questions — insurance, centralization, oracle lies, depositor loss, bad debt, the cap, per-market quotes, the Phi-sum, and what is live vs pending — each answered with precise, qualified framing."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+This page answers nine common questions about the protocol, each with the exact framing that survives a follow-up. The answers do not soften the hard parts — they **frame the caveat, then give the why and the mitigation**. A naked limitation is a defect; every limit below is followed by its reason and its path forward.
+
+Two disclosures recur throughout and are never merged. **Claim A** — LPs are always paid in FULL mode, with no bad debt, *qualified* by the full clause — and **Claim B** — depositor and MM capital is not guaranteed for either tranche. They are both true; neither implies the other.
+
+<ClaimA />
+
+<ClaimB />
+
+<AccordionGroup>
+
+<Accordion title="Isn't this just insurance?" icon="shield-halved">
+
+**No — and the distinction is load-bearing, not cosmetic.** Inflexion is a **collateralized bilateral derivative**: an LP pays a fixed upfront premium and at expiry receives $\min(\text{realized IL},\ \text{MaxIL})$ from an underwriter's **pre-locked USDC collateral**. There is no actuarial mutualization, no shared loss pool that can be exhausted, and no regulatory ambiguity around the word "insurance." The payout is mechanical geometry settled on-chain, not a discretionary claim adjudicated by an insurer.
+
+Three concrete reasons "insurance" is the wrong label:
+
+<Steps>
+  <Step title="It is an in-range CONVEXITY hedge, not loss cover">
+    Entry requires $P_a \le P_0 \le P_b$ — out-of-range positions are **rejected at creation**. The product hedges the *in-range* short-gamma exposure of a specific Uniswap v3 position. An LP is structurally **short an option** (concave $V_{lp}$); Inflexion sells the offsetting long-convexity leg. See [the in-range convexity hedge](/concepts/in-range-convexity-hedge).
+  </Step>
+  <Step title="The payoff is CAPPED — by construction, on purpose">
+    Coverage is $\min(\text{realized IL},\ \text{MaxIL})$, never unbounded "IL insurance." Above $P_b$ the LP is fully rotated into one asset (constant value) while a hold position grows linearly, so beyond-range IL is **unbounded** and could never be fully collateralized. The cap is what makes the product trustless — see [Why a cap?](#why-a-cap) below.
+  </Step>
+  <Step title="It is NOT Bancor">
+    The cvAMM pays in **pre-locked USDC and mints nothing** — no token-inflation reinsurance, no death spiral. Bancor v2.1's IL protection minted new tokens to cover losses; Inflexion locks exactly `MaxIL` before the swap exists.
+  </Step>
+</Steps>
+
+It is also not [GammaSwap](/what-this-is-not) (perpetual vol trading needing active management) and not [Panoptic](/what-this-is-not) (an options market for quants). Inflexion's LP pays **one number** and the protocol computes everything else.
+
+<Warning>
+The reputational and demand risk of mislabeling is real, which is *why* we never use "insurance." Sophisticated LPs discount a truncated tail, so calling a capped product "IL insurance" both over-promises and invites regulatory ambiguity. Every LP surface shows the payoff diagram and the "in-range convexity hedge" label so the cap never surprises an LP.
+</Warning>
+
+</Accordion>
+
+<Accordion title="Isn't the matcher centralized?" icon="network-wired">
+
+**Path A has no matcher at all, and the Path-B matcher is strictly bounded — it can degrade liveness, never solvency.**
+
+The off-chain matching engine exists for **Path B only**. [Path A — the cvAMM pool](/protocol/path-a-cvamm) — is pure on-chain pricing: no relayer, no keeper, no validity clock. An LP transacts directly against the pool, so the engine cannot censor Path A *at all*.
+
+For Path B, the engine's power is bounded by what is enforced on-chain:
+
+| The engine CAN | The engine CANNOT |
+| --- | --- |
+| Censor / reorder Path-B quotes (liveness / fairness) | **Steal funds** — settlement is against the counterparty's own collateral |
+| Pick which signed quotes to surface | **Forge quotes** — every Path-B quote is EIP-712 / EIP-1271 signed |
+| Drop quotes from its book | **Force a stale quote** — `validUntil` + on-chain nonce + the oracle band ([I9](/security/invariants)) |
+| | **Bypass the band check** — [I9](/security/forks) is enforced on-chain |
+| | **Censor Path A** — Path A needs no engine |
+
+The mitigations against the powers it *does* have:
+
+<Steps>
+  <Step title="Direct-to-contract fallback">
+    Because EIP-712 verification is on-chain, any LP holding a valid signed quote can call `createSwap` **directly**, bypassing the engine entirely. A censoring operator simply loses that flow. The SDK exposes this path.
+  </Step>
+  <Step title="Append-only quote log">
+    The engine publishes its full quote stream + match decisions to a rotating append-only log, making ordering auditable.
+  </Step>
+  <Step title="Deterministic FIFO / price-time matching">
+    Match rules are deterministic, removing operator discretion at the matching layer.
+  </Step>
+</Steps>
+
+<Note>
+**The decentralization roadmap.** An Arbitrum **Orbit chain** could host the Path-B quote book fully on-chain (the Hyperliquid pattern), removing the off-chain component entirely — the clean answer to "isn't the matcher centralized?" And the cvAMM is **already fully on-chain today**. The FULL no-bad-debt guarantee is independent of matching: it is enforced at on-chain settlement regardless of how the quote was discovered.
+</Note>
+
+</Accordion>
+
+<Accordion title="What if the oracle lies?" icon="circle-question">
+
+**A vol-oracle fault can cost depositors money but can never create LP bad debt in FULL — these are two separate guarantees, and the split is the whole answer.** This is the single most important correctness distinction in the protocol.
+
+There are two oracles, with two very different roles:
+
+<Tabs>
+  <Tab title="σ_ref / FairValueOracle (the PRICING oracle)">
+    $\sigma_{\text{ref}}$ (the `VolOracle`) and the `FairValueOracle` are **load-bearing for the [I10](/security/invariants) price cap and depositor solvency only**. A wrong, too-low $\sigma_{\text{ref}}$ makes the pool **under-charge load** → premium income stops covering payouts → **NAV compresses** → junior absorbs it first, senior in the tail. This costs *depositors*, by design — they are the volatility sellers. It does **not** touch the LP guarantee.
+
+    Even so, $\sigma_{\text{ref}}$ is conservative by construction:
+    $$\sigma_{\text{ref}} = \max(\sigma_{\text{short}},\ \sigma_{\text{long}},\ \text{floor})$$
+    The $\max(\cdot)$ is **mandatory, not optional engineering**: realized vol *understates* risk right before a regime change, so a single fast EWMA would collapse to a deceptively calm number exactly before a crash. The floor sits *above* calm ETH vol on purpose (`floor = 0.50 > \approx 0.45`), so the pool overcharges calm months. See [σ-ref](/math/sigma-ref).
+  </Tab>
+  <Tab title="Chainlink price (the SETTLEMENT oracle)">
+    Settlement pins the price to the Chainlink **round active at expiry $T$** ($\text{updatedAt} \le \text{expiry} < \text{nextUpdatedAt}$), so no party can pick a favorable instant by timing `settle`. The settlement sqrt price is derived **on-chain**, never caller-supplied — closing the hole where a permissionless settler could otherwise set the payout anywhere in $[0, \text{MaxIL}]$.
+
+    A glitched print (a "lone spike" differing from **both** neighbors by $\ge 5\%$) is deferred; a real fast move is sustained, so the next round confirms it and the check passes ([Fork 1](/security/forks)).
+  </Tab>
+</Tabs>
+
+The crucial fact: **the FULL no-bad-debt invariant (I1) is structural and oracle-independent.** In FULL, $\text{collateral} = \text{MaxIL} \ge \text{payout}$ by construction, *regardless of what $\sigma$ was* — so a wrong $\sigma_{\text{ref}}$ **cannot** violate I1.
+
+<Warning>
+**Limit → Why → Mitigation.** *Limit:* the settlement oracle could be unhealthy at expiry. *Why it matters:* if no usable round ever exists, funds cannot settle. *Mitigation:* [Fork 1 / I8](/security/forks) bounds this — a `LIVENESS_WINDOW = 86,400s` (24h) backstop unconditionally accepts the round-at-$T$ after the window, so funds can never lock indefinitely. `settle()` always succeeds within `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`. The window is symmetric for LP and MM, preserving fairness.
+</Warning>
+
+</Accordion>
+
+<Accordion title="Can depositors lose money?" icon="triangle-exclamation">
+
+**Yes. Capital is NOT guaranteed for either tranche — and we lead with this, never bury it.** A cvAMM depositor is a **volatility seller**: they collect premium priced under the risk-neutral measure at the conservative $\sigma_{\text{ref}}$, and pay realized $\min(\text{IL}, \text{MaxIL})$ under the *real* measure. You earn the vol-risk premium in calm markets and absorb losses in crashes.
+
+<ClaimB />
+
+The dual-tranche structure lets each depositor pick a risk dose:
+
+<CardGroup cols={2}>
+  <Card title="Senior — convexity savings account" icon="piggy-bank">
+    Base yield + a small premium slice; **structurally protected from underwriting loss** by the junior-first waterfall, low variance. Protected from *underwriting* loss **only** — never from the systemic tail (USDC depeg, oracle/settlement fault, contract bug).
+  </Card>
+  <Card title="Junior — pure vol-selling tranche" icon="fire">
+    Most of the load, high APY, **first-loss**. Absorbs all underwriting loss before senior is ever touched.
+  </Card>
+</CardGroup>
+
+The senior protection is a **structural invariant** — `totalLocked ≤ juniorAssets`, enforced at *every* `lockCollateral`. Since every payout $\le$ its MaxIL $=$ its locked amount:
+$$\Sigma\ \text{payouts} \le \text{totalLocked} \le \text{juniorAssets}$$
+so junior absorbs **all** underwriting loss before senior. With target $sf = 0.60$, this is exactly $u \le 0.40 = 1 - sf$.
+
+The honest numbers (heavy run, bare unhedged single-pair ETH pool, gross of demand/competition/fees, leading with the geometric 3y CAGR):
+
+| Operating point | 3y CAGR (med / p10 / p90) | P(losing month) | 1-in-100 month | worst month | P(3y DD&gt;50%) | senior P(loss) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Disciplined `u=0.40` | 122% / 50% / 247% | 26.5% | −20.1% | −26.8% | 2.7% | 0 (while $u \le 1-sf$) |
+| Fully-deployed `u=0.60` | 209% / 72% / 491% | 26.5% | −30.1% | −40.1% | 18.0% | 0 (while $u \le 1-sf$) |
+
+Junior worst month: **−67%**.
+
+<Warning>
+**The honest headline — frame, don't hide.** *Limit:* a single-pair unhedged pool **cannot meet the spec safety targets at any marketable load** — `1-in-100 ≤ 10%` and `P(losing month) ≤ 15%` are intrinsic to single-asset volatility selling. *Why:* you lose whenever realized vol exceeds implied, and a crash pays the whole synchronized book. *Mitigation:* the targets were **not loosened** — the structural levers are the honest answer. The utilization cap is the drawdown lever ($u=0.40 \to$ P(DD&gt;50%) 2.7% vs $u=0.60 \to$ 18%); the senior/junior tranche gives senior P(loss)=0 (calibrated, while $u \le 1-sf$); the pool hedge (roadmap) tightens the tail to 1-in-100 $\approx -9.6\%$. None makes a vol seller *safe* — that is impossible — but together they make it **honest and viable for two audiences**. See [tranches](/concepts/tranches) and [the depositor disclosure](/risk-disclosure).
+</Warning>
+
+The verbatim disclosure tone is mandatory: *"You earn the volatility risk premium in calm markets and absorb losses in crashes. In FULL the pool cannot become insolvent and cannot be run, but YOUR CAPITAL IS NOT GUARANTEED."* Never call it "stable" or "modest APY."
+
+</Accordion>
+
+<Accordion title="Is bad debt really impossible?" icon="lock">
+
+**In FULL mode, yes — but only under its full qualifying clause, and we never state it unqualified.**
+
+<ClaimA />
+
+The structural core is three lines:
+$$\text{collateral}_{\text{FULL}} = \text{MaxIL} \quad\text{(locked at creation)}$$
+$$\text{covered\_payoff} = \min(\text{realized\_IL},\ \text{MaxIL}) \le \text{MaxIL} \quad\text{(by construction of the cap)}$$
+$$\therefore\ \text{payout} \le \text{collateral} = \text{MaxIL} \quad\text{(no bad debt — invariants I1, I2)}$$
+
+This is **orthogonal to the premium** and **oracle-independent**: it holds for any price path and any (even wrong) $\sigma$. It is enforced in code at settlement — `payout = realisedIL > maxIL ? maxIL : realisedIL` — and both vaults defensively re-check `payout ≤ lockedAmount`.
+
+It is **verified**, not asserted: the heavy run found $\text{payout\_frac} = \min(\text{IL},\text{MaxIL})/\text{MaxIL} \le 1.0$ on **every** simulated path across a $\pm 99\%$ (and a widened $-6\ldots+6$ log-move) grid — `max_payout_frac = 1.000000`, zero exceptions. The Foundry suite fuzzes I1/I2 over the whole price domain (256 runs).
+
+<Warning>
+**Each clause is load-bearing — say it as one sentence.** *No bad debt is exact only under:* **(a) capped payoff** (remove the cap and beyond-range IL is unbounded); **(b) solvent USDC** (a depeg is a disclosed shared risk, not a protocol bug); **(c) oracle/settlement liveness** ([Fork 1](/security/forks) bounds it so funds are never *permanently* locked); **(d) no rehypothecation breach** (locked collateral must stay instantly liquid — never routed to a utilization-gated venue like Aave/Compound, a hard rule). Stated without these qualifiers, the guarantee is **not** correct.
+</Warning>
+
+PARTIAL mode (collateral &lt; MaxIL) **does** carry real bad-debt risk and is roadmap-only, gated on the quant. In the shipped code, `CollateralModel` has `{FULL, PARTIAL}` but PARTIAL reverts `UnsupportedModel`. See [the math of no bad debt](/math/no-bad-debt-math) and [collateral models](/protocol/collateral-models).
+
+</Accordion>
+
+<Accordion title="Why a cap?" icon="scissors">
+
+**Because the cap is the no-bad-debt guarantee, not a defect — it is what makes the product fully collateralizable and trustless.**
+
+`MaxIL` is the **maximum in-range IL** of a specific position. $\text{IL}(P) = V_{hold}(P) - V_{lp}(P)$ is **convex on $[P_a, P_b]$**, so its maximum *while price stays in range* is at a boundary:
+$$\text{MaxIL} = \max(\text{IL}(P_a),\ \text{IL}(P_b))$$
+*Proof sketch:* $V_{hold}$ is affine in $P$; in range $V_{lp}(P) = L(2\sqrt{P} - \sqrt{P_a} - P/\sqrt{P_b})$, so $d^2 V_{lp}/dP^2 = -\tfrac14 L P^{-3/2} < 0$ ⇒ $V_{lp}$ strictly concave ⇒ $\text{IL} = \text{affine} - \text{concave}$ is convex, and a convex function on a compact interval attains its max at an endpoint. This holds for **any** entry, centered or not.
+
+The cap is correct as a *product*, not just as collateral math:
+
+<Steps>
+  <Step title="Beyond-range loss is DIRECTIONAL, not impermanent">
+    At the range boundary the LP has fully rotated into one asset. IL *beyond* that point is *directional* loss — foregone spot upside — not the *impermanent* loss the LP set out to hedge. Capping at MaxIL hedges exactly the risk the product names.
+  </Step>
+  <Step title="Unbounded payoff cannot be trustless">
+    Above $P_b$, $V_{lp}$ is constant while $V_{hold}$ grows linearly, so absolute IL is **unbounded**. No fixed collateral can back an unbounded payoff — so an uncapped product could not be fully collateralized, and therefore could not be trustless.
+  </Step>
+  <Step title="The cap is the unit of risk">
+    Because MaxIL is pure geometry, frozen at creation, and identical across durations, it doubles as the **collateral unit** that makes positions fungible (see [Why per-market quotes?](#why-per-market-quotes) below).
+  </Step>
+</Steps>
+
+<Note>
+LPs who want beyond-range protection simply **re-cover after re-ranging** — the natural workflow, since a re-ranged position is a new geometry with a new MaxIL. See [MaxIL](/concepts/maxil) and the [MaxIL derivation](/math/maxil-derivation).
+</Note>
+
+</Accordion>
+
+<Accordion title="Why per-market quotes (not per-position)?" icon="layer-group">
+
+**Because MaxIL is the unit of risk that makes positions fungible — so an MM quotes once for an entire market, and any position in it fills.** There is **no `tokenId` in a `SignedQuote`**.
+
+The chain of reasoning:
+
+<Steps>
+  <Step title="MaxIL is L-independent in the fair-rate sense">
+    $\text{fairRate}$ depends only on $a = P_a/P_0$, $b = P_b/P_0$, $\sigma$, $T$ — *not* on $L$. MaxIL is pure geometry, frozen at creation, identical across the three durations. Premium is quoted as a **% of MaxIL**, so an underwriter's ROC is **range-agnostic**.
+  </Step>
+  <Step title="Range-agnostic ROC dissolves adverse selection">
+    If premium were $X\%$ of $V_0$, a narrow range (tiny MaxIL) would give the underwriter enormous ROC and a wide range insufficient ROC → underwriters adversely select against wide ranges → liquidity fragments. With premium as $X\%$ of MaxIL, the underwriter earns $X\%$ ROC **regardless of range width** → indifference to width → full depth.
+  </Step>
+  <Step title="So a quote is PER-MARKET: a load + a MaxIL-ratio band + capacity">
+    The MM expresses *"I write positions whose MaxIL is 2%–7% of V0"* once via `minMaxILRatioBps`/`maxMaxILRatioBps`, and the contract enforces it per-fill: $\text{ratioBps} = \text{MaxIL} \cdot 10^4 / V_0 \in [\text{min}, \text{max}]$ else `RatioOutOfBand`. Positions within the band are interchangeable.
+  </Step>
+</Steps>
+
+<Note>
+**The old "ratio band" adverse-selection story is VOID.** v3 position parameters (`token0/1`, `fee`, `tickLower/Upper`, `liquidity`) are **public on-chain** via `positions(tokenId)`. Both the pool and any MM read the exact geometry and price the *specific* position — so there is no information asymmetry for a band to manage. Post-pivot, the MaxIL-ratio band survives only as an **optional convenience filter**, never a pricing input.
+</Note>
+
+A nuance worth stating deliberately: **MaxIL is a collateral/normalization unit, NOT a risk metric.** Two positions with identical MaxIL can carry very different risk (distance from current price, delta). Both rails price $E_Q[\min(\text{IL},\text{MaxIL})]/\text{MaxIL}$ for the *specific geometry*. See [the two rails](/concepts/two-rails) and [MaxIL](/concepts/maxil).
+
+</Accordion>
+
+<Accordion title="Is the Phi-sum really exact?" icon="function">
+
+**Yes — it is an exact closed form, not a fitted surface, not Monte Carlo, not a lookup table, with no calibrated coefficients.** This is the "first to price IL on-chain" claim.
+
+The capped v3 payoff $\min(\text{IL}, \text{MaxIL})$ is **piecewise in the terminal price** — three arms split by the range edges and the two cap-crossing prices: a linear arm below $P_a$, a convex (never-capped) arm inside $[P_a, P_b]$, and a linear arm above $P_b$. Under risk-neutral GBM, $P_T$ is lognormal, so each arm integrated against the density is a **standard lognormal interval moment** in the normal CDF $\Phi$:
+
+$$E\!\left[ P_T^{\,p} \cdot \mathbf{1}\{K_1 < P_T < K_2\} \right] = P_0^{\,p}\, e^{\frac12 p(p-1)\sigma^2 T}\,\bigl(\Phi(d(K_1)) - \Phi(d(K_2))\bigr)$$
+$$d(K) = \frac{\ln(P_0/K) + (p - \tfrac12)\sigma^2 T}{\sigma\sqrt{T}}$$
+
+The arms use only $p \in \{0, \tfrac12, 1\}$. So $\text{FairPremium} = E_Q[\min(\text{IL},\text{MaxIL})]$ is a finite **$\Phi$-sum (≈6–10 terms, Black–Scholes class), evaluated live per quote**. It is **$L$-independent**: it depends only on $a$, $b$, $\sigma_{\text{ref}}$, $T$. The two-layer factorization:
+$$\text{fairRate} = \frac{E_Q[\min(\text{IL},\text{MaxIL})]}{\text{MaxIL}}, \qquad \text{FairPremium} = \text{fairRate} \cdot \text{MaxIL}$$
+where $\text{fairRate}$ carries **all** the vol/time dependence (an S-curve in $\sigma^2 T$) and MaxIL carries none.
+
+Verification — it cannot drift from the settle-path math:
+
+| Check | Result |
+| --- | --- |
+| Closed form vs quadrature / MC | max abs err $\approx 5.1\times10^{-11}$ |
+| Stylus $\Phi$-sum vs mpmath 50-digit reference | $\le 1\times10^{-12}$ on fairRate |
+| Stylus $\equiv$ Solidity IL kernel | exact to the wei |
+
+<Note>
+**The production pricer is the Stylus `FairValueOracle`** (machine-precise; Stylus *bans* WASM floating point at activation, so its erf is integer fixed-point). The Solidity `FairValueOracle` is a revm-testable **CI cross-check, not a second production oracle** — its Abramowitz–Stegun erf is only $\approx 1.5\times10^{-7}$, which is why the Stylus oracle is production. **The $\Phi$-sum is NEVER reimplemented off-chain** — the SDK reads the on-chain `FairPremium` (a hard rule). See [the Phi-sum](/math/fair-value-phi-sum) and [fair value](/concepts/fair-value).
+</Note>
+
+<Warning>
+**The one residual approximation — frame it.** *Limit:* the $\Phi$-sum is exact *given* the model; the only modeling assumption is risk-neutral **GBM with $\mu = 0, r = 0$**. *Why:* a nonzero carry would tilt the true forward off $P_0$. *Mitigation:* it is covered two ways — (1) the conservative $\sigma_{\text{ref}}$, and (2) the residual forward-vol premium is **deliberately left as MM alpha**, which is exactly the incentive that keeps forward-looking-vol MMs in the two-sided market. Sized and found economically negligible at launch scope ($\le \$1.30$ on a \$50k/±10%/30d position — at or below the \$1 dust floor). Do **not** cite the often-repeated "$6.7\times10^{-15}$" figure for end-to-end accuracy — the defensible, code-verified figure is $\le 10^{-12}$ on fairRate.
+</Warning>
+
+</Accordion>
+
+<Accordion title="What is live vs pending?" icon="signal">
+
+**The contracts and the live RPC surfaces are real today; the subgraph (history/aggregates) is pending — and that gap degrades to a typed pending state, never an error or a fake number.**
+
+The protocol is live on **Arbitrum Sepolia (chainId 421614)**, fresh full redeploy **2026-06-05**, deploy block `274081134`. A real create→settle lifecycle ran on **both** rails:
+
+- **Path A (cvAMM):** V0 \$270,531, MaxIL \$1,669.24, premium **\$9.70 (0.58% of MaxIL)**, realized IL \$148.64, paid in full from the `ConvexityVault`.
+- **Path B (routed to MM):** `createSwapRouted` chose the MM because its premium **\$8.93 strictly beat the cvAMM's \$13.80**; the MM's **own** collateral (\$3,215.65 MaxIL) was locked and paid the \$245.66 settlement from `UnderwriterVault`.
+
+This demonstrates [floor/ceiling routing](/protocol/routing) and the trust model end-to-end: the counterparty's own collateral pays, not protocol funds.
+
+<Tabs>
+  <Tab title="LIVE today (RPC + on-chain)">
+    - Premium preview, payoff-with-cap chart, buy/settle (Path A), vault deposit/withdraw.
+    - The **current clearing-load surface** (Signal 1) — live RPC multicall, [the data moat's hero](/app/data).
+    - $\sigma_{\text{ref}}$, market pricing, the on-chain book scan, coarse fills.
+    - The two moat events `SwapPriced` / `QuoteFilled` and `CvammPricing.loadComponents` — **emitted on-chain since the deploy block**.
+    - Off-chain telemetry sinks (`DEMAND_LOG` / `COMPETITION_LOG`) — **capturing now**, because they are unreconstructable retroactively ([I7](/security/invariants)).
+  </Tab>
+  <Tab title="PENDING the subgraph">
+    - Per-market history / volume, NAV history, the time-series moat signals (Signals 2–5).
+    - Precise per-quote MM fill attribution — on-chain `SwapCreated` carries no `quoteId`/`nonce`; the now-live `QuoteFilled` event closes this once indexed.
+    - Per-MM win-rate / share.
+  </Tab>
+</Tabs>
+
+<Warning>
+**Limit → Why → Mitigation, on every pending surface.** *Limit:* the subgraph is built and CI-green offline but **not yet deployed** (`SUBGRAPH_URL` unset), so every history/aggregate surface is unavailable. *Why:* it is a build gap, not a contract gap — the contracts already emit every event the dataset needs; the on-chain moat dataset **begins at the redeploy block `274081134`** (the subgraph `startBlock`). *Mitigation:* every such surface returns a typed `ApiPending` envelope naming the **exact future route + GraphQL query** it will be served from, so wiring the API later is a one-line body swap. History **degrades to a typed pending state, never an error**. See [state and limits](/moat/state-and-limits) and [status caveats](/reference/status-caveats).
+</Warning>
+
+<Maturity />
+
+One testnet caveat worth stating plainly: Arbitrum Sepolia has **no Chainlink L2 Sequencer Uptime Feed** (testnet, no SLA), so `OracleManager` treats `sequencerFeed == address(0)` as skip-check. *Why it is safe here:* it is a testnet with no sequencer SLA to enforce. *Mitigation / path forward:* this **must** be set before any mainnet deploy.
+
+The live addresses:
+
+<AddressTable />
+
+</Accordion>
+
+</AccordionGroup>
+
+## Where to go deeper
+
+<CardGroup cols={2}>
+  <Card title="What's live" icon="signal" href="/status">
+    The honest "it's real" inventory, with on-chain numbers.
+  </Card>
+  <Card title="Depositor disclosure" icon="file-shield" href="/risk-disclosure">
+    Claim B in full, with the full risk panel.
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    I1–I10: precise statement, why each holds, where enforced.
+  </Card>
+</CardGroup>

@@ -22,3 +22,7 @@ packages/subgraph/build
 packages/subgraph/subgraph.yaml
 # Auto-generated NPM address constant (templated from the registry by gen-manifest.mjs).
 packages/subgraph/src/generated-addresses.ts
+# Mintlify docs site — MDX (JSX + LaTeX) is not prettier-compatible; Mintlify owns formatting.
+apps/docs
+# Internal docs knowledge base (source dumps from the docs build).
+docs/_kb

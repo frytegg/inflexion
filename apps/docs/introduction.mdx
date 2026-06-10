@@ -1,0 +1,151 @@
+---
+title: "What is Inflexion"
+description: "The first market to price Uniswap v3 in-range impermanent-loss risk on-chain — a collateralized, capped, bilateral convexity hedge with a pooled cvAMM floor and competing-MM ceiling."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+**Inflexion is the first market for Uniswap v3 impermanent-loss risk — and the first to price that risk on-chain.**
+
+A Uniswap v3 LP brings a specific position (its NFT), picks a duration, and pays a fixed upfront **premium**. At expiry the protocol pays the LP their realized impermanent loss — **capped at MaxIL** — trustlessly, from collateral that an underwriter locked up front. The product is precisely an [**in-range convexity hedge**](/concepts/in-range-convexity-hedge), not "IL insurance": the cap is load-bearing, not cosmetic.
+
+<Note>
+The payoff is $\min(\text{realized\_IL},\ \text{MaxIL})$. Entry requires the position to be in range — $P_a \le P_0 \le P_b$ is [enforced at creation](/concepts/in-range-convexity-hedge) — and the cap is what makes full collateralization (and therefore the [no-bad-debt guarantee](/concepts/no-bad-debt)) possible.
+</Note>
+
+## In one paragraph
+
+> If you've ever provided liquidity on Uniswap and ended up with less than if you'd just held — that's impermanent loss. It costs LPs over a billion dollars a year and there's no trustless way to hedge it. Inflexion is the first market that prices that risk on-chain: a pooled underwriter always quotes you a fair, code-capped price, market makers compete to beat it, and if your position suffers impermanent loss within its range you're paid back — from pre-locked collateral, with no middleman who can run off with the money.
+
+## What it is, in one line
+
+> Inflexion is the first market for Uniswap LP convexity priced on-chain — **MaxIL is the capital unit.** A pooled cvAMM always quotes a code-capped fair price with dual-tranche structure (junior vol-seller, senior savings account), and competing market makers undercut it. The resulting flow is a structural DeFi volatility-risk-premium surface for Uniswap LPs — the first on-chain dataset of this market's microstructure.
+
+## Why this market didn't exist before
+
+Uniswap v3 LPs carry a **structural short-gamma exposure** — their position value is a concave function of price, so they lose on both up and down moves relative to holding. Impermanent loss is the realization of that exposure, estimated at **&gt;\$1B/year of realized losses across DeFi**, with no trustless, non-inflationary way to hedge it.
+
+Three things blocked a clean on-chain hedge until now:
+
+<CardGroup cols={3}>
+  <Card title="No trustless instrument" icon="ban">
+    Prior "IL protection" (Bancor v2.1) relied on **token inflation** to cover losses — a death-spiral mechanism, not a collateralized hedge. Inflexion mints nothing and pays from pre-locked USDC.
+  </Card>
+  <Card title="Beyond-range IL is unbounded" icon="arrows-left-right-to-line">
+    Past the range edge, IL grows without bound, so a product covering it could never be fully collateralized — and therefore never trustless. **In-range** IL is convex and bounded.
+  </Card>
+  <Card title="Two-sided cold start" icon="snowflake">
+    A purely LP-vs-MM market has no liquidity until market makers arrive — a classic chicken-and-egg. The pooled cvAMM solves it by always quoting.
+  </Card>
+</CardGroup>
+
+## How it works, in five parts
+
+<Steps>
+  <Step title="Capped in-range IL transfer">
+    Coverage pays $\min(\text{realized\_IL},\ \text{MaxIL})$. [**MaxIL**](/concepts/maxil) is the maximum in-range IL of the *specific* position — pure geometry computable at creation from $(P_a, P_b, L, P_0)$, **frozen at creation**, and **identical across all three durations.**
+  </Step>
+  <Step title="On-chain fair pricing">
+    The protocol computes and publishes $\text{FairPremium} = \text{fairRate} \cdot \text{MaxIL}$ on-chain via the [`FairValueOracle`](/concepts/fair-value) — an exact closed-form [$\Phi$-sum](/math/fair-value-phi-sum), never a fitted surface.
+  </Step>
+  <Step title="Two rails, one settlement core">
+    [Path A](/protocol/path-a-cvamm) is the always-on pooled cvAMM (signature-free, on-chain). [Path B](/protocol/path-b-mm) is competing market makers (EIP-712 signed quotes). [`createSwapRouted`](/protocol/routing) gives the LP the **cheaper of `{pool, best MM quote}`.**
+  </Step>
+  <Step title="Full collateralization (FULL mode, the default)">
+    The underwriter locks exactly $\text{MaxIL}$. Since $\text{covered\_payoff} \le \text{MaxIL} = \text{collateral}$ by construction, FULL mode **cannot produce bad debt under any price path** — invariant [I1](/security/invariants), provable by Foundry invariant tests.
+  </Step>
+  <Step title="Non-custodial on-chain settlement">
+    At expiry, `settle()` reads the Chainlink round pinned at $T$, computes realized IL using the $L$ stored at creation, pays the LP $\min(\text{realized\_IL},\ \text{MaxIL})$ from the underwriter's locked collateral, returns the residual, and returns the NFT.
+  </Step>
+</Steps>
+
+## The three pillars
+
+The protocol stands on [three pillars](/concepts/three-pillars) — read these before anything else.
+
+<CardGroup cols={3}>
+  <Card title="On-chain published FairValue" icon="square-root-variable" href="/concepts/fair-value">
+    An exact closed-form $\Phi$-sum, evaluated live per quote by the production **Stylus** `FairValueOracle` — **never reimplemented off-chain.** $\text{fairRate}$ carries all the vol/time dependence; MaxIL carries none.
+  </Card>
+  <Card title="The cvAMM — floor of liquidity" icon="layer-group" href="/protocol/path-a-cvamm">
+    An always-on, signature-free pooled underwriter quoting off `FairPremium`, **capped in code at** $\text{FairPremium}\cdot(1+\text{maxLoad})$ by invariant I10. It removes cold-start: there is always a price.
+  </Card>
+  <Card title="MM competition — ceiling of price" icon="gavel" href="/protocol/path-b-mm">
+    Sophisticated MMs stream firm EIP-712 signed quotes (no last-look) and win only by beating the capped pool. Hedged MMs **export** short-gamma risk out of the system.
+  </Card>
+</CardGroup>
+
+<Tip>
+**Floor + ceiling in one line:** the cvAMM is the floor of liquidity (always quotes a code-capped price); the MMs are the ceiling of price (win only by beating it). `createSwapRouted` routes to the cheaper rail and never reverts on a bad MM quote — it falls back to the pool, and only the executed rail mutates nonce, capacity, and lock.
+</Tip>
+
+## MaxIL — the cap and the unit of risk
+
+MaxIL is two things at once, and both are load-bearing:
+
+- **The cap.** $\text{IL}(P)$ is convex on $[P_a, P_b]$, so its in-range maximum is at a boundary: $\text{MaxIL} = \max\!\big(\text{IL}(P_a),\, \text{IL}(P_b)\big)$. Because $\text{collateral} = \text{MaxIL} \ge \text{payout}$, no bad debt in FULL is a *construction*, not a hope.
+- **The unit.** MaxIL is pure geometry, frozen at creation, L-independent in the fair-rate sense — which makes positions **fungible to an underwriter within a market.** An MM quote is therefore [**per-market**](/protocol/markets) (a load + a MaxIL-ratio band + capacity), **never per-NFT** — the signed quote carries no `tokenId`.
+
+See [MaxIL — the cap and the unit of risk](/concepts/maxil) for the full doctrine, and [the worked example](/math/worked-example) for one position priced across three durations on a single, constant MaxIL.
+
+## Who it's for — the four doors
+
+<CardGroup cols={2}>
+  <Card title="Protect my LP position" icon="shield-halved" href="/app/protect">
+    Uniswap v3 LPs who want to hedge in-range IL — pay one number, get certainty. The prize customer is **DAO / treasury protocol-owned liquidity** that needs predictable, reportable P&L.
+  </Card>
+  <Card title="Earn in the cvAMM" icon="piggy-bank" href="/app/earn">
+    Capital providers who want to earn the volatility-risk premium across [two tranches](/concepts/tranches): senior (a convexity savings account) or junior (a pure vol-selling, first-loss tranche).
+  </Card>
+  <Card title="Underwrite & compete" icon="gavel" href="/app/underwrite">
+    Sophisticated market makers who run their own vol models, stream firm signed quotes below the pool, and hedge short gamma off-system (Deribit / Panoptic / perps). Optional and additive.
+  </Card>
+  <Card title="Integrate & build on the data" icon="code" href="/integrate/architecture">
+    Quants, vol-arb desks, and risk teams reading [the data moat](/concepts/data-moat) — the first on-chain view into the microstructure of the DeFi LP volatility-risk premium, exposed as free public [SDK](/sdk/overview), [subgraph](/integrate/subgraph), and [REST API](/integrate/api-overview).
+  </Card>
+</CardGroup>
+
+## It's live
+
+Inflexion is deployed on **Arbitrum Sepolia** (chainId 421614), with a full create→settle lifecycle run on both rails on the 2026-06-05 stack — Path A paid an LP from the `ConvexityVault`, and Path B routed to a market maker whose **own collateral** was locked and paid out. Live addresses:
+
+<AddressTable />
+
+See [the deployments reference](/reference/deployments) for the full registry and [the live status](/status) for the status of every component.
+
+<Maturity />
+
+## The honest line
+
+Two claims, always separate, never merged:
+
+1. **LPs are always paid** — no bad debt in FULL, code-enforced by invariant [I1](/security/invariants).
+2. **Depositors and MMs can lose principal** — the pool is a volatility seller, and capital is **not** guaranteed for either tranche (junior is first-loss; senior is protected from *underwriting* loss only, never from the systemic tail).
+
+<ClaimA />
+
+It is **not** Bancor (no token inflation), **not** GammaSwap (no active management), **not** Panoptic (the LP pays one number), and **not** "insurance" (it is a collateralized derivative). See [what this is not](/what-this-is-not) for the full set of differentiators.
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Cover a position, deposit, or pull data in a few lines.
+  </Card>
+  <Card title="Why Inflexion" icon="lightbulb" href="/why-inflexion">
+    The problem, the surplus, and the differentiators.
+  </Card>
+  <Card title="Why now" icon="clock" href="/why-now">
+    The 2025 theory (LVR, Lipton–Lucic–Sepp) and the Arbitrum + Stylus stack.
+  </Card>
+  <Card title="The math" icon="square-root-variable" href="/math/overview">
+    The IL formula, the MaxIL derivation, and the $\Phi$-sum.
+  </Card>
+  <Card title="The protocol" icon="diagram-project" href="/protocol/overview">
+    Pricing stack, lifecycle, vaults, oracles, routing.
+  </Card>
+  <Card title="The data moat" icon="database" href="/concepts/data-moat">
+    Five behavioral signals into the DeFi LP vol-risk premium.
+  </Card>
+</CardGroup>

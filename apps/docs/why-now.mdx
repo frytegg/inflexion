@@ -1,0 +1,296 @@
+---
+title: "Why now"
+description: "The timing argument: two academic results made in-range IL priceable and hedgeable, and Arbitrum + Chainlink + Stylus made the exact on-chain pricer buildable. The anchors are theory that validates the approach — the Phi-sum is the pricer."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion could not have been built — as a *priced, fully collateralized,
+non-custodial* market — three years ago. Two things had to become true at once: the
+**theory** of in-range impermanent loss had to mature from actuarial guesswork into
+something with a model-light fair value and a concrete hedge, and the **infrastructure**
+had to be able to evaluate the resulting closed form on-chain, live, per quote, at a
+precision that does not leak.
+
+Both happened. This page is the timing argument.
+
+<Note>
+**The single distinction this whole page turns on:** the two academic results below are
+**theory anchors** for *why* in-range IL is priceable and hedgeable. They are **not** the
+pricer. The pricer is an exact closed-form [Φ-sum](/math/fair-value-phi-sum) computed
+on-chain by the Stylus `FairValueOracle`. Do not conflate the validation with the
+machinery.
+</Note>
+
+## The two theory anchors
+
+The case for a *priced, collateralized* IL market only became rigorous recently. Two
+results — one on the **cost** of the LP's exposure, one on the **hedge** for it — turn
+"LPs lose a lot to IL" into "this specific risk has a model-light fair value and a
+concrete replication." They are the reason the approach is sound; they are not how the
+protocol computes a number.
+
+<CardGroup cols={2}>
+  <Card title="Lipton, Lucic & Sepp (2025)" icon="layer-group">
+    An IL-protection claim is **statically replicable by a strip of vanilla options** —
+    so it has a *model-light fair value* and a *concrete hedge*. This is the anchor for
+    **why the claim is priceable and hedgeable.**
+  </Card>
+  <Card title="Milionis, Moallemi & Roughgarden (2022)" icon="function">
+    *Automated Market Making and Loss-Versus-Rebalancing (LVR).* The AMM's
+    adverse-selection cost has a **closed form proportional to instantaneous variance** —
+    the *theta* of the replicating short option. The anchor for the **cost of short-gamma
+    exposure.**
+  </Card>
+</CardGroup>
+
+### Anchor 1 — the hedge exists: static replication (Lipton–Lucic–Sepp, 2025)
+
+The structural problem with IL has always been that it *felt* like an exotic, path-heavy
+payoff that you could only reserve against actuarially — guess a distribution, charge a
+fat uncertainty premium, hope. Lipton, Lucic & Sepp showed that an IL-protection claim is
+**statically replicable by a strip of vanilla options**. Static replication means the hedge is a *fixed* portfolio
+set at inception — you do not rebalance into the storm.
+
+Two consequences fall straight out, and both are load-bearing for Inflexion:
+
+- **It has a model-light fair value.** If the payoff is a combination of vanillas, its
+  fair value is the same combination of vanilla prices. That is what makes a *closed-form*
+  premium even conceivable.
+- **It has a concrete hedge.** A market maker who underwrites the claim is not stuck
+  holding naked short gamma; they can **export the risk** to the global options market.
+  This is precisely what [Path B](/protocol/path-b-mm) market makers do — and why a hedged
+  MM makes the *whole system's* risk smaller rather than just relocating it.
+
+### Anchor 2 — the cost is closed-form: LVR (Milionis–Moallemi–Roughgarden, 2022)
+
+The complementary result quantifies what the LP is *paying for* being in the pool.
+Milionis, Moallemi & Roughgarden showed that the AMM's adverse-selection cost —
+**loss-versus-rebalancing (LVR)** — has a **closed form proportional to instantaneous
+variance**, equivalently the **theta (time-decay) of the replicating short-option
+position**.
+
+This is the precise framing of the problem Inflexion solves. A Uniswap v3 LP holds a
+position whose value `V_lp(P)` is **strictly concave in price** in range — the LP is
+structurally **short gamma**, and IL is the *realization* of that short-gamma / LVR cost.
+The concavity is not hand-waving; it is the
+second derivative of the in-range value function:
+
+$$
+V_{lp}(P) = L\left(2\sqrt{P} - \sqrt{P_a} - \tfrac{P}{\sqrt{P_b}}\right),
+\qquad
+\frac{d^2 V_{lp}}{dP^2} = -\tfrac{1}{4}\,L\,P^{-3/2} < 0 .
+$$
+
+A concave value function is a short-option payoff. The LP pays LVR (theta) for it. **What
+Inflexion sells is the long-convexity leg that offsets it** — capped at the in-range
+maximum, [MaxIL](/concepts/maxil) — priced as the exact risk-neutral expectation of that
+capped payoff. The two anchors meet here: LVR says *short gamma has a closed-form cost*;
+static replication says *the offsetting claim has a model-light fair value and a hedge*.
+Inflexion is the market that connects them.
+
+<Tip>
+Read these two anchors as one sentence: a v3 LP is short gamma with a **closed-form cost**
+(LVR), and the **hedge for it is a strip of vanillas** (static replication). That is the
+entire theoretical license to build a priced, collateralized IL market. The
+[theory-anchors page](/math/theory-anchors) carries the full derivation chain.
+</Tip>
+
+## Why the anchors are NOT the pricer
+
+This is a seam worth stating plainly.
+
+The anchors say the claim *can* be priced and hedged. They do **not** give Inflexion the
+number it puts on-chain. Inflexion does not reimplement a strip-of-vanillas hedge to back
+into a price, and it does not run Monte Carlo or look up a calibrated surface. It computes
+the **exact** risk-neutral expectation of the *actual* capped v3 payoff in closed form.
+
+The capped payoff `min(IL, MaxIL)` is **piecewise in the terminal price** — a constant
+arm, a linear-in-`P` arm, and a `√P` arm, split by the range edges and the two
+cap-crossing prices. Each arm integrated against the lognormal density of `P_T` is a
+standard interval moment in the normal CDF `Φ`. So the fair premium is a finite **Φ-sum**
+(≈6–10 terms, Black–Scholes class):
+
+$$
+\text{FairPremium} = \mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\,\text{MaxIL})\right]
+= \text{fairRate} \cdot \text{MaxIL},
+\qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}[\min(IL,\text{MaxIL})]}{\text{MaxIL}} .
+$$
+
+No fitted coefficients, no lookup table, no Monte Carlo — **evaluated live per quote**,
+with `σ_ref` as the only stochastic input. The full arm-by-arm construction is on
+[the Φ-sum page](/math/fair-value-phi-sum).
+
+<Warning>
+**Limit → Why → Mitigation: the only residual approximation.** The Φ-sum is exact *given*
+the model. **Limit:** the one modeling assumption is risk-neutral GBM with `μ = 0, r = 0`.
+**Why:** no on-chain formula can remove the GBM
+assumption — that would require a forward-vol view the chain cannot see. **Mitigation:**
+it is covered two ways — a deliberately conservative [`σ_ref`](/math/sigma-ref) (a
+`max(σ_short, σ_long, floor)` with the floor set *above* calm ETH vol), and the residual
+forward-vol premium is left as **MM alpha**, the very incentive that keeps
+forward-looking-vol market makers in the two-sided market.
+</Warning>
+
+So the lineage is: **anchors validate → Φ-sum prices.** The anchors establish that the
+approach is theoretically clean. The Φ-sum is what actually clears a trade.
+
+## The infrastructure enablers
+
+Theory is necessary but not sufficient. A model-light fair value is worthless if you
+cannot evaluate it **on-chain, live, and precisely enough that the price does not leak.**
+The second half of "why now" is that the chain finally can.
+
+<CardGroup cols={3}>
+  <Card title="Arbitrum One" icon="layer-group">
+    The deepest Uniswap v3 liquidity, where the LPs who need this product actually are.
+  </Card>
+  <Card title="Chainlink" icon="signal-stream">
+    Fully deployed price feeds — the settlement price source and the input to the realized-vol oracle.
+  </Card>
+  <Card title="Stylus" icon="microchip">
+    Rust/WASM smart contracts that evaluate the compute-heavy Φ-sum at a precision Solidity cannot match cheaply.
+  </Card>
+</CardGroup>
+
+### Arbitrum One — the liquidity is here
+
+Arbitrum One has the **deepest Uniswap v3 liquidity** of any rollup. The
+product hedges a *specific* v3 position's in-range IL, so it has to live where the
+positions are. Building on the chain with the largest population of in-range v3 LPs is the
+difference between a demo and a market.
+
+### Chainlink — the settlement and volatility input
+
+[Settlement](/protocol/lifecycle) reads the Chainlink round pinned at expiry `T` and pays
+`min(realized_IL, MaxIL)` from pre-locked collateral; the realized-volatility oracle
+([`σ_ref`](/math/sigma-ref)) is built from EWMAs of Chainlink log-returns at two horizons.
+Both depend on Chainlink being **fully deployed and live** on Arbitrum. The
+[oracles page](/protocol/oracles) covers the staleness, sequencer-uptime, and lone-spike
+defenses.
+
+<Warning>
+**Limit → Why → Mitigation: the testnet has no Sequencer Uptime Feed.** **Limit:** Arbitrum
+*Sepolia* — where Inflexion is live today — has **no Chainlink L2 Sequencer Uptime Feed**.
+**Why:** it is a testnet with no SLA; the feed simply is not deployed there. **Mitigation:**
+`OracleManager` skips the sequencer check on testnet *by design*, and this check is gated to
+be re-enabled before any mainnet deploy. It
+is a known, parameterized switch, not an oversight. See [oracles](/protocol/oracles).
+</Warning>
+
+### Stylus — the exact Φ-sum, on-chain
+
+This is the enabler that turns the theory into a *trustless* product rather than an
+off-chain quote you have to believe. The Φ-sum is compute-heavy — it leans on the error
+function — and Solidity's Abramowitz–Stegun `erf` is only accurate to ~`1.5e-7`, which when
+divided through by MaxIL amplifies to ~`1e-3` at the tight tier. That is enough error to be
+*picked off* on a price you publish.
+
+Arbitrum **Stylus** lets the protocol write the oracle in Rust/WASM with integer
+fixed-point arithmetic — and because Stylus **bans WASM floating point at activation**,
+the result is deterministic and machine-precise. The Stylus
+`FairValueOracle` matches a 50-digit `mpmath` reference to **≤ `1e-12` on fairRate** (in
+practice a few wei at 1e18 scale). That precision is *why the
+on-chain published price can be trusted as the fair value* rather than a loose estimate.
+
+<Info>
+**A precise nuance worth owning:** Stylus is production **for the compute-heavy
+`FairValueOracle`** — not everywhere. The tiny `ILMath` kernel was *benchmarked* in Stylus
+and measured ~5.3× *more* expensive cached, because there is too little compute to amortize
+Stylus's per-call overhead. So **Solidity `ILMath` is production; the Stylus `ILMath` port
+is a rejected benchmark.** "Stylus is faster" is not a blanket claim — it is true exactly
+where the compute is heavy.
+</Info>
+
+### A maturing options surface — the risk has somewhere to go
+
+The final enabler is external to the chain. Static replication only matters if the
+replicating vanillas *trade*. The off-chain options market (Deribit, which holds >90% of
+ETH options) and on-chain options venues (Panoptic) now exist as real venues where a
+[Path-B market maker](/protocol/path-b-mm) can **export** the short-gamma risk it
+underwrites.
+
+This makes [Pillar 3](/concepts/three-pillars)'s risk-export argument concrete rather than
+aspirational: without a place to hedge, a closed pool of IL writers is just **ETH short
+gamma circulating against itself**; with a maturing options surface, hedged MMs make the
+system's *net* risk smaller. The theory anchor (static replication) and the infra enabler
+(a venue to replicate in) are two ends of the same hedge.
+
+## Putting it together
+
+<Steps>
+  <Step title="The cost became closed-form (LVR, 2022)">
+    A v3 LP is short gamma; the cost of that exposure is closed-form, proportional to
+    instantaneous variance. The problem is now *quantified*, not just observed.
+  </Step>
+  <Step title="The hedge became model-light (static replication, 2025)">
+    The IL-protection claim is a strip of vanillas — so it has a fair value and a concrete
+    hedge. The solution is now *priceable and hedgeable*, not actuarial guesswork.
+  </Step>
+  <Step title="The chain could finally evaluate it exactly (Stylus + Chainlink, on Arbitrum)">
+    Arbitrum has the liquidity, Chainlink supplies the settlement and vol inputs, and
+    Stylus computes the exact Φ-sum on-chain at machine precision. The price is now
+    *published and trustless*.
+  </Step>
+  <Step title="The risk has somewhere to go (a maturing options surface)">
+    Deribit and Panoptic give market makers a venue to export short gamma — so hedged MMs
+    shrink the system's net risk instead of relocating it.
+  </Step>
+</Steps>
+
+Each beat was missing as recently as a few years ago. Together they make a *priced, fully
+collateralized, non-custodial* in-range IL market not just possible but the obvious next
+primitive — which is the whole [why-inflexion](/why-inflexion) thesis.
+
+## What "now" does NOT mean
+
+Honest scope, because the timing argument is easy to over-sell.
+
+<AccordionGroup>
+  <Accordion title="It does not mean the math is novel.">
+    The IL formula, the convexity proof, and the lognormal interval moments are textbook
+    once you have the anchors. Inflexion's contribution is the **synthesis**: pricing the
+    *exact capped v3 payoff* in closed form and publishing it on-chain at machine
+    precision, with a [two-rail](/concepts/two-rails) market around it. The novelty is the
+    product and the dataset, not a new theorem.
+  </Accordion>
+  <Accordion title="It does not mean the no-bad-debt guarantee leans on the timing.">
+    The [no-bad-debt](/concepts/no-bad-debt) guarantee is **structural and
+    oracle-independent**: in FULL mode `collateral = MaxIL ≥ payout` by construction,
+    regardless of what `σ` was or what the anchors say. The theory anchors and `σ_ref` are
+    load-bearing for *pricing* and *depositor* solvency, never for the FULL no-bad-debt
+    invariant. The two are separate claims — see the disclosures below.
+  </Accordion>
+  <Accordion title="It does not mean the data moat is mature on day one.">
+    The timing makes the *architecture* of the [data moat](/concepts/data-moat) possible
+    now; the **dynamics** (the pool-vs-MM forward-vol spread) mature with multiple
+    competing market makers and real flow. The structures ship from day one; the dataset
+    begins at the redeploy that ships the moat events. See the maturity disclosure below.
+  </Accordion>
+</AccordionGroup>
+
+<ClaimA />
+
+<ClaimB />
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The theory anchors, in full" icon="book" href="/math/theory-anchors">
+    The LVR and static-replication results derived and tied to the protocol's math.
+  </Card>
+  <Card title="The Φ-sum (the actual pricer)" icon="function" href="/math/fair-value-phi-sum">
+    The exact closed-form premium, arm by arm — what the anchors are *not*.
+  </Card>
+  <Card title="The three pillars" icon="columns-3" href="/concepts/three-pillars">
+    On-chain FairValue, the cvAMM floor, and MM competition — the conceptual spine.
+  </Card>
+  <Card title="Why Inflexion" icon="lightbulb" href="/why-inflexion">
+    The problem, the surplus, and why this is the next primitive.
+  </Card>
+</CardGroup>

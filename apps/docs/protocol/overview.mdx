@@ -1,0 +1,250 @@
+---
+title: "60-second mental model"
+description: "The whole protocol on one screen: register a market, an LP buys protection (Path A, Path B, or routed), the swap goes ACTIVE with collateral locked, then anyone settles it for min(realized_IL, MaxIL) — out of the underwriter's own collateral."
+---
+
+Inflexion is a **collateralized bilateral derivatives market** for Uniswap v3
+impermanent-loss risk. An LP brings a **specific in-range v3 position** (its NFT),
+picks a duration, and pays a **fixed upfront premium**. At expiry the protocol pays
+the LP their realized IL, **capped at [MaxIL](/concepts/maxil)**, trustlessly, out of
+an underwriter's **pre-locked USDC collateral**.
+
+It is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), **not "IL
+insurance"**. Entry requires $P_a \le P_0 \le P_b$ — out-of-range positions are
+rejected at creation. The payout is
+$\min(\text{realized\_IL},\ \text{MaxIL})$, and **the cap
+is load-bearing** for the [no-bad-debt](/concepts/no-bad-debt) guarantee.
+
+<Note>
+This page is the map, not the territory. Each box below links to a deep page. If you
+read only one paragraph, read this one: **an LP pays a small premium up front; an
+underwriter locks exactly MaxIL of USDC; at expiry the contract pays the LP the lesser
+of their actual IL and MaxIL, from that locked collateral, and returns the NFT.**
+Everything else is detail about *how the underwriter is chosen* and *how the price is
+formed*.
+</Note>
+
+## The whole thing in four moves
+
+<Steps>
+  <Step title="Register the market (owner, once)">
+    `registerMarket` defines a `(token0, token1, fee, durationSeconds)` tuple and its
+    `marketId`. For ETH/USDC that is **3 fee tiers × 3
+    durations = 9 marketIds**, all backed by **one** [`ConvexityVault`](/protocol/vaults)
+    with fungible capital.
+  </Step>
+  <Step title="LP buys protection — Path A, Path B, or routed">
+    The LP calls one of three entry points. The contract pins $P_0$ to Chainlink,
+    reads the position geometry, checks the entry is in range, computes
+    [MaxIL](/concepts/maxil) and the [FairPremium](/concepts/fair-value), applies a
+    [load](/math/load-stack), pulls the premium, and takes the NFT into custody.
+  </Step>
+  <Step title="ACTIVE — collateral locked, NFT in custody">
+    Exactly `MaxIL` of the underwriter's USDC is locked. The position is frozen in the
+    `ILVault`; the LP keeps fee accrual but cannot re-range or exit early. In FULL mode
+    **no monitoring is needed** — liquidation is mathematically impossible.
+  </Step>
+  <Step title="SETTLE — anyone, at expiry">
+    At `block.timestamp ≥ expiry`, anyone calls `settle`. The contract pins the
+    Chainlink round at expiry, recomputes IL with the **stored** liquidity, pays the LP
+    $\min(\text{realized\_IL},\ \text{MaxIL})$ from the underwriter's collateral, returns
+    the residual `collateral − payout` to the underwriter, and returns the NFT to the
+    LP.
+  </Step>
+</Steps>
+
+## The pipeline, in one diagram
+
+The three entry points fan **in** to a single, untouched settlement core. The only
+thing that differs between them is *how the underwriter and price are discovered* —
+once the swap is `ACTIVE`, the rail is irrelevant.
+
+```
+  registerMarket(token0, token1, fee, durationSeconds)        ── owner, once
+        marketId = keccak256(token0, token1, fee, durationSeconds)
+                                 │
+                                 ▼
+  ┌──────────────────────── LP BUYS PROTECTION ───────────────────────────┐
+  │                                                                        │
+  │   createSwapPathA          createSwap            createSwapRouted      │
+  │   (signature-free          (firm EIP-712         (cheaper of           │
+  │    cvAMM pool)              MM signed quote)       {pool, MM},          │
+  │       │                        │                   falls back to pool) │
+  │       │                        │                        │             │
+  │       └────────────┬───────────┴────────────┬───────────┘             │
+  │            Path A  │                  Path B │                         │
+  │       lock from    │             lock from   │                         │
+  │       ConvexityVault            UnderwriterVault (per-MM)              │
+  │       (dual-tranche)│                         │                         │
+  └─────────────────────┴──────────┬─────────────┴─────────────────────────┘
+                                    ▼
+                          status = ACTIVE
+              • collateral == MaxIL locked            (I1, I5)
+              • NFT held in ILVault (no rehypothecation)
+              • premium split 99% underwriter / 1% treasury
+              • L stored once, never re-read           (I6)
+                                    │
+                       (anyone, at block.timestamp ≥ expiry)
+                                    ▼
+                    settle(swapId, hintRoundId)
+              • status = SETTLED FIRST            (strict CEI)
+              • pin Chainlink round AT expiry T   (no timing game)
+              • realized_IL with STORED L         (I6)
+              • payout = min(realized_IL, MaxIL)  (I1 + I2)
+              • dispatch payout from the rail's vault
+              • underwriter keeps collateral − payout
+              • NFT returns to the LP
+                                    │
+                                    ▼
+                          status = SETTLED  (terminal)
+```
+
+Both rails read the **same on-chain published fair value** — the
+[`FairPremium`](/concepts/fair-value) — computed once per create:
+
+$$
+\text{FairPremium} = \text{fairRate} \cdot \text{MaxIL}, \qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\,\text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+`fairRate` carries **all** the volatility and time dependence (an S-curve in
+$\sigma^2 T$); MaxIL carries **none** (it is pure geometry, frozen at creation). That
+split is what makes a position [fungible to an underwriter](/concepts/maxil) and is the
+spine of the whole [pricing stack](/protocol/pricing-stack).
+
+## The status machine
+
+Each swap is one `SwapRecord` that walks a tiny,
+strictly forward state machine — there is no `CANCELLED`, no `LIQUIDATED`, no
+unwind path. Once created, a swap is `ACTIVE` until it is `SETTLED`, full stop.
+
+```
+UNINITIALIZED ──create──▶ ACTIVE ──settle──▶ SETTLED
+   (default)              (locked)           (terminal)
+```
+
+| Status | Meaning | Set where | Exit |
+| --- | --- | --- | --- |
+| `UNINITIALIZED` | the default zero value; no swap at this id | — (slot default) | a `create*` call writes the record |
+| `ACTIVE` | collateral locked, NFT in custody, awaiting expiry | written in `_executePathA` / `_executePathB` | `settle` at/after expiry |
+| `SETTLED` | paid out and closed; NFT returned | set **first** in `settle` | terminal — no further transitions |
+
+<Tip>
+Why `status = SETTLED` is set **before** any external call: it is strict
+**Checks-Effects-Interactions**. A malicious oracle or `ilMath` re-entering `settle`
+on the same `swapId` would hit the `status == ACTIVE` check and revert — so the same
+swap can never be settled twice. See [CEI &amp; reentrancy](/security/cei-reentrancy).
+</Tip>
+
+The shipped `SwapRecord` stores `tokenId`, `lp`, `mm` (the counterparty — the
+`ConvexityVault` on Path A, the MM on Path B), `V0`, `maxIL`, `collateral`
+(`== maxIL` in FULL), `premium`, `model`, `settlement`, `createdAt`, `expiry`,
+`amount0Entry`, `amount1Entry`, and `liquidity` (stored once, [I6](/security/invariants)).
+There is **no `path` field** — `settle` infers the rail from
+`s.mm == address(convexityVault)`; the routing path is
+emitted in events for the [data moat](/concepts/data-moat).
+
+## The three entry points at a glance
+
+<CardGroup cols={3}>
+  <Card title="Path A — the cvAMM" icon="layer-group" href="/protocol/path-a-cvamm">
+    `createSwapPathA`. Pooled, always-on, **signature-free**. On-chain load
+    stack, I10-clamped. The **floor of liquidity** — there is always a code-capped
+    price.
+  </Card>
+  <Card title="Path B — the MM rail" icon="signature" href="/protocol/path-b-mm">
+    `createSwap`. A firm EIP-712 / EIP-1271 signed quote, **no last-look**.
+    The **ceiling of price** — an MM wins only by beating the pool.
+  </Card>
+  <Card title="Routed — cheaper of both" icon="route" href="/protocol/routing">
+    `createSwapRouted`. Prices both rails off one FairPremium, takes the
+    cheaper, and **falls back to the pool** without ever reverting on a bad MM quote.
+  </Card>
+</CardGroup>
+
+The defining property of routing: an MM wins **only if it strictly beats** the pool
+(`useB = usableB && premiumB < premiumA`); a tie resolves to Path A. A bad MM quote —
+absent, expired, stale, out-of-band, over-capacity, undercollateralized — is evaluated
+through a **read-only mirror** (`_quoteUsableAndPremiumB`)
+that returns `(false, 0)` instead of reverting, so the swap silently routes to the
+always-on pool. Only **protocol-level** failures (market inactive, not the owner, out
+of range, dust, slippage, pool unwired) revert. See [the two rails](/concepts/two-rails)
+for the side-by-side.
+
+## What is locked, and what is paid
+
+The number that matters is **MaxIL**, and it appears twice — as the collateral the
+underwriter posts and as the cap on what the LP can ever receive. That double role is
+the entire no-bad-debt argument:
+
+$$
+\text{collateral}_{\text{FULL}} = \text{MaxIL}, \qquad
+\text{payout} = \min(\text{realized\_IL},\ \text{MaxIL}) \ \le\ \text{MaxIL} = \text{collateral}
+$$
+
+Because `payout ≤ collateral` holds **by construction of the cap**, FULL mode cannot
+produce bad debt under any price path — the underwriter's locked USDC always covers the
+LP's claim. This is [invariant I1](/security/invariants), and it is *structural*: it
+does not depend on the volatility oracle being right, only on the cap and the
+collateral being equal.
+
+<ClaimA />
+
+## Worked numbers from the live deploy
+
+The 2026-06-05 redeploy ran a real create→settle on **both** rails against one short
+300s market, exercising the whole pipeline end to end:
+
+| | **Path A (cvAMM)** | **Routed → Path B (MM)** |
+| --- | --- | --- |
+| Entry point | `createSwapPathA` | `createSwapRouted` |
+| V0 (position value) | \$270,531.28 | — |
+| MaxIL (locked collateral) | \$1,669.24 | \$3,215.65 |
+| Premium charged | \$9.70 (0.58% of MaxIL) | \$8.93 (MM beat \$13.80 pool) |
+| Realized IL at expiry | \$148.64 | \$245.66 |
+| **Payout to LP** | **\$148.64** | **\$245.66** |
+| Paid from | `ConvexityVault` | the MM's `UnderwriterVault` |
+
+In both cases the payout was the **realized IL** (below the cap), paid from the chosen
+rail's own collateral, and the underwriter kept the residual `MaxIL − payout`. The
+routed swap is the routing logic made concrete: the MM's \$8.93 strictly beat the pool's
+\$13.80, so the swap executed on Path B and only Path-B state mutated.
+
+## Who can lose money
+
+The LP-facing guarantee (no bad debt, FULL, qualified) is **separate** from the
+capital-at-risk of whoever underwrites. The underwriter is the pool's depositors on
+Path A or the market maker on Path B, and their capital is **not** guaranteed:
+
+<ClaimB />
+
+## The live deployment
+
+<AddressTable />
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The full lifecycle, line by line" icon="timeline" href="/protocol/lifecycle">
+    `registerMarket` → the shared read prologue → the three create paths → ACTIVE →
+    `settle`, with every check cited.
+  </Card>
+  <Card title="The pricing stack" icon="layer-group" href="/protocol/pricing-stack">
+    How MaxIL, FairPremium, the load stack, and the I10 cap compose into a premium.
+  </Card>
+  <Card title="The two rails, one core" icon="code-branch" href="/concepts/two-rails">
+    Why a bad MM quote can never harm an LP, and why the settlement core never branches
+    on the rail.
+  </Card>
+  <Card title="MaxIL — the cap and the unit" icon="ruler" href="/concepts/maxil">
+    Why MaxIL is both the load-bearing payout cap and the fungible unit of risk.
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    The ten invariants I1–I10 and exactly where each is enforced in code.
+  </Card>
+  <Card title="The data moat" icon="chart-line" href="/concepts/data-moat">
+    The five behavioral signals the per-fill clearing-price events expose.
+  </Card>
+</CardGroup>

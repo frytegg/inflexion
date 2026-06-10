@@ -1,0 +1,499 @@
+---
+title: "The full lifecycle"
+description: "A swap's complete journey through the protocol — from registerMarket, through the shared read prologue and the three CEI-strict create entry points, into ACTIVE custody, and finally the untouched settlement core that pins the round at expiry, caps the payout, and returns the NFT."
+---
+
+A swap walks through exactly three states —
+`UNINITIALIZED → ACTIVE → SETTLED` (the `Status` enum) — recorded
+in a single `SwapRecord` struct. This page traces that
+journey end to end: the one-time market setup, the shared read prologue every create
+path runs, the three create entry points (each obeying strict Checks-Effects-
+Interactions), the ACTIVE custody phase, and the settlement core that is **identical
+regardless of which rail opened the swap**.
+
+The shape of the lifecycle is the protocol's whole safety argument in miniature: the
+price is pinned **on-chain** at both ends (entry P0 and settlement round-at-T), the
+position's liquidity `L` is **frozen at creation** and never re-read, and the payout is
+**capped at MaxIL** — so `payout ≤ collateral` holds by construction.
+
+<Note>
+**One core, two rails.** The three create entry points
+(`createSwap` / `createSwapPathA` / `createSwapRouted`) differ only in *who* underwrites
+and *how* the price is discovered — strictly **upstream** of settlement. The settlement
+core (`settle`, the `min(IL, MaxIL)` cap, the [MaxIL](/concepts/maxil) formula, and
+[invariants](/security/invariants) I1–I9) does not branch on the rail. See
+[the two rails](/concepts/two-rails) for the upstream split; this page is the timeline.
+</Note>
+
+## The lifecycle at a glance
+
+```
+  registerMarket (owner, once)
+        │
+        ▼
+  CREATE  ── shared read prologue ──  _prepareSwap        (view)
+        │         + fair value     ──  _fairPremium        (pokes VolOracle)
+        │
+        ├─ createSwapPathA          cvAMM, signature-free
+        ├─ createSwap               MM, firm EIP-712 signed quote
+        └─ createSwapRouted         cheaper of {pool, MM}, falls back to pool
+        │                            └─ strict CEI: checks → effects → interactions
+        ▼
+  ACTIVE   NFT custody in ILVault · LP keeps fee accrual · L frozen (I6)
+        │  increaseLiquidity cannot inflate payout · liquidation impossible (FULL)
+        ▼
+  SETTLE   settle(swapId, hintRoundId)
+        │  status = SETTLED FIRST (CEI) · pin Chainlink round at expiry T
+        │  IL with the STORED L (I6) · payout = min(IL, MaxIL) (I1+I2)
+        │  dispatch from the rail's vault · return the NFT
+        ▼
+  SETTLED  LP paid · counterparty keeps (collateral − payout) · NFT returned
+```
+
+The `SwapRecord` that threads through all of this carries the fields settlement will
+need, written once at creation:
+
+| Field | Meaning |
+|---|---|
+| `tokenId` | the specific Uniswap v3 position NFT |
+| `lp` | the position owner who bought the hedge |
+| `mm` | the **counterparty** — `address(convexityVault)` on Path A, the MM on Path B |
+| `V0` | position value in token1 (numeraire) at creation |
+| `maxIL` | the geometric cap; in FULL, also the collateral amount |
+| `collateral` | locked underwriter capital; in FULL, `== maxIL` |
+| `premium` | the upfront price the LP paid |
+| `model` | `CollateralModel.FULL` (PARTIAL is roadmap-gated) |
+| `createdAt`, `expiry` | the duration window |
+| `amount0Entry`, `amount1Entry` | entry-amount snapshot at creation |
+| `liquidity` | **`L` stored once** — settlement reads this, never the NFT (I6) |
+
+<Note>
+**Rail inference.** The shipped struct keeps the counterparty field named `mm` and
+has **no `path` field** — `settle` infers the rail from
+`s.mm == address(convexityVault)`. The
+`SwapRouted` / `SwapPriced` events carry the path for the [data moat](/concepts/data-moat).
+</Note>
+
+---
+
+## Phase 0 — `registerMarket` (the prerequisite)
+
+Before any swap can be created, the owner registers each market once via
+`registerMarket`. A market is a `(pair, fee, duration)`
+triple, identified by:
+
+$$
+\text{marketId} = \mathrm{keccak256}\bigl(\mathrm{abi.encodePacked}(\text{token0},\,\text{token1},\,\text{fee},\,\text{durationSeconds})\bigr)
+$$
+
+For ETH/USDC that is **3 fee tiers × 3 durations = 9
+marketIds** — all underwritten by **one** `ConvexityVault` with fungible capital.
+
+Registration is the place three pieces of hardening get baked in, each closing a way a
+mis-configured market could later mis-price or be re-priced:
+
+<Steps>
+  <Step title="Oracle token must be one of the pair">
+    The Chainlink oracle token must be `token0` or `token1`, so the on-chain price
+    always refers to the actual traded asset.
+  </Step>
+  <Step title="Decimals are read on-chain, never trusted from calldata">
+    Token decimals are read from the token contracts at registration, not accepted from
+    the caller. One wrong digit would mis-scale every price by ~10×; reading on-chain
+    removes the trust.
+  </Step>
+  <Step title="Price-config immutability">
+    The oracle orientation is **frozen once set**, so re-registering can never re-price
+    an active swap. A market's pricing geometry is write-once.
+  </Step>
+</Steps>
+
+Path A markets must additionally be opted in via `setCvammEnabled` before the cvAMM
+will underwrite them — see [Path A](/protocol/path-a-cvamm).
+
+---
+
+## Phase 1 — CREATE
+
+Creation is the only phase that differs by rail, and even there the *first two steps are
+shared*. All three entry points run the same read prologue and compute the same fair
+value before any rail-specific pricing or locking happens.
+
+### 1a. The shared read prologue (`_prepareSwap`)
+
+`_prepareSwap` is identical for `createSwap`,
+`createSwapPathA`, and `createSwapRouted`. It is a **`view`** function — it touches no
+state (the only non-view step in creation, the `VolOracle` poke, lives in
+`_fairPremium` below). Its job is to read the truth about the position from the chain and
+reject anything that is not a valid in-range entry.
+
+<Steps>
+  <Step title="Ownership">
+    `ownerOf(tokenId) == msg.sender`, else `NotPositionOwner`. Only the LP who owns the
+    NFT can hedge it.
+  </Step>
+  <Step title="Position read + marketId cross-check">
+    Read `positions(tokenId)`; derive a `marketId` from the **live**
+    `token0 / token1 / fee` plus the market's `durationSeconds`, and require it equals
+    the requested `marketId`, else `MarketMismatch`. The
+    LP cannot route a position into the wrong market.
+  </Step>
+  <Step title="Pa / Pb from ticks">
+    Derive the range bounds from the position's ticks via
+    `TickMath.getSqrtRatioAtTick`. The range is read from
+    the NFT — **the LP cannot lie about it.**
+  </Step>
+  <Step title="P0 pinned to Chainlink, on-chain">
+    `oracle.getPrice(oracleToken)` → `_oracleSqrtPriceX96`; the entry price is **never
+    caller-supplied**. The same read (`g.livePrice`) is
+    reused for the Path-B band check at zero extra oracle cost.
+  </Step>
+  <Step title="In-range gate — entry must be in range">
+    `require Pa ≤ P0 ≤ Pb`, else `PositionOutOfRange`.
+    This is the rule that makes this an
+    [in-range convexity hedge](/concepts/in-range-convexity-hedge), **not** insurance —
+    out-of-range entries are rejected at creation.
+  </Step>
+  <Step title="MaxIL">
+    `maxIL = ilMath.computeMaxIL(...)` — the pure-geometry
+    [cap and unit of risk](/concepts/maxil), $\text{MaxIL} = \max(IL(P_a),\,IL(P_b))$.
+  </Step>
+  <Step title="Entry-amount snapshot">
+    `(a0, a1) = SwapMath.entryAmounts(...)` — the token0 / token1
+    amounts the position holds at `P0`.
+  </Step>
+  <Step title="V0 in the numeraire">
+    `V0 = amount0InToken1(a0) + a1`, the position value in
+    token1 units (typically dUSDC, 6 decimals).
+  </Step>
+</Steps>
+
+The position's liquidity `L` is captured here as `g.liquidity` and **stored at
+execution** — this is the I6 freeze that settlement will depend on.
+
+<Tip>
+**Entry-snapshot semantics.** Every entry quantity — `P0`, `(a0, a1)`,
+`L` — is snapshotted at **swap creation**, not at the LP's original mint. The hedge
+covers IL accruing **from creation onward**; any IL the LP already bore before hedging
+stays theirs. This is why `P0` is the oracle price at `createSwap`, not the position's
+historical entry.
+</Tip>
+
+### 1b. Fair value (`_fairPremium`)
+
+With geometry in hand, every create path computes the **same on-chain published fair
+value** via `_fairPremium`:
+
+<Steps>
+  <Step title="Geometry → ratios">
+    Convert to normalized ratios $a = P_a/P_0$ and $b = P_b/P_0$ (WAD) from the sqrt
+    prices. The [Phi-sum](/math/fair-value-phi-sum) runs
+    in normalized units, so it depends only on `a`, `b`, `σ_ref`, and `T`.
+  </Step>
+  <Step title="Poke the VolOracle">
+    Refresh `σ_ref` permissionlessly — a **no-op if too soon** via `VolOracle.poke`.
+    Folding the poke into create keeps the vol
+    estimate fresh without a dedicated keeper. This is the **only non-view step** in
+    creation's read phase.
+  </Step>
+  <Step title="Read the FairValueOracle">
+    `FairValueOracle.fairPremium(oracleToken, a, b, durationSeconds, maxIL)` returns
+    `(premium, fairRateWad, sigmaRefWad)`. This is the **single source of fair value for
+    both rails** — the router pokes once and prices both rails off the same `FairPremium`.
+  </Step>
+</Steps>
+
+$$
+\text{FairPremium} = \text{fairRate}\cdot\text{MaxIL}, \qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\,\text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+`fairRate` is an **exact closed-form Phi-sum**, evaluated live per quote by the Stylus
+`FairValueOracle` — never a fitted surface and **never reimplemented off-chain**. See
+[the Phi-sum](/math/fair-value-phi-sum) and the [pricing stack](/protocol/pricing-stack).
+
+### 1c. The three entry points (strict CEI)
+
+All three enforce the dust floors `MIN_POSITION_V0 = $100` and `MIN_PREMIUM = $1` —
+blocking dust swaps that grief capacity and closing the
+integer-division free-coverage edge — plus a final `maxPremium` LP slippage guard. From
+there each rail differs only in pricing and locking, and each obeys **strict
+Checks-Effects-Interactions**: all reverting checks first, then state effects, then
+external calls.
+
+<Tabs>
+  <Tab title="Path A — createSwapPathA">
+
+`createSwapPathA` is the **signature-free cvAMM** rail.
+
+- **Checks:** the cvAMM must be wired (`convexityVault != 0`) and the market must be
+  `active` + `cvammEnabled`.
+- **Price:** `_pricePathA` = the on-chain `FairPremium`
+  plus the I10-clamped [load stack](/math/load-stack), then capped at MaxIL.
+- **Effects + Interactions** (`_executePathA`), in order:
+  1. `convexityVault.lockCollateral(marketId, maxIL)` — checks free capital and senior
+     protection.
+  2. `nextSwapId++`.
+  3. Write `SwapRecord{ mm: address(convexityVault), collateral: maxIL, liquidity: L, ... }`.
+  4. Pull premium USDC from the LP.
+  5. Take the NFT into the `ILVault`.
+  6. **Premium split:** `poolCut = 99%` accrued into the vault via `accruePremium`,
+     `treasuryCut = 1%` to the treasury.
+
+**No keeper, no signed quote, no validity clock, no relayer.** Pure on-chain.
+
+  </Tab>
+  <Tab title="Path B — createSwap">
+
+`createSwap(quote, signature, tokenId, maxPremium)` is the
+full **signed-quote** rail. Its PHASE-2 checks (the revert path), in order:
+
+1. `markets[quote.marketId].active`.
+2. **Signature:** `SignatureChecker.isValidSignatureNow` — EIP-712 ECDSA **or
+   EIP-1271** contract signer (via `QuoteVerification`).
+3. `fairValueOracle` wired and `loadBps ≤ maxLoadBps`, else `LoadExceedsMax` —
+   **I10 on Path B**.
+4. `premium = _pricePathB` = `FairPremium·(1 + loadBps)`, capped at MaxIL.
+5. `model == FULL` else `UnsupportedModel`; dust V0 / premium guards.
+6. **Ratio band:** `ratioBps = maxIL·1e4/V0 ∈ [minMaxILRatioBps, maxMaxILRatioBps]`
+   else `RatioOutOfBand` — the per-market MaxIL-ratio filter.
+7. `validUntil > now` (`QuoteExpired`) and `secondsAhead ∈ [5s, 15s]`
+   (`ValidityOutOfBand`).
+8. `!isNonceUsed(mm, nonce)` else `NonceAlreadyUsed`.
+9. `priceBandBps ∈ [25, 500]` and the **oracle-anchored band**
+   `absBps(P_live, quotePrice) ≤ priceBandBps` else `PriceOutOfBand` — Fork 2 / **I9**,
+   reusing `g.livePrice`.
+10. `consumedNotional[quoteId] + V0 ≤ maxNotionalV0` else `CapacityExceeded` — **I7**.
+11. `underwriterVault.availableBalance(mm) ≥ maxIL` else `MMUndercollateralised`.
+12. `premium ≤ maxPremium` else `PremiumExceedsSlippage`.
+
+**Effects + Interactions** (`_executePathB`) — the **only**
+place Path-B state mutates: `consumedNotional[quoteId] += V0` → `_useNonce(mm, nonce)` →
+`underwriterVault.lockCollateral(mm, maxIL)` → write
+`SwapRecord{ mm: quote.mm, liquidity: L, ... }` → pull premium → take NFT → **premium
+split 99% to the MM, 1% to treasury** (no tranche split on Path B) → emit `SwapCreated` + `QuoteFilled`.
+
+  </Tab>
+  <Tab title="Routed — createSwapRouted">
+
+`createSwapRouted(quote, signature, tokenId, maxPremium)`
+gives the LP the **cheaper of `{pool, MM}`** and never
+reverts on a bad MM quote.
+
+1. **Pool must be wired** + market `cvammEnabled` — the always-on floor must exist as a
+   fallback, else there's nothing to fall back to ⇒ revert.
+2. **Price both rails off the SAME `FairPremium`** (single poke):
+   `premiumA = _pricePathAFromFair`,
+   `(usableB, premiumB) = _quoteUsableAndPremiumB`.
+3. **The non-reverting mirror:** `_quoteUsableAndPremiumB` is a **`view`**
+   mirror of every Path-B gate, returning `(false, 0)` instead of reverting on any of:
+   absent / wrong-model / over-load / expired / out-of-validity-band / bad-priceBand /
+   out-of-ratio / nonce-used / zero-price / out-of-oracle-band / over-capacity /
+   MM-undercollateralized / bad-sig / dust. It **never mutates a nonce / capacity / lock**,
+   so an unchosen quote leaves zero trace (I7 preserved).
+4. **Route:** `useB = usableB && premiumB < premiumA` — the MM wins **only if it
+   strictly beats** the pool; a **tie resolves to Path A**.
+5. **Only the executed path mutates state**.
+6. Emit `SwapRouted(swapId, pathB, premiumA, premiumB)` — cheapest-wins
+   routing is auditable on-chain.
+
+See [routing](/protocol/routing) for the full decision and the mirror in depth.
+
+  </Tab>
+</Tabs>
+
+<Warning>
+**A bad MM quote on `createSwapRouted` falls back to the pool — it never reverts.**
+
+- **Limit:** an MM quote can be absent, expired, stale, over-band, over-load,
+  zero-priced, undercollateralized, or simply not cheaper than the pool.
+- **Why it cannot harm the LP:** the router evaluates the quote through the read-only
+  `_quoteUsableAndPremiumB` mirror, so any of those conditions just sets
+  `usableB = false`.
+- **Mitigation (by construction):** the swap silently routes to the always-on pool.
+  Only **protocol-level** failures (market inactive, not the owner, out of range, dust,
+  slippage, pool unwired) revert. An LP using
+  `createSwapRouted` is never worse off than going straight to Path A.
+</Warning>
+
+---
+
+## Phase 2 — ACTIVE
+
+Once created, the swap is `ACTIVE` and the NFT sits in custody until expiry. This phase
+has no on-chain action in FULL mode — by design.
+
+<Steps>
+  <Step title="NFT in custody, fees still the LP's">
+    The position NFT is held in the `ILVault`; the LP **keeps fee accrual** and may
+    `claimFees(tokenId)` at any time. There is **no rehypothecation** — locked
+    collateral is never lent out.
+  </Step>
+  <Step title="The position is frozen">
+    While in custody the LP **cannot re-range, add/remove liquidity, or exit early**.
+    This is a real opportunity cost — and a key reason short durations (7d) exist.
+  </Step>
+  <Step title="increaseLiquidity cannot inflate the payout (F-#2 / I6)">
+    Anyone can call `increaseLiquidity` on a v3 NFT (it is **not** owner-gated), but
+    settlement uses the **stored `L`** captured at creation. Extra liquidity is simply
+    returned with the NFT and **can never inflate the payout above MaxIL**.
+  </Step>
+  <Step title="No monitoring, no liquidation (FULL)">
+    In FULL mode liquidation is **mathematically impossible** — collateral already
+    equals MaxIL, the maximum the payout can ever be. No keeper monitors the position.
+  </Step>
+</Steps>
+
+<Info>
+**What is hedged (F-#14).** The product hedges **gross in-range IL**, not net P&L. The
+LP also earns Uniswap fees, so its total outcome — `fees − IL + payout − premium` — can
+be **positive**. That is correct, not a leak. Invariant
+[I4](/security/invariants) (the LP never profits *from the swap*) is about the **payout**,
+which is still `0` whenever IL is `0`.
+</Info>
+
+The I6 freeze is the load-bearing detail of this phase. `L` is stored at creation and
+read only from storage at settlement — the NFT's live liquidity is never the input to the
+payout. This is what makes the ungated `increaseLiquidity` harmless.
+
+---
+
+## Phase 3 — SETTLE
+
+At `block.timestamp ≥ expiry`, **anyone** can call `settle(swapId, hintRoundId)` — the
+**untouched settlement core**, with math identical
+regardless of which rail opened the swap.
+
+<Steps>
+  <Step title="Status + timing checks">
+    Require `status == ACTIVE` and `now ≥ expiry`, else revert.
+  </Step>
+  <Step title="status = SETTLED FIRST (strict CEI)">
+    Set `status = SETTLED` **before** any external call. A
+    malicious oracle or ilMath re-entering `settle` on the same `swapId` would hit the
+    `ACTIVE` check and revert. See [CEI & reentrancy](/security/cei-reentrancy).
+  </Step>
+  <Step title="Pin the price at expiry (round-at-T)">
+    `oracle.getSettlementPrice(oracleToken, expiry, hintRoundId)` pins the price to the
+    **Chainlink round active at expiry T**. The settlement
+    sqrt price is derived **on-chain**, never caller-supplied. The keeper
+    supplies `hintRoundId`; the oracle **verifies** it — round-at-T pinning kills the
+    settle-timing game. It reverts on sequencer-down / grace / staleness / lone-spike /
+    wrong-round (see [oracles](/protocol/oracles) and [price pinning](/security/price-pinning)).
+  </Step>
+  <Step title="IL with the STORED L (I6)">
+    `ilMath.computeIL(sqrtP_T, sqrtPa, sqrtPb, s.liquidity, amount0Entry, amount1Entry)`
+    — using `s.liquidity` from storage, never a re-read of the NFT.
+  </Step>
+  <Step title="Apply the cap (I1 + I2)">
+    `payout = realisedIL > maxIL ? maxIL : realisedIL`. This
+    single line is invariants I1 (no bad debt: `payout ≤ collateral == MaxIL`) and I2
+    (cap correctness: `payout == min(realized_IL, MaxIL)`).
+  </Step>
+  <Step title="Vault dispatch by rail">
+    Infer the rail from the stored counterparty:
+    if `s.mm == address(convexityVault)` →
+    `ConvexityVault.releaseAndDistribute(marketId, lp, payout, collateral)`; else
+    `UnderwriterVault.releaseAndDistribute(mm, lp, payout, collateral)`. **The LP
+    receives `payout`; the counterparty keeps `collateral − payout`** (the residual MaxIL).
+  </Step>
+  <Step title="Return the NFT">
+    `ilVault.returnNFT(...)` hands the position (and any extra liquidity added during
+    ACTIVE) back to the LP.
+  </Step>
+  <Step title="Emit SwapSettled">
+    `SwapSettled(id, realisedIL, payout, settlementPrice)`.
+  </Step>
+</Steps>
+
+The settlement payout, written as the protocol's core identity:
+
+$$
+\text{payout} = \min\bigl(\text{realized\_IL},\ \text{MaxIL}\bigr), \qquad
+\text{realized\_IL} = \bigl(V_{\text{hold}}(P_T) - V_{\text{lp}}(P_T)\bigr)^{+}
+$$
+
+The non-negativity guard `(\cdot)^{+}` is invariant
+[I3](/security/invariants) — `realized_IL = V_hold > V_lp ? V_hold − V_lp : 0`, never an
+unchecked subtraction. See [the IL formula](/math/il-formula) for the
+three price regimes of $V_{\text{lp}}$.
+
+<Note>
+**If the oracle is unhealthy, `settle` reverts and is retryable** — neither party can
+exploit downtime, since the price can only be pinned to the verified round-at-T. The
+liveness backstop (Fork 1 / **I8**) guarantees eventual success: past `LIVENESS_WINDOW`,
+the Chainlink-at-T price is accepted unconditionally, so `settle` always succeeds within
+`expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`. See
+[the forks](/security/forks).
+</Note>
+
+<Tip>
+**Preview without settling.** `settlePreview(swapId, sqrtPTX96)` computes the
+hypothetical payout at any price with **no
+state change** — used by the invariant suite and by frontends to show "what would I be
+paid if price were here?"
+</Tip>
+
+---
+
+## Worked lifecycle — live on both rails
+
+The 2026-06-05 redeploy ran a real **create → settle** on **both** rails against one
+300-second market — the full lifecycle, end to end, on-chain:
+
+| | **Path A — cvAMM** (swap #1) | **Routed → Path B — MM** (swap #2) |
+|---|---|---|
+| Entry point | `createSwapPathA` | `createSwapRouted` |
+| V0 | \$270,531.28 | — |
+| MaxIL (cap = collateral) | \$1,669.24 | \$3,215.65 |
+| Premium | \$9.70 (0.58% of MaxIL) | \$8.93 (chosen) |
+| Routing decision | — | MM **strictly beat** the pool (\$8.93 vs \$13.80; MM `loadBps` 1000) |
+| Realized IL | \$148.64 | \$245.66 |
+| Payout (`min(IL, MaxIL)`) | \$148.64 | \$245.66 |
+| Settled from | `ConvexityVault` | the MM's own `UnderwriterVault` collateral |
+
+Both swaps walked the identical core: read prologue → fair value → lock collateral →
+ACTIVE → `settle` pins the round-at-T → `payout = min(IL, MaxIL)` → NFT returned. The
+only difference was the rail that opened them and the vault that paid — exactly as the
+"one core, two rails" design specifies.
+
+---
+
+## The two separate claims
+
+The lifecycle enforces two **separate** guarantees — never merge them.
+
+The LP-facing guarantee is enforced at settlement, identically for both rails (the cap
+at step 5, the FULL collateralization at lock):
+
+<ClaimA />
+
+The capital-at-risk disclosure applies to whoever underwrote — the pool's depositors on
+Path A, the market maker on Path B:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The two rails" icon="route" href="/concepts/two-rails">
+    The upstream split — Path A vs Path B, side by side.
+  </Card>
+  <Card title="Routing in depth" icon="code-branch" href="/protocol/routing">
+    `createSwapRouted` and the non-reverting mirror, step by step.
+  </Card>
+  <Card title="The pricing stack" icon="layer-group" href="/protocol/pricing-stack">
+    How FairPremium, the load stack, and the I10 cap compose into a premium.
+  </Card>
+  <Card title="The invariants" icon="shield-halved" href="/security/invariants">
+    I1–I10 and exactly where each is enforced in the lifecycle.
+  </Card>
+  <Card title="Oracles" icon="satellite-dish" href="/protocol/oracles">
+    Entry P0, the settlement round-at-T pin, and the liveness backstop.
+  </Card>
+  <Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why the cap is also what makes positions fungible to an underwriter.
+  </Card>
+</CardGroup>

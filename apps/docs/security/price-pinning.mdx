@@ -1,0 +1,197 @@
+---
+title: "Entry & settlement price pinning"
+description: "How Inflexion closed the caller-supplied-price hole: P0 and P_T are derived on-chain from Chainlink, decimals are read at registration, orientation is immutable, and the LP can lie about neither range nor entry."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+Every number that decides money in a swap — the entry price `P0`, the settlement price `P_T`, the range bounds `Pa`/`Pb` — must come from a source the user **cannot choose**. If any of them were caller-supplied, the protocol would be quoting and settling against a fiction. This page is the story of one specific hole in an early design, why it was a fund-loss vector, and exactly how the deployed code closes it: **all four prices are pinned on-chain, derived from Chainlink and from the position's own NFT, never from calldata.**
+
+This is the enforcement side of two invariants. The settlement-price pinning restores [I2 and I4](/security/invariants); the entry-price pinning feeds the [I9 oracle band](/security/forks). It is also the mechanism behind the [no-bad-debt guarantee](/concepts/no-bad-debt) being *real* rather than nominal — a cap on `realized_IL` means nothing if the settler gets to pick the price that feeds the IL formula.
+
+<ClaimA />
+
+## The hole — caller-supplied prices
+
+A review of an early build found that `createSwap` and `settle` once accepted a **caller-supplied** sqrt price as a function argument. Two independent abuses fell straight out of that:
+
+<CardGroup cols={2}>
+<Card title="Settle-side: pick the payout" icon="triangle-exclamation">
+`settle` computed the payout from the caller's `sqrtP_T`. Because settlement is **permissionless** (anyone can settle an expired swap), any settler could set `P_T` to whatever maximised — or zeroed — the payout, placing it **anywhere in `[0, MaxIL]`** regardless of the true price at expiry.
+</Card>
+<Card title="Create-side: pick the entry" icon="triangle-exclamation">
+`createSwap` let the LP choose the entry sqrt price. Since `P0` sets `MaxIL`, the premium, and `V0`, an LP could pick an entry that made the position cheap to hedge and rich to settle — choosing its own risk parameters.
+</Card>
+</CardGroup>
+
+<Warning>
+**Why this was a genuine fund-loss vector, not a cosmetic bug.** The whole no-bad-debt argument is `payout = min(realized_IL, MaxIL) ≤ collateral`. The cap bounds the payout from **above**, but `realized_IL` is a *function of the settlement price*. If the settler supplies `P_T`, they pick `realized_IL` directly, so the payout becomes any value the settler wants in `[0, MaxIL]` — the cap holds numerically (`payout ≤ MaxIL`) but the protocol pays an **arbitrary** amount within that band. That breaks **I2** (cap correctness: `payout == min(realized_IL, MaxIL)`) and **I4** (LP never profits — a malicious settler could pay a non-zero amount even when the LP beat hold).
+**Why it's closed:** both prices are now derived on-chain from Chainlink; calldata never feeds the IL formula. See below.
+**Mitigation status:** fixed and live in `InflexionCore` (settle and create paths).
+</Warning>
+
+The cap was never the problem. The **input to the cap** was. Pinning the price is what turns the cap into a guarantee.
+
+## The fix — derive both prices on-chain from Chainlink
+
+In the deployed contracts, both the entry price `P0` and the settlement price `P_T` are derived **on-chain** from the Chainlink feed via a single internal helper, `_oracleSqrtPriceX96`, which delegates to the `SwapMath.oracleSqrtPriceX96` library:
+
+```solidity
+// Derive a Uniswap-style sqrtPriceX96 from the Chainlink answer,
+// decimal- and orientation-aware. Never reads a price from calldata.
+function _oracleSqrtPriceX96(bytes32 marketId, uint256 chainlinkAnswer)
+    internal view returns (uint160)
+{
+    return SwapMath.oracleSqrtPriceX96(/* feed answer + market decimals + orientation */);
+}
+```
+
+The helper converts a Chainlink answer (8-decimal feed) into a Uniswap-convention `sqrtPriceX96`, accounting for token decimals and oracle orientation (covered below). It is the **only** way a price enters the pricing or settlement math.
+
+<Tabs>
+<Tab title="Settlement price P_T">
+At `settle`, the settlement price is pinned to the **Chainlink round-at-T** — the unique round bracketed by `updatedAt ≤ expiry` — and converted via `_oracleSqrtPriceX96`. `realized_IL` is then recomputed on-chain from that pinned price and the stored liquidity:
+
+```solidity
+uint160 sqrtPTX96 = _oracleSqrtPriceX96(s.marketId, settlementAnswer); // round-at-T, not calldata
+// ... computeIL(...) over the stored s.liquidity (I6) ...
+uint256 realisedIL = ILMath.computeIL(/* stored L, oracle-pinned P_T */);
+uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL); // I1/I2 cap
+```
+
+The settler chooses **when** to call `settle`, never **what price** it settles at. The round-at-T is deterministic given the expiry, so two honest settlers reach the same payout. This restores **I2** and **I4** and is the Fork-1 oracle pinning ([the forks](/security/forks)). The round-at-T machinery — the lone-spike sanity check and the 24h liveness backstop — lives in `OracleManager.getSettlementPrice` and is invariant **I8**.
+</Tab>
+<Tab title="Entry price P0">
+At `createSwap`, the live oracle is read **once** in `_prepareSwap` and pinned as `P0`. The same read is reused for the [I9 band check](/security/forks) — zero extra oracle cost:
+
+```solidity
+g.livePrice = oracle.getPrice(marketId);          // single live read, carried as g.livePrice
+uint160 sqrtP0 = _oracleSqrtPriceX96(marketId, g.livePrice); // P0, on-chain derived
+// in-range gate compares the Chainlink-derived P0 against the NFT-derived bounds:
+require(sqrtPa <= sqrtP0 && sqrtP0 <= sqrtPb, /* OutOfRange */); // Pa <= P0 <= Pb
+```
+
+`P0` drives `MaxIL`, the premium, and `V0` — none of which the LP can now tilt by choosing an entry. The LP picks the **block** they transact in (bounded entry-timing freedom, below), not the price.
+</Tab>
+</Tabs>
+
+<Info>
+**One read, two jobs.** The live oracle read at `createSwap` does double duty: it pins `P0` *and* it is the `g.livePrice` the [I9 band check](/security/forks) compares against the MM's `quotePrice`. There is no second oracle call, so the entry price the LP is charged against and the price the MM's quote is validated against are **guaranteed identical** — they are literally the same variable.
+</Info>
+
+## Decimals are read on-chain, not trusted from calldata
+
+A sqrt-price conversion is only correct if the token decimals are correct. A market's `MarketConfig` decimals are read **on-chain at `registerMarket`** by querying the token contracts directly — never accepted from the registrant's calldata:
+
+```solidity
+// decimals read on-chain from the token contracts at registration, not from calldata
+cfg.token0Decimals = IERC20Metadata(token0).decimals();
+cfg.token1Decimals = IERC20Metadata(token1).decimals();
+```
+
+<Warning>
+**Why a single wrong digit is catastrophic.** The decimal delta enters the price scaling as a power of ten. A market registered with one wrong decimal would **mis-scale every price by ~10×** — every `P0`, `P_T`, `MaxIL`, and premium for every swap in that market would be off by an order of magnitude, silently.
+**Why it's safe here:** decimals come from `IERC20Metadata.decimals()` on the actual token contracts at registration, so they cannot be spoofed in calldata.
+**Mitigation status:** enforced and live in `InflexionCore`. For the live values (dUSDC = 6, dWETH = 18, Chainlink feeds = 8, WAD = 1e18) see [decimals & units](/reference/decimals-units).
+</Warning>
+
+## Orientation / token-order immutability
+
+Chainlink feeds quote a fixed direction (e.g. ETH/USD), but a Uniswap pool has its own `token0`/`token1` ordering. The conversion in `_oracleSqrtPriceX96` must know which way to orient the feed relative to the pool. That **orientation is fixed at first registration and immutable across re-registration**:
+
+```solidity
+// orientation is set once; re-registering a market can never flip it
+if (cfg.exists && newOrientation != cfg.orientation) revert MarketPriceConfigImmutable();
+```
+
+<Warning>
+**Why immutability matters here specifically.** If a market's price orientation could be flipped by re-registering it, an admin (or a compromised admin key) could **re-price an already-active swap** — invert ETH/USD into USD/ETH and turn a winning position into a losing one at settlement.
+**Why it's safe here:** the orientation (and the rest of the price config) is locked at first registration; any attempt to change it on re-registration reverts with `MarketPriceConfigImmutable`.
+**Mitigation status:** enforced and live in `InflexionCore`. This is part of the broader [immutability & custody](/security/immutability-custody) posture: no upgradability, one-shot wiring then freeze.
+</Warning>
+
+This also means re-registering a market is a safe, idempotent operation for the *non-price* fields and a hard revert for the price fields — there is no path by which a market admin can retroactively change how an open swap is priced or settled.
+
+## The "LP lies about geometry" defense
+
+Pinning the *price* is only half the job. The IL formula also needs the position's **range** (`Pa`, `Pb`) and its **liquidity** `L`. If the LP could assert its own geometry, it could claim a wider or narrower range than its NFT actually holds and inflate the computed IL. Inflexion derives all of it from the position's own NFT and cross-checks the market:
+
+<Steps>
+<Step title="Range bounds come from the NFT ticks, via TickMath">
+`sqrtPa` / `sqrtPb` are derived on-chain from `positions(tokenId).tickLower` / `tickUpper` through Uniswap's `TickMath`, never from an LP-supplied range:
+
+```solidity
+(int24 tickLower, int24 tickUpper) = /* from positions(tokenId) */;
+uint160 sqrtPa = TickMath.getSqrtRatioAtTick(tickLower);
+uint160 sqrtPb = TickMath.getSqrtRatioAtTick(tickUpper);
+```
+
+The bound-derivation helper is `_sqrtBoundsFor`. The LP cannot widen, narrow, or shift the range it actually holds.
+</Step>
+<Step title="The position's tokens & fee are cross-checked against the market">
+The NFT's actual `(token0, token1, fee)` is read from the position and cross-checked against the registered `marketId`; a mismatch reverts:
+
+```solidity
+if (positionToken0 != cfg.token0 || positionToken1 != cfg.token1 || positionFee != cfg.fee)
+    revert MarketMismatch();
+```
+
+So an LP cannot hedge an ETH/USDC position under a DAI/USDC market's pricing, or otherwise smuggle a position into a market whose decimals/orientation/oracle don't match it.
+</Step>
+<Step title="Liquidity L is snapshotted once at creation">
+`L` is read from the NFT exactly once at creation (on both Path A and Path B) and settlement uses the **stored** `s.liquidity` — never a re-read. This is [invariant I6](/security/invariants): an external `increaseLiquidity` on the custodied NFT cannot inflate the payout above `MaxIL`.
+</Step>
+</Steps>
+
+<Tip>
+**Net effect: the LP can lie about neither the range nor the entry price.** Range comes from the NFT ticks (TickMath), tokens/fee are cross-checked against the market (`MarketMismatch`), liquidity is snapshotted once (I6), and both `P0` and `P_T` come from Chainlink. The only thing the LP genuinely chooses is *which block* to create in — and that freedom is bounded (next section).
+</Tip>
+
+## Accepted residuals — by design, not oversight
+
+Two residuals remain after pinning. Both are intentional design choices, framed here with their *why* and their bound — never exposed naked.
+
+<AccordionGroup>
+<Accordion title="In-range is defined at the ORACLE price, not the pool's slot0">
+**Limit:** the `Pa ≤ P0 ≤ Pb` gate compares the **Chainlink-derived** `P0` against the NFT-derived bounds, not the pool's instantaneous `slot0` tick.
+**Why:** settlement is also oracle-pinned (round-at-T), so defining "in range" at the *same* oracle price keeps creation and settlement consistent. Using `slot0` at create and the oracle at settle would introduce a basis between the two that the protocol would then have to reason about.
+**Bound:** this is **not a fund-loss vector** — the worst case is a position whose pool tick is just outside the range while the oracle says it's just inside (or vice versa), which only affects whether the swap is *admitted*, not how much it pays.
+</Accordion>
+<Accordion title="Bounded entry-timing freedom">
+**Limit:** `P0` is the latest Chainlink round at the LP's **chosen block**, so the LP has a small amount of freedom over *when* — and therefore at what oracle print — it enters.
+**Why:** the LP must be able to choose a moment to transact; this is intrinsic to any firm-quote design.
+**Bound:** the freedom is clamped to within `priceBandBps` of the MM's `quotePrice` over a **5–15s validity window** ([I9](/security/forks)), and it is blunted by the premium scaling with `MaxIL` — picking a slightly better entry also raises the `MaxIL` the LP pays a premium against. Bounded and self-limiting; intended firm-quote behaviour, not a drain.
+</Accordion>
+</AccordionGroup>
+
+## Attack → defense at a glance
+
+| Attack | Defense | Invariant |
+| --- | --- | --- |
+| Settler chooses the settlement price (payout anywhere in `[0, MaxIL]`) | `P_T` derived on-chain from the Chainlink round-at-T, never calldata | I2 / I4 |
+| LP picks a favorable entry price (tilts `MaxIL` / premium / `V0`) | `P0` derived on-chain from Chainlink, clamped to the MM band | I9 |
+| Wrong decimals mis-scale every price ~10× | Decimals read on-chain from the token contracts at `registerMarket` | — |
+| Re-register a market to re-price an active swap | Orientation / price config immutable across re-registration (`MarketPriceConfigImmutable`) | — |
+| LP lies about the position's range | `sqrtPa` / `sqrtPb` from `positions().tickLower/Upper` via TickMath | — |
+| LP smuggles a mismatched position into a market | `(token0, token1, fee)` cross-checked against `marketId` (`MarketMismatch`) | — |
+| External `increaseLiquidity` on the custodied NFT inflates payout | `L` snapshotted once at creation; settle uses stored value | I6 |
+
+## Where this is enforced — live
+
+<AddressTable />
+
+The relevant logic lives in `InflexionCore` (entry/settle pinning, decimals, orientation, geometry cross-check) and `OracleManager` (the Chainlink round-at-T machinery the settlement price is pinned to). For the full registry and the live decimal/orientation values per market see [deployments](/reference/deployments) and [decimals & units](/reference/decimals-units).
+
+## Why this matters for the headline claim
+
+The [no-bad-debt guarantee](/concepts/no-bad-debt) is `payout = min(realized_IL, MaxIL) ≤ collateral`. The cap bounds the payout from above; **price pinning is what makes `realized_IL` honest** so the cap is binding on a *real* number rather than a settler-chosen one. Without pinning, I1 would still hold numerically (`payout ≤ MaxIL`) while I2 and I4 silently failed — the LP would be "always paid", just an arbitrary amount. Pinning is the difference between a cap and a guarantee.
+
+<CardGroup cols={2}>
+<Card title="The two resolved forks" icon="code-branch" href="/security/forks">
+Fork-1 (round-at-T pin + lone-spike + 24h backstop, I8) and Fork-2 (oracle-anchored band, not last-look, I9) — the machinery the pinned prices flow through.
+</Card>
+<Card title="The ten invariants" icon="list-check" href="/security/invariants">
+I2 (cap correctness) and I4 (LP never profits) are the invariants this pinning restores; I6 (liquidity immutability) is the geometry companion.
+</Card>
+</CardGroup>

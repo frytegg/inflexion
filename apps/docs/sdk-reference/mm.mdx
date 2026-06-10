@@ -1,0 +1,935 @@
+---
+title: "MmClient reference"
+description: "The full typed API surface of MmClient — pricing, the geometry-free load-to-beat, EIP-712 quote signing with the I10 + below-pool guards, streaming, the book/fills/capacity reads, and the UnderwriterVault collateral flow. Every method: args, returns, contract fn, degradation envelope."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+This is the **type reference** for `MmClient` — the
+SDK surface for the [Path-B market-maker rail](/protocol/path-b-mm). Every method
+is listed with its exact TypeScript signature, the contract function(s) it reads
+or writes, and its degradation envelope. For the *narrative* — why an MM quote is
+per-market, the firm-quote / short-TTL economics, the end-to-end loop — see the
+[MmClient guide](/sdk/mm-client). For the canonical wire format, see
+[quote signing](/integrate/quote-signing) and the
+[quote-helpers reference](/sdk-reference/quote-helpers).
+
+<Note>
+The whole MM workflow is **sign + read + cancel**. `MmClient` never sends a fill
+(an LP does that on-chain via `createSwapRouted`) and never holds collateral (a
+separate [`UnderwriterVault`](#getmmcollateral) flow does). The one write it owns
+is [`cancelNonces`](#cancelnonces).
+</Note>
+
+## Construction
+
+```ts
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const mm = createInflexionSdk({ rpcUrl, privateKey, chainId: 421614 }).mm
+```
+
+`MmClient` is wired by the [one-call factory](/sdk/getting-started); you never
+instantiate it directly. It is the only surface that receives the EIP-712
+`chainId`. Defaults: `coreAddress = core.inflexionCore`, `npmAddress = npm`,
+`chainId = 421614`. It caches `loadParams` and per-market
+configs — both immutable after market freeze.
+
+`MmClientOptions`:
+
+<ParamField path="publicClient" type="PublicClient" required>
+  viem read client. Required for any on-chain read.
+</ParamField>
+<ParamField path="walletClient" type="WalletClient (optional)">
+  Write client for [`cancelNonces`](#cancelnonces). Absent ⇒ `cancelNonces`
+  throws `MmQuoteError('no-signer')`.
+</ParamField>
+<ParamField path="coreAddress" type="Address (optional)">
+  Override the `InflexionCore` address (defaults to the registry).
+</ParamField>
+<ParamField path="npmAddress" type="Address (optional)">
+  Override the Uniswap NPM address (defaults to the registry).
+</ParamField>
+<ParamField path="chainId" type="number (optional)">
+  EIP-712 domain `chainId` for quote signing. Defaults to `421614`.
+</ParamField>
+
+## Method reference — at a glance
+
+R = read, W = write (tx), sign = signs but sends no tx, build = returns unsent
+calldata, poll = returns a `StreamHandle`.
+
+| Method | Args | Returns | R/W | Contract fn(s) |
+| --- | --- | --- | --- | --- |
+| [`getLoadParams`](#getloadparams) | — | `Promise<LoadParams>` (cached) | R | Core `loadParams` |
+| [`getMarketConfig`](#getmarketconfig) | `marketId` | `Promise<MarketConfig \| undefined>` | R | Core `markets` (`undefined` if `token0 == 0`) |
+| [`getMarketPricing`](#getmarketpricing) | `marketId, geometry` | `Promise<MarketPricingResult>` | R | **ONE multicall**: FVO `fairPremium` + ConvexityVault `inventory` + VolOracle `sigmaRef`; load via TS port |
+| [`getPoolLoadToBeat`](#getpoolloadtobeat) | `marketId` | `Promise<PoolLoadTick>` | R | multicall `inventory` + `sigmaRef` (geometry-free); TS-port load |
+| [`streamPoolLoadToBeat`](#streampoolloadtobeat) | `marketIds, onTick, opts?` | `StreamHandle` | R (poll, 4s) | per-market `getPoolLoadToBeat` |
+| [`getSigmaRef`](#getsigmaref) | `token` | `Promise<bigint \| undefined>` | R | VolOracle `sigmaRef` |
+| [`getSigmaComponents`](#getsigmacomponents) | `token` | `Promise<SigmaComponents \| undefined>` | R | VolOracle `sigmaComponents` |
+| [`getPositionGeometry`](#getpositiongeometry) | `tokenId, durationSeconds` | `Promise<{priceable:true,…} \| {priceable:false,reason}>` | R | NPM `positions`, TickMath, OracleManager `getPrice`, Core `oracleDerivedSqrtPriceX96`, ILMath |
+| [`getBook`](#getbook) | `mm, opts?` | `Promise<BookResult>` | R | Core `nextSwapId`/`swaps` scan; ILMath greeks if requested |
+| [`greeksForSwap`](#greeksforswap) | `swapId` | `Promise<Greeks \| undefined>` | R | finite-diff ILMath `computeIL` over ±1% P0 |
+| [`signQuote`](#signquote) | `privateKey, quote, opts?` | `Promise<SignQuoteResult>` | **sign** | EIP-712 (engine signer) + I10 + below-pool guards |
+| [`quoteStream`](#quotestream) | `QuoteStreamOptions` | `StreamHandle` | sign loop (5s) | reads pool load, builds/signs/publishes each tick |
+| [`isQuoteFilled`](#isquotefilled) | `mm, nonce` | `Promise<NonceStatus>` (coarse) | R | Core `isNonceUsed` |
+| [`watchFills`](#watchfills) | `mm, onFill, opts?` | `StreamHandle` | R (log poll, 6s) | `SwapCreated` logs filtered by `mm` (coarse) |
+| [`cancelNonces`](#cancelnonces) | `nonces` | `Promise<Hex>` (txHash) | **W** | Core `cancelNonces` (throws `no-signer` w/o wallet) |
+| [`buildCancelNoncesTx`](#buildcancelnoncestx) | `nonces` | `{to,data,value}` | build | Core `cancelNonces` calldata |
+| [`capacityRemaining`](#capacityremaining) | `quoteId, maxNotionalV0` | `Promise<{available,…}>` | R | Core `consumedNotional` (I7) |
+| [`getMmCollateral`](#getmmcollateral) | `mm` | `Promise<{deposited,locked,available} \| undefined>` | R | UnderwriterVault `deposited`/`locked`/`availableBalance` |
+
+**Exported standalone utils:**
+
+```ts
+import { encodeNonce, decodeNonce, wadToBps } from '@inflexion/sdk'
+
+encodeNonce(word: bigint, bit: number): bigint    // = (word << 8n) | BigInt(bit) ; bit ∈ [0,255], else throws MmQuoteError('bad-nonce')
+decodeNonce(nonce: bigint): { word: bigint; bit: number }  // = { word: nonce >> 8n, bit: Number(nonce & 0xffn) }
+wadToBps(wad: bigint): bigint                      // = (wad * 10000n) / 1e18n  (floor)
+```
+
+---
+
+## Cached config reads
+
+### `getLoadParams`
+
+```ts
+getLoadParams(): Promise<LoadParams>
+```
+
+Decodes `InflexionCore.loadParams()` and caches the result (immutable after
+freeze — read once, reused thereafter). Used by every guard and
+every load computation.
+
+`LoadParams` — all `*Bps` are integer `bigint`, all `*Wad` are
+1e18-scaled:
+
+```ts
+interface LoadParams {
+  baseLoadCalmBps: bigint
+  baseLoadNormalBps: bigint
+  baseLoadStressedBps: bigint
+  regimeCalmBelowWad: bigint    // σ_ref < this ⇒ 'calm'
+  regimeStressedAtWad: bigint   // σ_ref ≥ this ⇒ 'stressed'
+  utilKneeWad: bigint
+  utilSlopeWad: bigint
+  utilPowerWad: bigint
+  utilCapWad: bigint
+  dispSlopeWad: bigint
+  dispPowerWad: bigint
+  dispCapWad: bigint
+  maxLoadBps: bigint            // the I10 cap — loadBps may never exceed this
+}
+```
+
+<Warning>
+**Throws on no-RPC** (until the first successful read caches it).
+
+- **Limit:** the first call needs a live read client; without one it rejects.
+- **Why:** the load params are the protocol's authoritative price-cap config —
+  the SDK reads them on-chain rather than embedding a stale copy.
+- **Mitigation:** construct the SDK with a working RPC; thereafter the value is
+  cached and every dependent guard ([I10](#signquote), the load stack) is offline-fast.
+</Warning>
+
+### `getMarketConfig`
+
+```ts
+getMarketConfig(marketId: Hex): Promise<MarketConfig | undefined>
+```
+
+Decodes `InflexionCore.markets(marketId)`; returns `undefined` when the market is
+unregistered (`token0 == address(0)`). Cached per `marketId` (immutable).
+
+`MarketConfig`:
+
+```ts
+interface MarketConfig {
+  marketId: Hex
+  token0: Address
+  token1: Address
+  fee: number
+  durationSeconds: number
+  oracleToken: Address
+  token0Decimals: number
+  token1Decimals: number
+  oracleDecimals: number
+  active: boolean
+}
+```
+
+---
+
+## Pricing
+
+### `getMarketPricing`
+
+```ts
+getMarketPricing(marketId: Hex, geometry: PricingGeometry): Promise<MarketPricingResult>
+```
+
+The full pricing row — fair value + the decomposed pool *load to beat* — in
+**one multicall**: `FairValueOracle.fairPremium` + `ConvexityVault.inventory` +
+`VolOracle.sigmaRef`, finished with the [parity-locked TS port](/sdk/cvamm-port)
+of the load stack. The Φ-sum `fairPremium` is
+[read on-chain, never reimplemented](/concepts/fair-value); only the
+deterministic load stack is mirrored off-chain (the deployed `CvammPricing` lib
+is delegatecall-only). Returns a typed degraded result on any revert — never throws.
+
+`PricingGeometry` input:
+
+<ParamField path="aWad" type="bigint" required>
+  $a = (\sqrt{P_a}/\sqrt{P_0})^2$ in WAD — lower range bound as a squared price ratio.
+</ParamField>
+<ParamField path="bWad" type="bigint" required>
+  $b = (\sqrt{P_b}/\sqrt{P_0})^2$ in WAD — upper range bound as a squared price ratio.
+</ParamField>
+<ParamField path="durationSeconds" type="bigint" required>
+  Protection tenor; selects the duration the FairValueOracle prices.
+</ParamField>
+<ParamField path="maxIL" type="bigint" required>
+  Position MaxIL in numéraire raw (dUSDC, **6 decimals**) — scales the dollar premium.
+</ParamField>
+<ParamField path="oracleToken" type="Address (optional)">
+  σ_ref token; defaults to the resolved `market.oracleToken`.
+</ParamField>
+
+`MarketPricingResult` is a discriminated union:
+
+```ts
+type MarketPricingResult =
+  | ({ available: true; marketId: Hex } & MmMarketPricing)
+  | { available: false; marketId: Hex; reason: PricingDegradeReason; detail?: string }
+```
+
+`MmMarketPricing`:
+
+```ts
+interface MmMarketPricing {
+  fairPremium: bigint      // USDC 6-dec, Stylus FVO view
+  fairRateWad: bigint      // WAD = FairPremium / MaxIL
+  sigmaRefWad: bigint      // WAD, the σ_ref priced against
+  poolPremium: bigint      // ceil(FairPremium·(1+totalLoad)) capped at MaxIL (USDC 6-dec)
+  maxIL: bigint            // the caller's input MaxIL (USDC 6-dec)
+  load: LoadBreakdown      // decomposed + I10-clamped total (WAD)
+  totalLoadBps: bigint     // the geometry-INDEPENDENT "load to beat"
+  baseLoadWad: bigint
+  utilSkewWad: bigint
+  dispSkewWad: bigint
+  util: bigint             // pool utilization (WAD)
+  conc: bigint             // pool concentration / HHI (WAD)
+  regime: Regime           // 'calm' | 'normal' | 'stressed'
+}
+```
+
+The pool premium is exactly the on-chain `_pricePathA` expression:
+
+$$
+\text{poolPremium} \;=\; \min\!\Bigl(\, \bigl\lceil \text{fairPremium}\cdot(1 + \text{totalLoad}) \bigr\rceil,\; \text{MaxIL} \Bigr)
+$$
+
+`LoadBreakdown` and `Regime`:
+
+```ts
+interface LoadBreakdown {
+  baseLoadWad: bigint   // σ_ref regime band
+  utilSkewWad: bigint   // utilisation skew, convex above the knee
+  dispSkewWad: bigint   // HHI dispersion skew
+  totalLoadWad: bigint  // I10-clamped sum (≤ maxLoadBps in WAD)
+}
+type Regime = 'calm' | 'normal' | 'stressed'
+```
+
+`PricingDegradeReason`:
+`'no-rpc' | 'market-unknown' | 'vol-uninitialized' | 'fair-premium-revert' | 'inventory-revert'`.
+
+```ts
+import { cvamm } from '@inflexion/sdk'
+
+const { aWad, bWad } = cvamm.abFromSqrt(sqrtP0X96, sqrtPaX96, sqrtPbX96)
+const pricing = await mm.getMarketPricing(marketId, {
+  aWad,
+  bWad,
+  durationSeconds: 604_800n,    // 7 days
+  maxIL: 1_669_240_000n,        // $1,669.24 in dUSDC 6-dec raw
+})
+if (pricing.available) {
+  console.log(pricing.fairPremium, pricing.poolPremium, pricing.totalLoadBps, pricing.regime)
+}
+```
+
+### `getPoolLoadToBeat`
+
+```ts
+getPoolLoadToBeat(marketId: Hex): Promise<PoolLoadTick>
+```
+
+The first-class streamable signal: the **geometry-free pool floor** an MM must
+undercut. One multicall of `ConvexityVault.inventory()` + `VolOracle.sigmaRef`,
+finished by the TS-port load stack — **no position geometry needed**, because the
+*load* (a percentage spread over `FairPremium`) is geometry-independent.
+This is the mechanical face of [MaxIL fungibility](/concepts/maxil):
+appetite, not position, is what an MM expresses.
+
+$$
+\text{totalLoad} \;=\; \underbrace{\text{baseLoad}}_{\sigma_{\text{ref}}\text{ regime band}}
+\;+\; \underbrace{\text{utilSkew}}_{\text{util, convex above the knee}}
+\;+\; \underbrace{\text{dispSkew}}_{\text{HHI dispersion}}
+\quad\text{(clamped to } \text{maxLoadBps} = \text{I10})
+$$
+
+`PoolLoadTick` — the optional fields are present only when
+`available: true`:
+
+```ts
+interface PoolLoadTick {
+  marketId: Hex
+  ts: number                 // snapshot ms (client clock)
+  available: boolean
+  sigmaRefWad?: bigint
+  util?: bigint
+  conc?: bigint
+  load?: LoadBreakdown
+  totalLoadBps?: bigint      // the headline: total pool load in bps
+  regime?: Regime
+  reason?: PricingDegradeReason | 'load-revert'
+  detail?: string
+}
+```
+
+```ts
+const tick = await mm.getPoolLoadToBeat(marketId)
+if (tick.available) {
+  console.log(tick.totalLoadBps)                            // bps floor to beat, e.g. 540n
+  console.log(tick.baseLoadWad ?? tick.load?.baseLoadWad)   // WAD decomposition via load
+  console.log(tick.util, tick.conc, tick.regime)
+}
+```
+
+### `streamPoolLoadToBeat`
+
+```ts
+streamPoolLoadToBeat(
+  marketIds: readonly Hex[],
+  onTick: (tick: PoolLoadTick) => void,
+  opts?: { intervalMs?: number },     // default 4_000
+): StreamHandle
+```
+
+Polls each market's `getPoolLoadToBeat` on a loop (4 s default). The callback
+fires **once per market per tick** with a single `PoolLoadTick` argument (the tick
+carries its own `marketId`) — available *or* typed-degraded. Never throws inside
+the loop.
+
+```ts
+const handle = mm.streamPoolLoadToBeat(
+  [marketIdA, marketIdB],
+  (tick) => {
+    if (tick.available) requoteIfFloorMoved(tick.marketId, tick.totalLoadBps!)
+  },
+  { intervalMs: 4_000 },
+)
+// later: handle.stop()
+```
+
+`StreamHandle`: `{ stop: () => void }` — every streaming method
+returns this.
+
+---
+
+## Vol oracle reads
+
+### `getSigmaRef`
+
+```ts
+getSigmaRef(token: Address): Promise<bigint | undefined>
+```
+
+`VolOracle.sigmaRef(token)` (WAD). Degrades to `undefined` if the token is
+uninitialized (the getter reverts).
+
+### `getSigmaComponents`
+
+```ts
+getSigmaComponents(token: Address): Promise<SigmaComponents | undefined>
+```
+
+`VolOracle.sigmaComponents(token)` — the EWMA inputs and which one binds.
+Degrades to `undefined` on revert.
+
+`SigmaComponents`:
+
+```ts
+interface SigmaComponents {
+  sigmaShortWad: bigint
+  sigmaLongWad: bigint
+  floorWad: bigint
+  binding: 0 | 1 | 2   // which input binds σ_ref: 0=short EWMA, 1=long EWMA, 2=floor
+}
+```
+
+<Info>
+`binding` (which σ source binds) is **distinct** from the load `regime`
+(calm/normal/stressed). `regime` is derived from σ_ref vs the `loadParams` regime
+bands, not from `sigmaComponents.binding`. See
+[σ_ref](/math/sigma-ref).
+</Info>
+
+---
+
+## Position geometry (for \$ display)
+
+### `getPositionGeometry`
+
+```ts
+getPositionGeometry(tokenId: bigint, durationSeconds: number): Promise<
+  | { priceable: true; geometry: PositionGeometry; marketId: Hex; config: MarketConfig }
+  | { priceable: false; reason: PricingDegradeReason | 'oracle-degraded' | 'position-unknown'; detail?: string }
+>
+```
+
+Resolves the exact geometry of a v3 position: reads `NPM.positions`
+for ticks + liquidity, derives `marketId` from `(token0, token1, fee, durationSeconds)`,
+pins `P0` from `InflexionCore.oracleDerivedSqrtPriceX96`, and computes `a/b` + entry
+amounts + MaxIL **on-chain** via ILMath. `durationSeconds` is **required** — a position
+alone has no expiry, so the duration is what lines up the `marketId` and the FVO
+duration. Returns a typed degrade on an oracle revert or unrecognized position; never
+throws.
+
+`PositionGeometry`:
+
+```ts
+interface PositionGeometry {
+  tokenId: bigint
+  token0: Address
+  token1: Address
+  fee: number
+  tickLower: number
+  tickUpper: number
+  liquidity: bigint
+  sqrtPaX96: bigint
+  sqrtPbX96: bigint
+  sqrtP0X96: bigint      // entry sqrt price pinned from the oracle
+  aWad: bigint           // (sqrtPa/sqrtP0)²
+  bWad: bigint           // (sqrtPb/sqrtP0)²
+  amount0Entry: bigint   // entry amounts at P0 (raw wei)
+  amount1Entry: bigint
+  maxIL: bigint
+  V0: bigint             // position value in token1 (numéraire) at entry
+}
+```
+
+<Note>
+**Geometry is for display, not for signing.** You sign a per-market quote — the
+[`SignedQuote`](#signquote) carries no `tokenId`. Geometry only lets you show a
+\$ pool premium next to your \$ quote (feed it to [`getMarketPricing`](#getmarketpricing)).
+That is [MaxIL fungibility](/concepts/maxil) in code: appetite is per-market, position is per-NFT.
+</Note>
+
+---
+
+## The book and greeks
+
+### `getBook`
+
+```ts
+getBook(
+  mm: Address,
+  opts?: { fromSwapId?: bigint; swapIds?: readonly bigint[]; withGreeks?: boolean },
+): Promise<BookResult>
+```
+
+Every ACTIVE swap underwritten by `mm` plus aggregate exposure. The live deploy
+has no on-chain `quoteId/nonce → swap` index and the SDK assumes no subgraph, so
+the swap-id set is discovered by **scanning** `swaps(id)` over `[fromSwapId,
+nextSwapId)` (bounded; narrow with `fromSwapId`, or inject a known `swapIds` set).
+Each swap's path is inferred via `mm == convexityVault` (Path A) else Path B. With
+`withGreeks: true`, per-position δ/γ are finite-differenced off the on-chain ILMath.
+Works **today**, no subgraph — a direct on-chain scan.
+
+`BookResult`:
+
+```ts
+type BookResult =
+  | BookResultOk
+  | { available: false; reason: 'no-rpc'; detail?: string }
+
+interface BookResultOk {
+  available: true
+  mm: Address
+  positions: BookPosition[]
+  exposureV0: bigint
+  exposureMaxIL: bigint
+  count: number
+  greeks?: Greeks                       // Σ position greeks — only when withGreeks + ≥1 priced
+  greeksDegraded?: 'oracle-degraded'    // set when withGreeks requested but oracle degraded for all
+}
+```
+
+`BookPosition`:
+
+```ts
+interface BookPosition {
+  swapId: bigint
+  tokenId: bigint
+  lp: Address
+  isPathA: boolean    // true iff mm == convexityVault (the Path-A pool)
+  V0: bigint
+  maxIL: bigint
+  collateral: bigint
+  premium: bigint
+  liquidity: bigint
+  createdAt: bigint
+  expiry: bigint
+}
+```
+
+### `greeksForSwap`
+
+```ts
+greeksForSwap(swapId: bigint): Promise<Greeks | undefined>
+```
+
+Single-swap δ/γ via finite-differencing the deployed `ILMath.computeIL` over ±1%
+of the live oracle `P0`, each leg **capped at MaxIL** (the MM is short the *capped*
+claim). Returns `undefined` if the swap cannot be priced (oracle
+degraded / not active). This is the MM-book fast path: `vega` and `theta` are left
+at `0` — full vol-greeks live in the [GreeksEngine](/sdk-reference/greeks-hedge),
+which finite-differences `FairValueOracle.fairRate`.
+
+`Greeks`:
+
+```ts
+interface Greeks {
+  delta: number   // ∂Payout/∂P0  (per unit price)
+  gamma: number   // ∂²Payout/∂P0²
+  vega: number    // ∂Payout/∂σ  (per unit vol) — 0 from greeksForSwap
+  theta: number   // ∂Payout/∂T  (per year)     — 0 from greeksForSwap
+}
+```
+
+---
+
+## Quote signing
+
+### `signQuote`
+
+```ts
+signQuote(
+  privateKey: Hex,
+  quote: SignedQuote,
+  opts?: { requirePoolCheck?: boolean; verifyingContract?: Address; chainId?: number },
+): Promise<SignQuoteResult>
+```
+
+Signs an EIP-712 `SignedQuote` and **enforces two guards before returning the
+envelope**. The actual EIP-712 signing **delegates to the engine
+signer** (`@inflexion/engine/quote.signQuote`, never reimplemented) — it builds a
+viem account from the raw key, so this path is **server-side only**. For the
+browser, sign with the connected wallet and replicate these guards yourself (see
+the [guide](/sdk/mm-client#b-browser-wagmi-signing) and
+[quote signing](/integrate/quote-signing)).
+
+<Steps>
+  <Step title="I10 — the price cap (hard)">
+    `loadBps ≤ loadParams.maxLoadBps`, else throws `MmQuoteError('i10-exceeded')`
+    ([invariant I10](/security/invariants)). The MM can never out-load the protocol cap.
+  </Step>
+  <Step title="Below-pool — strict beat (soft unless required)">
+    `loadBps < live pool-load-bps` (read via [`getPoolLoadToBeat`](#getpoolloadtobeat)),
+    else `MmQuoteError('not-below-pool')`. If the pool load is unreadable the check is
+    *skipped* and reported as `belowPoolChecked: false` — unless `requirePoolCheck: true`,
+    which makes it throw `MmQuoteError('pool-load-unreadable')`.
+  </Step>
+</Steps>
+
+The `SignedQuote` input — the 13 fields in struct/signing order;
+`quotePrice`, `maxNotionalV0`, `validUntil`, `nonce`
+are `bigint`, the `*Bps` and `model` are plain `number`:
+
+```ts
+interface SignedQuote {
+  mm: Address
+  marketId: Hex            // PER-MARKET, never per-NFT (no tokenId field exists)
+  loadBps: number          // ≤ loadParams.maxLoadBps (I10)
+  minMaxILRatioBps: number
+  maxMaxILRatioBps: number
+  quotePrice: bigint       // uint128 — oracle price signed against (Fork-2 band anchor)
+  priceBandBps: number     // bounded on-chain to [25, 500]
+  model: number            // CollateralModel: FULL=0, PARTIAL=1
+  partialRatioBps: number  // 0 in FULL
+  maxNotionalV0: bigint    // uint128 — capacity ceiling (V0 units)
+  validUntil: bigint       // uint64 — absolute ts; on-chain bound to now + [5,15]s
+  quoteId: Hex
+  nonce: bigint            // uint256 — bitmap (word << 8) | bit
+}
+```
+
+`opts`:
+
+<ParamField path="requirePoolCheck" type="boolean (default false)">
+  Make an unreadable pool load a hard error (`pool-load-unreadable`) instead of skipping the below-pool guard.
+</ParamField>
+<ParamField path="verifyingContract" type="Address (optional)">
+  Override the EIP-712 `verifyingContract` (defaults to `coreAddress`).
+</ParamField>
+<ParamField path="chainId" type="number (optional)">
+  Override the EIP-712 `chainId` (defaults to the client's `chainId`).
+</ParamField>
+
+`SignQuoteResult`:
+
+```ts
+interface SignQuoteResult {
+  envelope: QuoteEnvelope     // { quote, signature } — the on-the-wire unit
+  belowPoolChecked: boolean   // true iff the below-pool guard actually ran
+  poolLoadBps?: bigint        // the pool load the quote was checked against, if read
+  i10Ok: true                 // I10 satisfied (a violation throws, so this is always true)
+}
+```
+
+`QuoteEnvelope`: `{ quote: SignedQuote; signature: Hex }`.
+
+<Warning>
+**`CollateralModel.FULL = 0` is the only supported mode in v1.** `PARTIAL = 1`
+exists in the enum but the contract reverts on it.
+
+- **Limit:** you cannot sign `model: 1` (PARTIAL).
+- **Why:** PARTIAL collateral parameters (first-loss size, floor curve, liquidation
+  buffer) are gated on the Monte-Carlo calibrated risk-parameter set and are **never hardcoded**
+  — the exact failure the audit flagged.
+- **Path forward:** always sign `model: 0`, `partialRatioBps: 0`. PARTIAL is
+  [roadmap, gated on the quant](/protocol/collateral-models).
+</Warning>
+
+```ts
+import { encodeNonce } from '@inflexion/sdk'
+
+const tick = await mm.getPoolLoadToBeat(marketId)
+if (!tick.available) throw new Error('pool floor unreadable; do not quote blind')
+
+const signed = await mm.signQuote(MM_KEY, {
+  mm: MM_ADDRESS,
+  marketId,
+  loadBps: Number(tick.totalLoadBps) - 50,   // undercut the floor by 50 bps
+  minMaxILRatioBps: 0,
+  maxMaxILRatioBps: 10_000,                   // accept any MaxIL/V0 ratio
+  quotePrice: liveOraclePrice,                // bigint — the Fork-2 band anchor
+  priceBandBps: 50,                           // ±0.5%, inside [25, 500]
+  model: 0,                                   // FULL
+  partialRatioBps: 0,
+  maxNotionalV0: 1_000_000_000_000n,          // capacity in V0 units
+  validUntil: BigInt(Math.floor(Date.now() / 1000) + 30),
+  quoteId: ('0x' + 'ab'.repeat(32)) as `0x${string}`,
+  nonce: encodeNonce(0n, 0),                  // (word << 8) | bit
+})
+// signed.envelope = { quote, signature } → publish to the engine
+```
+
+### `quoteStream`
+
+```ts
+quoteStream(opts: QuoteStreamOptions): StreamHandle
+```
+
+The auto-requote loop: each tick reads [`getPoolLoadToBeat`](#getpoolloadtobeat),
+calls `build(poolLoad)` (return `undefined` to skip a tick), signs via
+[`signQuote`](#signquote) (re-enforcing I10 + below-pool), then hands the envelope
+to your **injected** `publish` transport. `MmClient` deliberately does **not**
+depend on `ws` — you own the socket. Degrades silently per tick (a tick whose pool
+load is unreadable, or whose build/sign throws, is skipped and reported via
+`onError`).
+
+`QuoteStreamOptions`:
+
+```ts
+interface QuoteStreamOptions {
+  privateKey: Hex
+  marketId: Hex
+  build: (poolLoad: PoolLoadTick) => SignedQuote | undefined | Promise<SignedQuote | undefined>
+  publish?: (envelope: QuoteEnvelope) => void                 // inject your transport (WS send / HTTP POST)
+  onQuote?: (envelope: QuoteEnvelope, poolLoad: PoolLoadTick) => void
+  onError?: (e: Error) => void
+  intervalMs?: number       // default 5_000
+  verifyingContract?: Address
+  chainId?: number
+}
+```
+
+```ts
+import { encodeQuote } from '@inflexion/sdk'
+
+const handle = mm.quoteStream({
+  privateKey: MM_KEY,
+  marketId,
+  intervalMs: 5_000,                           // re-issue every 5s; each quote valid [5,15]s on-chain
+  build: (poolLoad) => {
+    if (!poolLoad.available) return undefined   // skip — never quote blind
+    return { /* SignedQuote with loadBps = Number(poolLoad.totalLoadBps) - 50, … */ }
+  },
+  publish: async (envelope) => {
+    await fetch(`${ENGINE_URL}/quote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ quote: encodeQuote(envelope.quote), signature: envelope.signature }),
+    })
+  },
+  onError: (err) => console.warn('requote skipped this tick:', err),
+})
+// later: handle.stop()
+```
+
+---
+
+## Fills, capacity, and cancel
+
+### `isQuoteFilled`
+
+```ts
+isQuoteFilled(mm: Address, nonce: bigint): Promise<NonceStatus>
+```
+
+Coarse fill status from `InflexionCore.isNonceUsed(mm, nonce)`. Degrades to
+`spent: false` with a `detail` on a read failure — never throws.
+
+`NonceStatus`:
+
+```ts
+interface NonceStatus {
+  mm: Address
+  nonce: bigint
+  spent: boolean                     // true iff the bitmap bit is set — FILLED OR CANCELLED
+  precision: 'coarse' | 'precise'    // always 'coarse' from this direct read
+  detail: string
+}
+```
+
+<Warning>
+**Fill attribution is coarse on-chain — `isQuoteFilled` cannot tell filled from cancelled.**
+
+- **Limit:** `isNonceUsed` is set on **both** a fill and a cancel, and
+  `SwapCreated`/`SwapRouted` carry no `quoteId`/`nonce`, so the only honest direct
+  read is "nonce spent: filled-or-cancelled" (`precision: 'coarse'`).
+- **Why:** the on-chain settlement core stays minimal; precise attribution belongs
+  in the indexer, not the hot path.
+- **Path forward:** the **precise** path is the now-live `QuoteFilled` event
+  (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy.
+  It becomes queryable once the subgraph indexes it — history
+  degrades to a typed pending state, never an error.
+</Warning>
+
+### `watchFills`
+
+```ts
+watchFills(
+  mm: Address,
+  onFill: (fill: FillLog) => void,
+  opts?: { intervalMs?: number; fromBlock?: bigint; onError?: (e: Error) => void },  // intervalMs default 6_000
+): StreamHandle
+```
+
+Polls `SwapCreated` logs filtered by the indexed `mm` topic and fires `onFill` per
+new matching log. The event carries `mm` but **not**
+`quoteId/nonce`, so the match to a specific quote is coarse (`attribution:
+'coarse'`). Works **now**; the precise path is the `QuoteFilled` event once indexed.
+Degrades silently on a failed poll (reports via `onError`).
+
+`FillLog`:
+
+```ts
+interface FillLog {
+  swapId: bigint
+  lp: Address
+  mm: Address
+  tokenId: bigint
+  V0: bigint
+  maxIL: bigint
+  premium: bigint
+  blockNumber: bigint
+  txHash: Hex
+  attribution: 'coarse' | 'precise'   // 'coarse' from this SwapCreated watch
+}
+```
+
+<Maturity />
+
+### `capacityRemaining`
+
+```ts
+capacityRemaining(quoteId: Hex, maxNotionalV0: bigint): Promise<
+  | { available: true; quoteId: Hex; remaining: bigint; consumed: bigint; max: bigint; exhausted: boolean }
+  | { available: false; quoteId: Hex; reason: 'no-rpc'; detail?: string }
+>
+```
+
+The [I7](/security/invariants) capacity ledger. `consumedNotional[quoteId]` is the
+on-chain authority, incremented atomically in the effects phase before any external
+call, so concurrent fills cannot over-consume a quote. Degrades to
+`{ available: false }` on a read failure — never throws.
+
+$$
+\text{remaining} \;=\; \max\!\bigl(0,\; \text{maxNotionalV0} - \text{consumedNotional}[\text{quoteId}]\bigr)
+$$
+
+```ts
+const cap = await mm.capacityRemaining(quote.quoteId, quote.maxNotionalV0)
+if (cap.available) console.log(cap.remaining, cap.consumed, cap.max, cap.exhausted)
+```
+
+### `cancelNonces`
+
+```ts
+cancelNonces(nonces: readonly bigint[]): Promise<Hex>
+```
+
+The one **write** `MmClient` owns. Sends `InflexionCore.cancelNonces` from the
+wallet client, flipping **exactly** the bitmap bits you pass (never cancel-all), so
+you revoke precisely the quotes you want. Returns the tx hash.
+Throws `MmQuoteError('no-signer')` if no wallet (or no account) is wired. A
+cancelled bit can never fill — it satisfies the second clause of
+[I7](/security/invariants).
+
+```ts
+import { encodeNonce } from '@inflexion/sdk'
+
+const txHash = await mm.cancelNonces([encodeNonce(0n, 0), encodeNonce(0n, 1)])
+```
+
+### `buildCancelNoncesTx`
+
+```ts
+buildCancelNoncesTx(nonces: readonly bigint[]): { to: Address; data: Hex; value: bigint }
+```
+
+The unsigned `cancelNonces` calldata, for an external signer or a tx preview — no
+wallet required.
+
+---
+
+## MM collateral — the UnderwriterVault flow
+
+### `getMmCollateral`
+
+```ts
+getMmCollateral(mm: Address): Promise<{ deposited: bigint; locked: bigint; available: bigint } | undefined>
+```
+
+Reads the MM's per-MM [`UnderwriterVault`](/protocol/vaults) balances in one
+multicall (`deposited` / `locked` / `availableBalance`). All figures are dUSDC
+**6-dec raw**. Degrades to `undefined` on a failed read.
+
+**Collateral is not part of `signQuote`.** Before any of an MM's quotes can be
+filled, the MM posts collateral via a **separate** ERC-20 approve + deposit to the
+UnderwriterVault — `MmClient` only *reads* the state, it never writes the deposit.
+On a Path-B fill the contract requires `availableBalance(mm) ≥ maxIL` and **locks
+`maxIL` of the MM's own collateral**; at settlement the LP is paid
+$\min(\text{realized\_IL}, \text{MaxIL})$ from that locked collateral — never
+protocol funds. The standing invariant is [I5](/security/invariants):
+`locked[mm] ≤ deposited[mm]` by construction.
+
+```ts
+const col = await mm.getMmCollateral(MM_ADDRESS)
+if (col) console.log(col.deposited, col.locked, col.available)  // all dUSDC 6-dec raw
+```
+
+| Action | Vault / spender | Flow | Decimals |
+| --- | --- | --- | --- |
+| MM collateral deposit | **UnderwriterVault** | separate ERC-20 approve + deposit (NOT in `signQuote`) | dUSDC 6-dec |
+| `cancelNonces` | **InflexionCore** | no approval | — |
+
+---
+
+## Errors
+
+`MmQuoteError` — the typed error every guard and write throws:
+
+```ts
+type MmQuoteErrorCode =
+  | 'i10-exceeded'         // loadBps > loadParams.maxLoadBps
+  | 'not-below-pool'       // loadBps ≥ live pool-load-bps
+  | 'pool-load-unreadable' // pool load unreadable AND requirePoolCheck:true
+  | 'no-signer'            // cancelNonces with no wallet/account
+  | 'bad-nonce'            // encodeNonce bit ∉ [0,255]
+
+class MmQuoteError extends Error {
+  readonly code: MmQuoteErrorCode
+}
+```
+
+```ts
+import { MmQuoteError } from '@inflexion/sdk'
+
+try {
+  await mm.signQuote(MM_KEY, quote)
+} catch (e) {
+  if (e instanceof MmQuoteError && e.code === 'not-below-pool') {
+    // your load did not undercut the live floor — widen, then retry
+  }
+}
+```
+
+## Degradation envelope cheat-sheet
+
+| Method | Healthy | Degraded |
+| --- | --- | --- |
+| `getMarketPricing` | `{ available: true, … }` | `{ available: false, reason: PricingDegradeReason }` |
+| `getPoolLoadToBeat` | `{ available: true, totalLoadBps, … }` | `{ available: false, reason }` |
+| `getMarketConfig` / `getSigmaRef` / `getSigmaComponents` / `getMmCollateral` | value | `undefined` |
+| `getPositionGeometry` | `{ priceable: true, geometry, marketId, config }` | `{ priceable: false, reason }` |
+| `getBook` | `BookResultOk` | `{ available: false, reason: 'no-rpc' }` |
+| `greeksForSwap` | `Greeks` | `undefined` |
+| `isQuoteFilled` / `watchFills` | `precision/attribution: 'coarse'` | always coarse on-chain (see warning) |
+| `capacityRemaining` | `{ available: true, remaining, … }` | `{ available: false, reason: 'no-rpc' }` |
+| `signQuote` / `cancelNonces` | result / txHash | throws `MmQuoteError` |
+
+<Info>
+**Reads degrade; writes throw.** Every MM **read** returns a typed envelope
+(`available`/`priceable`/`undefined`) and never throws on a missing oracle or RPC.
+The two non-read paths — `signQuote` (a guard failure) and `cancelNonces` (a missing
+signer) — throw `MmQuoteError` with a `.code`, because a violated guard or absent
+wallet is a hard programmer error, not a degraded data state. See
+[degradation](/sdk/degradation).
+</Info>
+
+## The two separate claims
+
+The MM rail changes neither guarantee. The settlement core enforces the LP-facing
+guarantee identically for both rails:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to the underwriter — on Path B, the
+market maker posting collateral in its own `UnderwriterVault`:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="MmClient guide" icon="book" href="/sdk/mm-client">
+    The narrative: per-market quoting economics, the end-to-end loop, browser signing.
+  </Card>
+  <Card title="Quote signing reference" icon="key" href="/integrate/quote-signing">
+    The canonical EIP-712 domain, type-string, and verify/recover helpers.
+  </Card>
+  <Card title="Quote helpers" icon="signature" href="/sdk-reference/quote-helpers">
+    encodeQuote / decodeQuote / quoteDigest / verifyQuote signatures.
+  </Card>
+  <Card title="Greeks + hedge types" icon="chart-line" href="/sdk-reference/greeks-hedge">
+    Full vol-greeks (vega/theta) and the three-leg hedge suggestion types.
+  </Card>
+  <Card title="Path B in the protocol" icon="signature" href="/protocol/path-b-mm">
+    The on-chain createSwap gate, capacity (I7), the no-last-look protections.
+  </Card>
+  <Card title="The engine" icon="server" href="/integrate/engine">
+    The Path-B relayer: WS protocol, GET/POST /quote, the freshness gate.
+  </Card>
+</CardGroup>

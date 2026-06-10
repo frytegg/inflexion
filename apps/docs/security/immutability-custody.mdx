@@ -1,0 +1,145 @@
+---
+title: "Immutability, custody & EIP-170"
+description: "Why Inflexion ships no upgrade path, how the LP's position NFT is custodied, and how the EIP-170 24,576-byte code-size limit was resolved in the 2026-06-05 redeploy."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+Three operational facts shape Inflexion's trust surface beyond the [invariants](/security/invariants) and the [two resolved forks](/security/forks):
+
+1. **No upgradability.** Every deployed contract is immutable. Wiring is a one-shot `set → freeze` and there is no admin path to redirect a vault's `core` after the freeze.
+2. **NFT custody is narrow.** The LP's Uniswap v3 position NFT is held by a dedicated vault for the swap's life, accepts deposits only from the canonical position manager, and returns to the LP at settle.
+3. **EIP-170 is satisfied.** The deployed `InflexionCore` is **23,934 B**, under the 24,576-byte contract-code-size limit. An earlier version briefly exceeded it; the resolution is described in full below.
+
+<Note>
+Immutability and custody are part of why **Claim A (no bad debt, FULL)** holds with no trusted operator: settlement runs on-chain against the counterparty's own collateral, with no upgrade key that could rewrite the settle path after the fact.
+
+<ClaimA />
+</Note>
+
+## No upgradability — the one-shot wiring pattern
+
+There is **no proxy, no upgrade beacon, no admin-redirectable logic address.** The contracts deploy once and stay byte-for-byte fixed. The only privileged action is the initial **wiring** of vaults to the core state machine, and that action self-destructs after a single use.
+
+The pattern is a `set...` setter paired with a `freeze...` latch:
+
+- The deployer calls `setCore` on each vault to point it at `InflexionCore`, then calls `freezeCore` to permanently lock that pointer.
+- The same shape applies to the core's own dependency wiring (`setCvamm` / `freezeCvamm`).
+
+After the freeze, **there is no admin path to redirect a vault's `core` address** — a re-wire attempt reverts. This closes the obvious "swap the logic out from under live swaps" attack: once a market is open, the code that will settle it is fixed.
+
+<CodeGroup>
+```solidity UnderwriterVault.sol (Path B)
+// One-shot: wire core once, then freeze permanently.
+// After freezeCore(), setCore reverts — no re-wire path.
+function setCore(address core_) external onlyOwner { ... }
+function freezeCore() external onlyOwner { ... }
+```
+
+```solidity ConvexityVault.sol (Path A)
+// Same shape for the pooled cvAMM vault.
+function setCore(address core_) external onlyOwner { ... }
+function freezeCore() external onlyOwner { ... }
+```
+
+```solidity InflexionCore.sol
+// Core's own dependency wiring follows the identical set → freeze latch.
+// setCvamm / freezeCvamm pattern.
+```
+</CodeGroup>
+
+<Tip>
+Immutability is a deliberate trade against operational flexibility. The cost is that a bug cannot be hot-patched; the benefit is that **the security model has no "trust the upgrade key" footnote.** For a collateralized derivatives market where the payout is enforced by code rather than by an operator, a redirectable `core` would be a contradiction. Mitigation for the rigidity is the depth of pre-deploy review — see [audits](/security/audits) (multi-LLM spec audit + two Slither passes) and the Foundry-fuzzed [invariant suite](/security/invariants).
+</Tip>
+
+## NFT custody — narrow by construction
+
+During a swap the LP's Uniswap v3 position NFT is held by the `ILVault` ERC-721 custody contract. Custody is intentionally narrow so the NFT can be neither hijacked on the way in nor mis-credited on the way out.
+
+<Steps>
+<Step title="Take custody — canonical source only">
+`ILVault.onERC721Received` accepts an NFT **only from the canonical NonfungiblePositionManager** configured at deploy. A token arriving from any other ERC-721 contract is rejected, so a forged "position" NFT cannot be deposited to spoof a swap.
+</Step>
+<Step title="Fees during the swap — recipient is forced">
+While the position is custodied, `claimFees` routes accrued Uniswap fees to a **forced recipient: the registered LP.** The caller cannot redirect fee proceeds; custody never becomes a fee-siphon vector.
+</Step>
+<Step title="Liquidity is snapshotted, not re-read">
+The position's liquidity `L` is stored **once at creation** and settlement uses that stored value — settle never re-reads `positions(tokenId).liquidity`. This is invariant [I6](/security/invariants): an external `increaseLiquidity` on the custodied NFT cannot inflate the computed IL above [MaxIL](/concepts/maxil). See [price pinning](/security/price-pinning) for the companion geometry checks.
+</Step>
+<Step title="Return at settle">
+`returnNFT` hands the position back to the LP at settlement. Custody is for the swap's duration only.
+</Step>
+</Steps>
+
+<Warning>
+**Why custody must take the NFT at all** — settlement pays the LP from the *counterparty's* collateral, and the protocol must guarantee the position's geometry (`Pa`, `Pb`) and liquidity `L` are the ones priced. **The risk** if custody were loose: a forged NFT (wrong issuer) or a post-creation `increaseLiquidity` could distort the payout. **The mitigation** is exactly the narrowness above — issuer check on receive (canonical NPM only), forced fee recipient, and `L` snapshotted at creation (I6) — so neither the deposit nor the in-flight mutation can move the payout.
+</Warning>
+
+| Custody rule | Enforced where | What it blocks |
+| --- | --- | --- |
+| Accept NFTs only from the canonical NonfungiblePositionManager | `ILVault.onERC721Received` | Forged / spoofed position NFTs |
+| `claimFees` recipient forced to the registered LP | `ILVault.claimFees` | Fee siphoning by a third party |
+| `L` stored at creation, settle uses stored value | `InflexionCore` (I6) | `increaseLiquidity` payout inflation |
+| NFT returned to LP at settle | `InflexionCore.returnNFT` | Permanent custody / lock |
+
+## EIP-170 — the resolved size-pass
+
+EIP-170 caps deployed contract bytecode at **24,576 bytes (0x6000)**. `forge build` and `forge test` run on revm, which does **not** enforce the limit — so a too-large contract compiles and passes its entire test suite while still being **undeployable** on a real chain. That gap is exactly the trap Inflexion hit and resolved.
+
+### The history
+
+<Warning>
+**Limit (documentation lag, not a live blocker).** Earlier documentation still reads as though `InflexionCore` is over the EIP-170 limit: adding the data-moat events `SwapPriced` / `QuoteFilled` pushed the contract **+213 B over the 24,576-byte limit, to 24,789 B**. Read in isolation, that note says the contract cannot be deployed.
+
+**Why the note is stale.** It describes the *pre-redeploy* state. `forge build` / `test` (revm) never flagged it because revm ignores EIP-170 — only an actual deploy would have failed. The note was written at the moment the blocker was discovered and was not rewritten after the fix landed.
+
+**Mitigation — resolved at the 2026-06-05 redeploy.** Two changes brought the contract under the limit:
+
+1. **Lowered `optimizer_runs` to 1500** (trading a marginal amount of runtime gas for smaller deployed bytecode).
+2. **Extracted public libraries** — `CvammPricing`, `QuoteVerification`, `SwapMath`, and `TickMath` are deployed as separate `delegatecall` library code rather than inlined into the core.
+
+The deployed `InflexionCore` is now **23,934 B — under the 24,576-byte limit**. The on-chain address registry reflects the resolved deploy; the stale documentation note is flagged rather than papered over. See the running list at [status & caveats](/reference/status-caveats).
+</Warning>
+
+### The numbers
+
+| State | `InflexionCore` size | vs. 24,576 B limit | Deployable? |
+| --- | --- | --- | --- |
+| Pre-redeploy (after moat events added) | **24,789 B** | **+213 B over** | No (`forge`/revm masks it) |
+| After 2026-06-05 redeploy | **23,934 B** | **−642 B under** | Yes — live on Sepolia |
+
+The fix bought roughly **855 B** of headroom (24,789 → 23,934) — the contract now sits comfortably below the ceiling, with the public libraries carrying the extracted math as `delegatecall` code.
+
+<Note>
+A side effect of the library extraction worth knowing for [SDK / parity](/integrate/marketid-parity) and audit purposes: `CvammPricing`, `QuoteVerification`, `SwapMath`, and `TickMath` are **delegatecall-only libraries** — they execute in the caller's storage context and cannot be unit-tested as standalone deployed contracts via live calls. This is reflected in the test suite (a CvammPricing live-parity test was corrected to acknowledge libraries are delegatecall-only). It does not weaken any [invariant](/security/invariants): the extracted code is the same code, just relocated.
+</Note>
+
+### Why this matters for trust
+
+The EIP-170 episode illustrates the project's posture: a limit was hit, the build tooling (revm) did **not** surface it, it was caught before mainnet, fixed deterministically in code, and the one stale documentation note is flagged rather than hidden. No on-chain behaviour changed — the events, the invariants, and the settle path are identical; only the bytecode layout and optimizer setting moved.
+
+## Live, immutable deployment
+
+These are the immutable contracts running on Arbitrum Sepolia (chainId 421614), redeployed fresh on 2026-06-05. Once wired and frozen, none of these addresses can be redirected.
+
+<AddressTable />
+
+For the full registry, decimals, and per-contract roles, see [deployments](/reference/deployments).
+
+## Related
+
+<CardGroup cols={2}>
+<Card title="Invariants I1–I10" icon="shield-check" href="/security/invariants">
+The ten Foundry-fuzzed invariants, including I6 (liquidity immutability) which underpins NFT custody safety.
+</Card>
+<Card title="Price pinning" icon="anchor" href="/security/price-pinning">
+On-chain Chainlink-derived entry/settlement prices and the LP-lies-about-geometry defenses that complement custody.
+</Card>
+<Card title="CEI & reentrancy" icon="rotate-right" href="/security/cei-reentrancy">
+The four-phase create path and status-flip-first settle that keep custody and state transitions atomic.
+</Card>
+<Card title="Status & caveats" icon="clipboard-list" href="/reference/status-caveats">
+The running ledger of known limits — including the stale EIP-170 note — each with its why and mitigation.
+</Card>
+</CardGroup>

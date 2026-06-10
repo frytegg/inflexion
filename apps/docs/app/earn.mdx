@@ -1,0 +1,444 @@
+---
+title: "Earn — deposit to the cvAMM (depositor)"
+description: "Underwrite in-range IL through the pooled cvAMM vault: the capital-not-guaranteed panel, senior vs junior tranches, deposit, request → cooldown → withdraw, and the quant risk surfaces — every caveat framed."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The `/earn` page is where a **depositor becomes an underwriter**. You supply `dUSDC` to the pooled
+**cvAMM vault** (the `ConvexityVault` — Path A, the always-on, signature-free underwriter), and in
+exchange you earn the premium that protected LPs pay to transfer their **in-range** impermanent-loss
+risk. You are taking the other side of an [in-range convexity hedge](/concepts/in-range-convexity-hedge):
+LPs are long the convexity, the pool is short it, and you are paid the volatility-risk premium for
+holding it.
+
+This is **claim B** — and claim B is the opposite of a yield promise. Read the panel below first; it is
+not a footnote.
+
+<ClaimB />
+
+<Note>
+Claim A (LPs are paid in FULL mode — no bad debt, qualified) and claim B (depositor capital is not
+guaranteed) are **separate claims and are never merged**. The no-bad-debt guarantee is to the *protected
+LP*, not to you. See [no bad debt](/concepts/no-bad-debt) for claim A in full, and
+[the tranches](/concepts/tranches) for the waterfall that governs your downside.
+</Note>
+
+**SDK:** `DepositorClient` (`depositor.*`) over the live `ConvexityVault`. Defaults:
+`vault = core.convexityVault`, `usdc = demoUsdc`, `sigmaToken = demoWeth`.
+
+---
+
+## Why this panel sits above everything
+
+The very first thing rendered on `/earn` — above the vault overview, above the deposit box — is the
+**"Capital is NOT guaranteed"** panel. It is deliberately placed first, and it shows by default while
+vault state is still loading. The page does not let you read APY-shaped numbers before you read the risk.
+
+The panel spells out, verbatim, four things you must internalise before depositing:
+
+<Steps>
+<Step title="You are underwriting in-range IL">
+Your capital backs the protocol's promise to pay LPs `min(realized_IL, MaxIL)` while their position is
+in range. You are short the convexity you are being paid for.
+</Step>
+<Step title="Junior is first-loss">
+The junior tranche absorbs underwriting losses **before** the senior tranche is ever touched. If you
+deposit junior, you are the first-loss buffer.
+</Step>
+<Step title="Senior is protected from underwriting loss only">
+Senior is shielded by the on-chain junior-first waterfall — `totalLocked ≤ juniorAssets` — from
+*underwriting* loss. It is **not** protected from the systemic tail (USDC depeg, oracle/settlement
+failure, contract bug).
+</Step>
+<Step title="No-bad-debt is for the LP, not for you">
+The `/earn` disclosure is explicit: the no-bad-debt guarantee *"is for the protected LP, not for you"*.
+Do not read claim A as cover for claim B.
+</Step>
+</Steps>
+
+<Warning>
+**Limit → Why → Mitigation, in one place.**
+
+- **Limit:** depositor capital can be lost. Neither tranche is risk-free.
+- **Why:** you are the underwriter. The protocol pays LPs *from your collateral* at settlement; if
+  realized IL across the book exceeds the premiums collected, the pool takes the loss — junior first,
+  then senior once the buffer is gone, then the systemic tail hits everyone.
+- **Mitigation:** the protocol is **FULL-collateralized at MaxIL per swap** (every open swap is backed
+  exactly to its cap), the payoff is **capped** (`min(realized_IL, MaxIL)`), the load stack prices the
+  risk above the on-chain fair value, and the junior-first waterfall structurally subordinates junior to
+  senior. These bound the *shape* of the loss; they do not eliminate it. Pick your tranche accordingly,
+  and read [the tranches](/concepts/tranches) before sizing.
+</Warning>
+
+---
+
+## Page layout
+
+The page is two regions:
+
+<CardGroup cols={2}>
+<Card title="Left / center — pool-wide state" icon="chart-line">
+**Vault overview** (total / locked / free / utilization, the regime badge, the load stack) +
+**Tranche split** (senior vs junior cards) + **NAV history** (the depositor-risk time series, pending
+the subgraph).
+</Card>
+<Card title="Right rail — your actions" icon="wallet">
+**My position** (your senior + junior NAV, shares, any pending withdrawal) + **Deposit** (pick tranche,
+amount, deposit) + **Withdraw** (request → cooldown → withdraw).
+</Card>
+</CardGroup>
+
+---
+
+## Vault overview (pool-wide)
+
+The overview reads `depositor.getVaultState()`, refetched every 20 seconds. It returns a
+`Degraded<VaultState>` envelope — if the RPC is down it degrades to `no-rpc`; if the vol oracle is
+uninitialised it degrades to `vol-uninitialized`. It never throws.
+
+What it shows:
+
+| Metric | Meaning | Colour cue |
+| --- | --- | --- |
+| **Total assets** | All `dUSDC` underwriting capital in the vault (senior + junior). | — |
+| **Locked** | Collateral backing open swaps — `Σ MaxIL` of active protections. | amber |
+| **Free** | Open capacity, pool-wide fungible — what can still back new fills. | teal |
+| **Utilization** | `locked / total` — how much of the pool is committed. | — |
+| **Regime** | `calm` / `normal` / `stressed`, from σ_ref vs the load bands. | badge |
+
+Below the headline, the **load stack** is decomposed: **σ_ref** (the EWMA
+reference vol), **Concentration** (the HHI, colour-coded), **Base load** (the regime floor), and
+**Total load** — the *price-to-beat*, clamped to `maxLoadBps` (invariant I10) and shown in teal. This is
+the same load stack a Path-B MM must undercut to win a fill, surfaced here so depositors can see the
+premium their capital earns. See [the load stack](/math/load-stack) for the full derivation.
+
+<Info>
+**Free collateral is pool-wide fungible.** `VaultState.lockedByMarket` is a *concentration colour map*
+keyed by caller-supplied marketIds — it is HHI / concentration colour, **not** a per-market budget.
+Your deposited capital can back any market's fills, which is exactly why
+[MaxIL is the unit of risk](/concepts/maxil) that makes positions fungible to the pool.
+</Info>
+
+<Warning>
+**Limit → Why → Mitigation: the load stack can read as "pending".**
+
+- **Limit:** the load-stack row can render a pending note instead of numbers.
+- **Why:** the total load depends on σ_ref from the `VolOracle`; if the oracle is uninitialised or the
+  RPC is degraded, `getVaultState` returns `available: false` with reason `vol-uninitialized`.
+- **Mitigation:** the page renders an honest pending note, not an error, and recovers automatically on
+  the next 20s refetch once the oracle is live. Total assets / locked / free are read directly from the
+  vault and remain visible; only the load decomposition needs the vol oracle.
+</Warning>
+
+---
+
+## Senior vs junior — the explainer that governs your downside
+
+Two cards render the tranche split. The copy is load-bearing because *which tranche you pick is the
+single biggest risk decision on this page.*
+
+<Tabs>
+<Tab title="Senior — low-variance">
+**"Low-variance · underwriting-loss-protected."**
+
+The senior tranche is structurally protected by the junior-first waterfall (`totalLocked ≤ juniorAssets`)
+from **underwriting loss only**. While junior capital is sufficient to cover all locked collateral,
+senior is never touched by an ordinary IL payout that exceeds premiums.
+
+It earns less of the premium (junior captures most of it) in exchange for that buffer. It is **not**
+risk-free: once the junior buffer is exhausted, senior takes the **systemic tail** — USDC depeg, an
+oracle/settlement failure, a contract bug.
+</Tab>
+<Tab title="Junior — first-loss">
+**"First-loss · captures most of the premium."**
+
+The junior tranche absorbs underwriting losses **before** senior is ever touched, in exchange for most
+of the premium yield. You are the buffer.
+
+There is also a liquidity caveat baked into the contract: a **junior withdrawal can revert
+`JuniorBelowLocked`** while collateral is locked — the protocol will not let junior drain below the
+locked amount, because that would break senior's protection (see [Withdraw](#withdraw-request--cooldown--withdraw)).
+</Tab>
+</Tabs>
+
+Each card shows the tranche's assets and its **% of vault**.
+
+The on-chain mechanism, in one line: junior is subordinated to senior by the
+`totalLocked ≤ juniorAssets` invariant, enforced at withdrawal time so junior cannot drain below the
+locked amount and break senior protection. For the full waterfall and worked loss-attribution numbers,
+read [the tranches](/concepts/tranches).
+
+<Warning>
+**Limit → Why → Mitigation: "protected" is not "risk-free".**
+
+- **Limit:** the senior tranche is described as "underwriting-loss-protected" — that protection has a
+  hard boundary.
+- **Why:** the waterfall (`totalLocked ≤ juniorAssets`) only shields senior *while junior buffers*. It
+  does nothing against the systemic tail: a `dUSDC` depeg, an oracle/settlement failure, or a contract
+  bug hits the collateral itself, beneath the tranche structure.
+- **Mitigation:** FULL collateralization at MaxIL plus the capped payoff bound *underwriting* loss to a
+  known shape, and the junior buffer absorbs it first. Beyond that, your protection is the
+  [trust model](/security/trust-model) and [invariants](/security/invariants), not a guarantee. Use
+  <ClaimB /> as the canonical disclosure on any depositor-facing surface.
+</Warning>
+
+---
+
+## My position
+
+`depositor.getPosition(address)` returns a `Degraded<DepositorPosition>`. It shows your **senior** and
+**junior** rows:
+
+- **Value (NAV)** — your shares converted to assets via `convertToAssets` (the share price moves as the
+  vault earns premium and pays settlements).
+- **Shares** — your raw tranche shares.
+- **Pending withdrawal** — any queued withdrawal with a live unlock countdown.
+
+If you hold no shares, an empty-state invites a deposit.
+
+<Note>
+Your NAV is **mark-to-vault**, not a fixed balance. It can go **down**: when the pool pays an LP more in
+settlements than it collected in premiums, the loss flows through share price — junior first. NAV up is
+premium accrual; NAV down is underwriting loss. This is the direct, visible expression of claim B.
+</Note>
+
+---
+
+## Deposit
+
+The deposit panel defaults to the **junior** tranche. Pick a tranche, type an amount, click **Deposit**.
+Under the hood it calls `depositor.deposit(tranche, raw, { autoApprove: true })`.
+
+<Steps>
+<Step title="Pick a tranche">
+Junior (first-loss, most of the premium) or senior (buffered from underwriting loss, less premium). The
+default is junior. `TRANCHE_ENUM = { senior: 0, junior: 1 }`.
+</Step>
+<Step title="Enter an amount in dUSDC (6-dec raw)">
+`dUSDC` is the numéraire — **6 decimals**. `1 dUSDC = 1_000_000n`. A 10,000 dUSDC deposit is
+`10_000_000_000n` raw. See [addresses & units](/sdk/addresses-units).
+</Step>
+<Step title="Auto-approve to the ConvexityVault (the spender gotcha)">
+With `autoApprove: true`, the SDK reads the ERC-20 `allowance`, and if it is short, sends
+`approve(convexityVault, amount)` — **the spender is the `ConvexityVault`, not `InflexionCore`**. Three
+different actions in the app use three different spenders; mixing them up is the most common integration
+bug. See the table below.
+</Step>
+<Step title="deposit(tranche, amount)">
+The SDK then sends `deposit(tranche, amount)` against the vault. On success the panel shows:
+*"Deposit confirmed. Capital is NOT guaranteed."* — the disclosure is repeated even at the moment of
+confirmation.
+</Step>
+</Steps>
+
+```ts SDK — deposit to the junior tranche
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient })
+const dep = sdk.depositor
+
+// Deposit 10,000 dUSDC (6-dec raw) into the JUNIOR tranche; auto-approve to the VAULT (not Core).
+const res = await dep.deposit('junior', 10_000_000_000n, { autoApprove: true })
+// res.status === 'sent' | 'deferred-no-wallet' | 'error'
+```
+
+<Warning>
+**The recurring spender gotcha — three different spenders.**
+
+| Action | Spender / vault | Approval flow |
+| --- | --- | --- |
+| LP `buyProtection` (premium) | **InflexionCore** | NPM `approve(core, tokenId)` + dUSDC `approve(core, maxPremium)` |
+| **Depositor `deposit`** (this page) | **ConvexityVault** | dUSDC `approve(convexityVault, amount)` then `deposit(tranche, amount)` |
+| MM collateral | **UnderwriterVault** | separate ERC-20 approve + deposit |
+
+Approving the wrong spender means the deposit reverts on transfer. On `/earn` it is always the
+**ConvexityVault**. The hint text in the deposit panel says so explicitly.
+</Warning>
+
+<Tip>
+**Build calldata without sending** — for an external signer or a multisig, use `depositor.buildApprove(amount)`
+and `depositor.buildDeposit(tranche, amount)` to get `{ to, data, value }`. With no `walletClient`,
+`deposit` returns `WriteResult { status: 'deferred-no-wallet' }` carrying the unsigned tx — the write
+degrades, it never crashes at construction.
+</Tip>
+
+---
+
+## Withdraw (request → cooldown → withdraw)
+
+Withdrawals are **two-step and cooldown-gated**. You cannot exit instantly — the cooldown is what keeps
+locked collateral instantly liquid for settlement while still letting depositors leave in an orderly way.
+
+<Steps>
+<Step title="Step 1 — request">
+`depositor.requestWithdrawal(tranche, shares)` queues your shares. A **Max** button fills your owned
+share balance. A pending banner then shows the queued shares plus an unlock countdown.
+</Step>
+<Step title="Wait out the cooldown">
+The cooldown length is read live via `getWithdrawalCooldown` and shown inline. The Step-2 button stays
+disabled until `secondsRemaining === 0n`.
+</Step>
+<Step title="Step 2 — withdraw">
+`depositor.withdraw(tranche)` completes the exit and converts your queued shares back to `dUSDC` at the
+current share price.
+</Step>
+</Steps>
+
+```ts SDK — cooldown-gated withdrawal
+// 1. request (queues shares)
+await dep.requestWithdrawal('junior', 5_000_000_000n)
+
+// 2. …after the on-chain withdrawalCooldown elapses…
+const w = await dep.withdraw('junior')
+// A junior withdraw can revert JuniorBelowLocked → w.status === 'error', surfaced honestly
+```
+
+<Warning>
+**Limit → Why → Mitigation: a junior withdrawal can revert `JuniorBelowLocked`.**
+
+- **Limit:** even after the cooldown, a **junior** withdrawal can revert with `JuniorBelowLocked`. The
+  copy warns: *"A junior withdraw can revert `JuniorBelowLocked` if it would breach senior protection"*.
+- **Why:** this is the waterfall doing its job. The contract enforces `totalLocked ≤ juniorAssets` so
+  that junior can never drain below the locked collateral and leave senior under-buffered. If your
+  withdrawal would break that, it is rejected.
+- **Mitigation:** the SDK surfaces the revert as an `error` `WriteResult` (not a thrown exception), the
+  `useTx` hook trims viem's revert dump to a single readable line, and the withdrawal stays queued — you
+  can complete it once locked collateral is released by settlements (or once more junior capital is
+  deposited). Senior withdrawals are not subject to this gate.
+</Warning>
+
+<Note>
+**Rebalancing between tranches** is a staged write: `depositor.rebalance(from, to, shares)` sends step 1
+(`requestWithdrawal`) immediately and returns steps 2 (`withdraw`) + 3 (`deposit`) **unsent**, to be
+executed across the cooldown. The cooldown applies to a tranche switch too.
+</Note>
+
+---
+
+## NAV history — the depositor-risk surface (honest pending)
+
+The NAV-history chart is the **depositor-risk time series**: how the vault's net asset value per share
+has moved over time — the visible record of premium accrual vs underwriting drawdown. It is rendered from
+`data.getNavHistory({ bucket: '1d' })`.
+
+Today it is **pending**, and the page says so plainly rather than faking a curve.
+
+<Warning>
+**Limit → Why → Mitigation: NAV history is pending.**
+
+- **Limit:** the NAV-history chart shows a typed `PendingNote`, not a line, right now.
+- **Why:** NAV history is **subgraph / API-backed** — it is reconstructed from indexed deposit /
+  withdraw / settlement events, not from a single live `eth_call`. The subgraph deploy is pending
+  (events have been emitted on-chain since deploy block `274081134`), so `getNavHistory` returns an
+  `ApiPending` envelope.
+- **Mitigation:** the SDK never fabricates history. The `ApiPending` envelope names the **exact future
+  route** (`/pool/nav-history`) and the query it will be served from, so the UI renders
+  *"coming from `/pool/nav-history`"* and the surface lights up automatically once the subgraph indexes —
+  zero re-derivation needed. A pending state is a deliberate trust signal, not a bug:
+  [pending ≠ error](/sdk/degradation).
+</Warning>
+
+<Maturity />
+
+---
+
+## The quant risk charts
+
+Everything visible on `/earn` is, at bottom, a **risk surface** — the page is built to let a depositor
+*see the risk they are taking before they take it*:
+
+<AccordionGroup>
+<Accordion title="Utilization & the regime badge — how committed the pool is, right now">
+**Utilization** = `locked / total` shows what fraction of the pool is currently backing open swaps;
+**Locked** (amber) is `Σ MaxIL` of every active protection. The **regime badge**
+(`calm` / `normal` / `stressed`) reads σ_ref against the load bands. Together they tell a depositor
+whether they are entering a quiet book or a stressed one — high utilization in a
+stressed regime means more of your capital is at work against larger expected payouts. This is LIVE via
+RPC.
+</Accordion>
+<Accordion title="The load stack — the premium your capital earns, decomposed">
+σ_ref → Base load (regime floor) → Util skew (convex above the knee) → Disp skew (HHI dispersion) →
+Total load, clamped to `maxLoadBps` (I10). This is the markup over the on-chain fair value that the pool
+charges LPs — i.e. the gross premium that flows to depositors. The shape of this curve is *why* you are
+paid: the load rises with utilization and concentration, pricing the marginal risk your capital absorbs.
+Full derivation: [the load stack](/math/load-stack). This is LIVE via RPC; the deterministic load math
+runs client-side through the parity-locked TS port because the on-chain `CvammPricing` library is
+delegatecall-only.
+</Accordion>
+<Accordion title="NAV history — premium accrual vs underwriting drawdown over time">
+The cumulative answer to "did the premiums outrun the payouts?" — the depositor-risk surface proper.
+**Pending the subgraph** (framed above). When live it carries claim B.
+</Accordion>
+<Accordion title="Where the deeper risk telemetry lives — /data">
+Net gamma (the total convexity the protocol is short, pool + every MM), pool-vs-MM spread, and the
+clearing-load history are part of the [data moat](/concepts/data-moat) and surface on
+[/app/data](/app/data). Net gamma in particular is the systemic-risk readout a serious depositor wants:
+how much convexity the whole protocol is short, and whether `Σ free` covers `Σ locked`. Signal 1
+(clearing-load surface) is LIVE; the rest are structural-now, dynamic-with-volume.
+</Accordion>
+</AccordionGroup>
+
+<Info>
+**What is LIVE vs pending on this page:**
+
+- **LIVE via RPC, no subgraph needed:** vault state (total / locked / free / utilization), the regime
+  badge, the full load stack, σ_ref, your position (NAV / shares), deposit, request, withdraw.
+- **Pending the subgraph:** NAV history (framed above), and the deeper time-series moat signals on
+  [/app/data](/app/data).
+</Info>
+
+---
+
+## Live proof — depositor capital paying an LP, on-chain
+
+The 2026-06-05 redeploy ran a full create → settle lifecycle. On **Path A**, the `ConvexityVault` (the
+pool you deposit into) underwrote and paid an LP entirely from depositor capital:
+
+- swapId 1 &middot; LP tokenId 3220 &middot; V0 **\$270,531.28** &middot; MaxIL **\$1,669.24** &middot; premium
+  **\$9.70** (0.58% of MaxIL) &middot; settled payout **\$148.64** from the `ConvexityVault`.
+
+That single swap is claim B in miniature: the pool collected \$9.70 of premium and paid out \$148.64 of
+realized IL — a net underwriting loss on that swap, absorbed by the pool's capital (junior first). Across
+a healthy book, premiums are sized by the load stack to cover expected payouts with margin; on any
+*individual* swap, the pool can and does pay more than it collected. That is the business you are in.
+
+---
+
+## Deployment & addresses
+
+The vault you deposit into is the **ConvexityVault** at the address below. Never hardcode it — the SDK
+loads every address from the on-chain address registry.
+
+<AddressTable />
+
+See [deployments](/reference/deployments) for the full registry and
+[decimals & units](/reference/decimals-units) for the numéraire conventions.
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+<Card title="The tranches" icon="layer-group" href="/concepts/tranches">
+The senior / junior waterfall, the `totalLocked ≤ juniorAssets` invariant, and worked loss-attribution.
+</Card>
+<Card title="No bad debt (claim A)" icon="shield-check" href="/concepts/no-bad-debt">
+The LP-side guarantee — qualified, and never merged with claim B.
+</Card>
+<Card title="The load stack" icon="chart-column" href="/math/load-stack">
+σ_ref → base → util skew → disp skew → total load: the premium your capital earns, derived.
+</Card>
+<Card title="DepositorClient (SDK)" icon="code" href="/sdk/depositor-client">
+Every method, the degradation envelopes, and the deferred-no-wallet write path.
+</Card>
+<Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+Why MaxIL is both the cap and the unit that makes positions fungible to the pool.
+</Card>
+<Card title="The data moat — risk telemetry" icon="database" href="/app/data">
+Net gamma, clearing-load history, and the deeper depositor-risk surfaces.
+</Card>
+</CardGroup>

@@ -1,0 +1,255 @@
+---
+title: "MaxIL — the cap and the unit of risk"
+description: "Why MaxIL is both the load-bearing payout cap and the unit that makes positions fungible to an underwriter — and why the premium is quoted as a percentage of it."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+MaxIL is the single most important number in Inflexion. It is the maximum in-range impermanent loss of a specific Uniswap v3 position — **pure geometry, computable at creation, frozen for the life of the swap, and identical across all three durations.** Everything the protocol does — collateralizing the trade, pricing it, and making positions interchangeable to an underwriter — is built on top of it.
+
+MaxIL is **three things at once**:
+
+<CardGroup cols={3}>
+  <Card title="(a) The load-bearing cap" icon="shield">
+    Payout is `min(realized_IL, MaxIL)`. Locking collateral `= MaxIL` makes `payout ≤ collateral` true *by construction* — the structural core of [no-bad-debt](/concepts/no-bad-debt).
+  </Card>
+  <Card title="(b) The unit of risk" icon="cubes">
+    MaxIL is L-independent (in the fair-rate sense) and frozen at creation, so positions become **fungible** to an underwriter — which is why MM quotes are [per-market, never per-NFT](/concepts/two-rails).
+  </Card>
+  <Card title="(c) The pricing denominator" icon="percent">
+    The premium is quoted as a *percentage of MaxIL*, not of position value. This is what makes the underwriter indifferent to range width and gives the market full depth.
+  </Card>
+</CardGroup>
+
+<Note>
+The one-line mental model from the math: **MaxIL is pure geometry (the *how much capital*); [`fairRate`](/concepts/fair-value) is pure stochastics (the *how risky*); the load stack is pure inventory state (the *how scarce*). They multiply:**
+
+$$
+\text{premium} = \text{fairRate} \cdot \text{MaxIL} \cdot (1 + \text{load})
+$$
+
+MaxIL carries **none** of the vol/time dependence — that all lives in `fairRate`.
+</Note>
+
+## What MaxIL is
+
+Let price $P$ be the price of token0 in token1 (e.g. ETH measured in USDC). A position is liquidity $L$ over a tick range $[P_a, P_b]$, opened at $P_0$ with the **in-range requirement $P_a \le P_0 \le P_b$ enforced at creation** (out-of-range entries revert `PositionOutOfRange`). In-range impermanent loss is the gap between just holding the entry basket and what the LP position is actually worth:
+
+$$
+\mathrm{IL}(P) = V_{\text{hold}}(P) - V_{\text{lp}}(P)
+$$
+
+MaxIL is the **maximum value that gap takes while price stays in range**:
+
+$$
+\boxed{\;\text{MaxIL} = \max\big(\mathrm{IL}(P_a),\; \mathrm{IL}(P_b)\big)\;}
+$$
+
+`ILMath.computeMaxIL` computes it on-chain. It is **pure geometry** — a function of $(P_a, P_b, L, P_0)$ only, with no vol and no time. See the full IL setup in [the IL formula](/math/il-formula) and the boundary proof in [the MaxIL derivation](/math/maxil-derivation).
+
+### Why the maximum is at a boundary
+
+$\mathrm{IL}(P)$ is **convex on $[P_a, P_b]$**, so it attains its maximum at an endpoint:
+
+- $V_{\text{hold}}(P) = \texttt{amount0\_entry}\cdot P + \texttt{amount1\_entry}$ is **affine** in $P$.
+- In range, $V_{\text{lp}}(P) = L\big(2\sqrt{P} - \sqrt{P_a} - P/\sqrt{P_b}\big)$, so $\dfrac{d^2 V_{\text{lp}}}{dP^2} = -\tfrac14 L\, P^{-3/2} < 0$ ⇒ $V_{\text{lp}}$ is **strictly concave**.
+- $\mathrm{IL} = \text{affine} - \text{concave} = \text{convex}$, and $\max(0, \mathrm{IL})$ (a pointwise max of convex functions) is convex too.
+- A convex function on a compact interval attains its max at an endpoint. ∎
+
+This holds for **any** entry $P_0$ — centered or not. The asymmetry is real and predictable: even for a *ratio*-symmetric range, the convex curve is larger toward the upper boundary, so typically $\text{MaxIL} = \mathrm{IL}(P_b)$. In the canonical fixture $[80, 100, 125]$, $\text{MaxIL} = \mathrm{IL}(P_b{=}125) > \mathrm{IL}(P_a{=}80)$.
+
+---
+
+## (a) MaxIL as the load-bearing cap
+
+The protocol does **not** cover unbounded IL. Above $P_b$ the LP has fully rotated into token1, so $V_{\text{lp}}$ is *constant* while $V_{\text{hold}}$ keeps growing linearly with price — absolute IL is **unbounded beyond the range**. Anything promising to cover that could not be fully collateralized, so it could not be trustless. The protocol therefore covers the **capped** payoff:
+
+$$
+\text{covered\_payoff} = \min(\text{realized\_IL},\; \text{MaxIL})
+$$
+
+Lock exactly `MaxIL` of collateral at creation, and the no-bad-debt argument becomes a three-line construction:
+
+```text
+collateral_FULL = MaxIL                            (locked at creation)
+covered_payoff  = min(realized_IL, MaxIL) ≤ MaxIL  (by construction of the cap)
+∴ payout ≤ collateral = MaxIL                       (no bad debt — invariants I1, I2)
+```
+
+This is **orthogonal to the premium and oracle-independent**: it holds for any price path and any (even wrong) $\sigma$. The relevant settle-path invariants are `I1` (`payout ≤ collateral == MaxIL`), `I2` (`payout == min(realized_IL, MaxIL)`), and `I3` (the guarded, never-underflowing subtraction). See [the invariants](/security/invariants) and [the no-bad-debt math](/math/no-bad-debt-math).
+
+<Tip>
+The cap is **the product, not a defect.** At the range boundary the LP has fully rotated into one asset; IL *beyond* that point is *directional* loss (foregone spot upside), not the *impermanent* loss the LP set out to hedge. Capping at MaxIL keeps the product fully collateralized and trustless. This is exactly why Inflexion is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), **NOT "IL insurance."**
+</Tip>
+
+The cap is also verified empirically. The heavy calibration run measured the payout fraction `min(IL,MaxIL)/MaxIL` over a ±99% (and widened −6…+6 log-move) grid on every simulated path: `max_payout_frac = 1.000000`, zero exceptions — structurally, independent of any oracle.
+
+<ClaimA />
+
+---
+
+## (b) MaxIL as the unit of risk → positions are fungible
+
+MaxIL is **frozen at creation**, **identical across the three durations (7/30/90d)** for a given position, and **`L`-independent in the fair-rate sense** — `fairRate` depends only on $a = P_a/P_0$, $b = P_b/P_0$, $\sigma$, $T$, not on $L$. Those properties together are what make positions **fungible to an underwriter within a market.**
+
+Because every position in a market reduces, for pricing purposes, to a normalized geometry plus a MaxIL, an underwriter does not need to quote each NFT individually. They express a single view over the whole market — and any position that fits fills against it.
+
+<Warning>
+**MaxIL is a collateral / normalization unit, NOT a risk metric.**
+
+Two positions with identical MaxIL can carry very different risk — different distance-to-edge, different delta profile, different probability of touching the cap. Both the pool and MMs price $E_Q[\min(\mathrm{IL}, \text{MaxIL})]/\text{MaxIL}$ for the **specific geometry**, not for MaxIL alone. `MaxIL/V0` is a useful monotone *proxy for width* when displaying or filtering positions, but it is **never** the pricing input — the pricing input is the full on-chain geometry, which is public via `positions(tokenId)`. That public geometry dissolves the old adverse-selection story entirely.
+</Warning>
+
+### Why this means MM quotes are per-market, never per-NFT
+
+This is the direct mechanical consequence of fungibility. The `SignedQuote` struct carries a `marketId` — `keccak256(token0, token1, fee, durationSeconds)` — and **has no `tokenId` field at all**:
+
+```solidity
+struct SignedQuote {
+    address mm;                 // signer; collateral in UnderwriterVault (or EIP-1271)
+    bytes32 marketId;           // keccak(token0, token1, fee, durationSeconds) — PER-MARKET
+    uint16  loadBps;            // load over on-chain FairPremium
+    uint16  minMaxILRatioBps;   // per-market MaxIL/V0 band lower bound
+    uint16  maxMaxILRatioBps;   // per-market MaxIL/V0 band upper bound
+    // ... quotePrice, priceBandBps, model, maxNotionalV0, validUntil, quoteId, nonce
+    // NOTE: there is NO tokenId.
+}
+```
+
+An MM streams a single quote — `(load, MaxIL-ratio band, capacity)` — for an entire `marketId`, and **any** LP position in that market fills against it. At fill, the contract computes the LP's own ratio $\texttt{ratioBps} = \text{MaxIL}\cdot 10^4 / V_0$ and requires it lie in `[minMaxILRatioBps, maxMaxILRatioBps]`, else reverts `RatioOutOfBand`. So an MM expresses "I write positions whose MaxIL is 2%–7% of V0" once, and the contract enforces it per-fill — positions within the band are interchangeable.
+
+<Note>
+Post-pivot, the MaxIL-ratio band is a **convenience filter**, not an asymmetry fix. The old "the LP knows the range and the MM does not, so the MM quotes a band to avoid adverse selection" framing is **void and deleted** — v3 position parameters are public on-chain, so both rails read the exact geometry. See [two rails](/concepts/two-rails).
+</Note>
+
+---
+
+## (c) Why the premium is quoted as a percentage of MaxIL
+
+This is the key pricing innovation, and it follows directly from MaxIL being the unit of risk. The premium is denominated as $X\%$ **of MaxIL** — equivalently, of the underwriter's posted collateral — never as a percentage of position value $V_0$.
+
+Consider the counterfactual. If premium were $X\%$ **of $V_0$**:
+
+<Tabs>
+  <Tab title="Premium = X% of V0 (broken)">
+    Collateral posted is `MaxIL`, but income is tied to `V0`.
+
+    - A **narrow** range has a tiny MaxIL relative to V0 → the underwriter posts little collateral but earns a fat fee → **enormous return on collateral (ROC)**.
+    - A **wide** range has a large MaxIL relative to V0 → the underwriter posts a lot of collateral for the same fee → **insufficient ROC**.
+
+    Result: underwriters **adversely select against wide ranges**. Wide-range LPs cannot find a counterparty at a fair price. **Liquidity fragments.**
+  </Tab>
+  <Tab title="Premium = X% of MaxIL (correct)">
+    Collateral posted is `MaxIL`, and income is `X% · MaxIL`.
+
+    - The underwriter posts collateral `= MaxIL` and earns `X%` ROC **regardless of range width**.
+    - Narrow and wide positions become **equally attractive** to write.
+
+    Result: underwriter **indifference to range width** → no adverse selection → **full depth across all widths.**
+  </Tab>
+</Tabs>
+
+Denominating in MaxIL also makes the two factors of price cleanly separable: $\text{fairRate} = E_Q[\min(\mathrm{IL}, \text{MaxIL})]/\text{MaxIL}$ is a dimensionless **fraction of MaxIL** — an S-curve in $\sigma^2 T$ bounded in $[0, 1]$ — and $\text{FairPremium} = \text{fairRate} \cdot \text{MaxIL}$. Read more on the [pricing stack](/protocol/pricing-stack) and [the load stack](/math/load-stack).
+
+---
+
+## Reference magnitudes — MaxIL as a fraction of V0 by width
+
+These are pure geometry (no vol, no time), for a **geometric-symmetric** range $[\,P_0/(1+w),\; P_0\cdot(1+w)\,]$. They are the verified outputs of `compute_max_il`, and `ILMath` computes them correctly on-chain:
+
+| Range width | MaxIL / V0 (geometric centering) |
+| ----------- | -------------------------------- |
+| ±5%         | **1.27%** |
+| ±10%        | **2.56%** |
+| ±20%        | **5.23%** |
+| ±50%        | **13.76%** (arithmetic centering ±50% → ~18.0%) |
+
+<Warning>
+**Use the table above — older docs carry a stale, ~4.2× too-low set.**
+
+- **Limit:** older centered-range ballparks list `±5% → 0.3%`, `±10% → 1.2%`, `±20% → 4.8%`, `±50% → 25%`.
+- **Why:** that was a documentation transcription bug — the `ILMath` contract **always** computed the correct (higher) values; no code ever shipped the low numbers.
+- **Mitigation:** the table above is the corrected set straight from `compute_max_il`. (The *fixture* table for `[80,100,125]` — `MaxIL = 0.13932023`, ≈6.6% of V0 — is correct and verified.)
+</Warning>
+
+### Worked fixture `[80, 100, 125]`, `L = 1e18` (verified to the wei)
+
+Asserted by the `amounts_fixture_matches_python` / `maxil_fixture_matches_python` tests and mirrored in the Solidity test suite:
+
+| Quantity        | Value (token1 wei, integer)  | ≈ (× 1e18) |
+| --------------- | ---------------------------- | ---------- |
+| `amount0_entry` | `10_557_280_900_008_417`     | 0.01055728 |
+| `amount1_entry` | `1_055_728_090_000_841_200`  | 1.05572809 |
+| `V_hold(P0)`    | `2_111_456_180_001_682_900`  | 2.11145618 |
+| `IL(Pa = 80)`   | `≈ 1.11456e17`               | 0.111456   |
+| `IL(Pb = 125)`  | `139_320_225_002_101_320`    | 0.13932023 |
+| **MaxIL**       | `139_320_225_002_101_320`    | 0.13932023 |
+
+$\text{MaxIL} = \mathrm{IL}(P_b) > \mathrm{IL}(P_a)$ confirms the upper-boundary asymmetry, and $\text{MaxIL}/V_{\text{hold}}(P_0) \approx 6.6\%$. The on-node integer-floor MaxIL sits 1,691 wei from the Python float anchor — inside the 10,000-wei float-vs-integer tolerance; Stylus ≡ Solidity is exact to the wei.
+
+---
+
+## One position, three prices — same MaxIL
+
+This is the property that proves MaxIL carries none of the vol/time dependence. Take a **50,000 USDC** position, ±10% geometric range, $\sigma_{\text{ref}} = 60\%$, `baseLoad = +15%`, skews = 0. MaxIL is **identical for all three durations**; only `fairRate` moves:
+
+| Duration | MaxIL (constant) | fairRate | FairPremium | cvAMM publishes (@ +15%) |
+| -------- | ---------------- | -------- | ----------- | ------------------------ |
+| 7d       | 1,280 USDC (2.56% of V0) | 44.9% | 574 USDC   | 661 USDC (1.32% of V0)   |
+| 30d      | 1,280 USDC (2.56% of V0) | 70.8% | 906 USDC   | 1,042 USDC (2.08% of V0) |
+| 90d      | 1,280 USDC (2.56% of V0) | 82.9% | 1,061 USDC | 1,221 USDC (2.44% of V0) |
+
+Collateral (MaxIL) is constant at 1,280 USDC for all three; the S-curve does all the work. Over 90d the ±10% band is touched ~75% of the time vs ~24% over 7d — so the product carries the **most** convexity value for wide/short positions (cheapest fraction of MaxIL) and the **least** for tight/long (e.g. ±5%/90d: fairRate ≈ 91%, effectively pre-paying a near-certain loss). See [`fairRate` and the S-curve](/concepts/fair-value) and [the full worked example](/math/worked-example).
+
+### Live on-chain confirmation
+
+The 2026-06-05 create→settle lifecycle on the Arbitrum Sepolia stack used a real MaxIL on both rails:
+
+- **Path A (cvAMM):** V0 = \$270,531.28, **MaxIL = \$1,669.24**, premium = \$9.70 (0.58% of MaxIL — a wide/short position, low fairRate), realized IL at settle = \$148.64, payout = \$148.64 ≤ MaxIL, paid from the `ConvexityVault`.
+- **Path B (MM won the route):** **MaxIL = \$3,215.65**, the MM's own collateral locked = MaxIL, realized IL = \$245.66, payout = \$245.66 ≤ MaxIL, paid from `UnderwriterVault`.
+
+On both rails `payout ≤ MaxIL = collateral` held end to end — `I1` and `I2` in production. See live addresses on [the deployments page](/reference/deployments).
+
+<AddressTable />
+
+---
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="Does MaxIL change if the LP adds liquidity after creation?">
+    No. MaxIL is computed from the liquidity `L` **stored at creation** in the `SwapRecord`, and settlement re-reads that stored `L`, never the live NFT (invariant `I6`). Anyone can `increaseLiquidity` on a custodied v3 NFT, but the extra liquidity is simply returned with the NFT at settlement and **cannot inflate payout above MaxIL.** See [the invariants](/security/invariants).
+  </Accordion>
+  <Accordion title="Is MaxIL the worst case an LP can suffer?">
+    No — it is the worst case *while price stays in range*. Beyond the range the LP's absolute IL is unbounded (fully rotated into one asset while a hold position keeps tracking price). That uncovered region is **directional** loss, not impermanent loss, and is deliberately out of scope — covering it would break full collateralization. LPs who want beyond-range protection re-cover after re-ranging.
+  </Accordion>
+  <Accordion title="If two positions have the same MaxIL, are they the same risk?">
+    No. MaxIL is a **collateral / normalization unit, not a risk metric.** Two positions with identical MaxIL can sit at very different distances from the current price and carry very different probabilities of touching the cap. Both the pool and MMs price the specific on-chain geometry — `E_Q[min(IL,MaxIL)]/MaxIL` — not MaxIL in isolation.
+  </Accordion>
+  <Accordion title="Why does the same position get three different premiums?">
+    Because `fairRate` is an S-curve in $\sigma^2 T$ and the three durations (7/30/90d) sit at different points on it, while MaxIL — pure geometry — is frozen and identical across all three. Longer duration ⇒ higher probability the band is touched ⇒ higher fairRate ⇒ higher premium, all backed by the **same** collateral. See [fair value](/concepts/fair-value).
+  </Accordion>
+  <Accordion title="Why quote in MaxIL instead of dollars or % of position value?">
+    Quoting `X% of MaxIL` makes the underwriter's return-on-collateral independent of range width, so they are indifferent to writing narrow vs wide positions — no adverse selection, full depth. Quoting `% of V0` would hand narrow ranges an enormous ROC and starve wide ranges, fragmenting liquidity.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The MaxIL derivation" icon="square-root-variable" href="/math/maxil-derivation">
+    The full boundary proof, the asymmetric-entry case, and the verified fixtures.
+  </Card>
+  <Card title="The IL formula" icon="function" href="/math/il-formula">
+    `V_hold` vs `V_lp`, the three regimes, and the guarded realized-IL subtraction.
+  </Card>
+  <Card title="Fair value & fairRate" icon="chart-line" href="/concepts/fair-value">
+    The exact closed-form Φ-sum that turns geometry + σ + T into a price.
+  </Card>
+  <Card title="No-bad-debt" icon="shield-check" href="/concepts/no-bad-debt">
+    How `payout ≤ collateral = MaxIL` becomes a construction, qualified correctly.
+  </Card>
+</CardGroup>

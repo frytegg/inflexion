@@ -1,0 +1,240 @@
+---
+title: "Before you start"
+description: "Wallet, network, demo tokens, and an eligible in-range v3 position — plus the optional backends and the one mental model that makes the app honest: pending is not error."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The Inflexion dApp is **live on Arbitrum Sepolia (chainId 421614)** against the fresh full redeploy of **2026-06-05**. This page is everything you need before you open a door: a wallet on the right network, the demo tokens, a v3 position that is actually eligible to hedge, and — most importantly — the one piece of mental model that explains why so much of the UI says "pending" without being broken.
+
+If you only read one thing, read [Pending is not error](#pending-is-not-error). It is the trust signal the whole product is built around.
+
+<Note>
+  Three of the six dApp pages **write** to the chain — [Protect](/app/protect) (LP), [Earn](/app/earn) (depositor), and [Underwrite](/app/underwrite) (MM) — and need a connected wallet. Two are **read-only** and need no wallet at all: the [markets browser](/app/markets) and the [data-moat showcase](/app/data). The [dashboard](/app/dashboard) reads for everyone and writes only when you act.
+</Note>
+
+## What you need
+
+<CardGroup cols={2}>
+  <Card title="A wallet on Arbitrum Sepolia" icon="wallet">
+    chainId `421614`. RainbowKit + wagmi + viem. Reads work immediately; writes are gated behind a `ConnectGate`.
+  </Card>
+  <Card title="Demo dUSDC + dWETH" icon="coins">
+    `dUSDC` (6-dec numéraire — premiums and collateral) and `dWETH` (18-dec demo volatile token). Protocol-owned mocks, not Circle's testnet tokens.
+  </Card>
+  <Card title="(To protect) an in-range v3 NFT" icon="shield-halved">
+    A Uniswap v3 position on the seeded dWETH/dUSDC pool (fee 500) that is currently **in range** ($P_a \le P_0 \le P_b$). Out-of-range is rejected at creation.
+  </Card>
+  <Card title="(Optional) the backends" icon="plug">
+    The Path-B engine and the REST API unlock the MM rail and history. Without them the app degrades honestly — it never crashes.
+  </Card>
+</CardGroup>
+
+## Step 1 — wallet and network
+
+Connect any EVM wallet on **Arbitrum Sepolia (chainId 421614)**. The frontend stack is RainbowKit + wagmi + viem.
+
+Every dApp page gates its **write** actions behind a `ConnectGate`; **reads run immediately**, with or without a wallet. Concretely, on `/protect` the gate copy is *"Connect a wallet on Arbitrum Sepolia to view your positions and buy protection"* — but the markets browser, the data showcase, and the premium preview math will already be running before you click connect.
+
+<Steps>
+  <Step title="Switch your wallet to Arbitrum Sepolia">
+    chainId `421614`. If your wallet doesn't have it, add it with RPC `https://sepolia-rollup.arbitrum.io/rpc` and chainId `421614`.
+  </Step>
+  <Step title="Get a little Sepolia ETH for gas">
+    Bridge or faucet a small amount of Arbitrum Sepolia ETH. Gas on the L2 testnet is negligible, but every write (approve, deposit, buy, settle) is a transaction.
+  </Step>
+  <Step title="Connect">
+    Click connect. From here, writes are unlocked; reads were live the whole time.
+  </Step>
+</Steps>
+
+<Warning>
+  **Limit:** if `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` is unset, WalletConnect itself is non-functional.
+
+  **Why:** WalletConnect needs a project id to broker the relay; the app ships a placeholder so it still **builds** without one.
+
+  **Mitigation:** use an injected wallet (e.g. a browser extension) which needs no WalletConnect id, or set `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` to a real id. See [env vars](/reference/env-vars).
+</Warning>
+
+## Step 2 — get demo tokens
+
+Inflexion runs on its own **demo mocks**, not Circle's testnet stablecoin. You need two:
+
+| Token | Decimals | Role | Notes |
+| --- | --- | --- | --- |
+| **dUSDC** | 6 | The numéraire — pays premiums, posts collateral | `1 dUSDC = 1_000_000n` raw. Every premium, collateral amount, `V0`, and MaxIL is 6-dec raw. |
+| **dWETH** | 18 | The demo volatile token | Oracle-priced via Chainlink ETH/USD. Chainlink feeds are **8 decimals**. |
+
+These are a deliberately **numéraire-correct pair**: the mocks are chosen so `dWETH < dUSDC` by address, which forces `token1 = dUSDC = numéraire` in the seeded pool. That is why they are distinct from Circle's testnet USDC/WETH — the canonical Circle pair would order the wrong way.
+
+<Tip>
+  **Where the units bite you.** `dUSDC` is 6-dec, `dWETH` is 18-dec, Chainlink feeds are 8-dec, and ratios (`σ_ref`, loads, regime bands) use WAD = `1e18`. The SDK's `fmtUsd` divides by `1e6`; the oracle price card renders `Number(price) / 1e8`. If a number looks a million-x off, it's almost always a decimals mismatch. See [decimals & units](/reference/decimals-units).
+</Tip>
+
+Mint or claim demo `dUSDC` and `dWETH` to the address you'll connect with. The exact mock addresses live in [the deployments registry](/reference/deployments) — never hardcode them. The seeded amounts in the live deployment were sized for the demo lifecycle (a market maker, for instance, deposited 5,000 dUSDC of collateral).
+
+## Step 3 — what makes a v3 position eligible
+
+This step is **only for protecting** ([the LP door](/app/protect)). Depositors and market makers do not need a position; they supply capital.
+
+To have something to hedge, you need a **Uniswap v3 NFT on the seeded dWETH/dUSDC pool** (`0xfE1Eb4D5796a350B13852F822B3E6a9fDbb858a5`, fee 500) that is **currently in range**. Eligibility is not a soft filter — it is enforced at creation.
+
+<AccordionGroup>
+  <Accordion title="The in-range gate — Pa ≤ P0 ≤ Pb" icon="ruler-horizontal">
+    Inflexion is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), **not** "IL insurance." Entry requires that the current price sit inside the position's range:
+
+    $$P_a \le P_0 \le P_b$$
+
+    Out-of-range positions are **rejected at creation** — the `/protect` empty-state says exactly this: *"Out-of-range positions are not protectable — entry requires Pa ≤ P0 ≤ Pb"*. The in-range requirement is what makes the payoff a clean convexity hedge with a [load-bearing cap](/concepts/maxil); see [why this matters](/concepts/in-range-convexity-hedge).
+  </Accordion>
+  <Accordion title="What the position list actually checks" icon="list-check">
+    The Protect page calls `lp.listEligiblePositions(owner, { durations: [selectedDuration] })`. It enumerates the owner's NonfungiblePositionManager NFTs and computes geometry and MaxIL per position. Each row shows:
+
+    - the **tokenId** (e.g. `#3218`);
+    - an **in-range badge** — teal "in range", amber "out of range", or "oracle degraded" when `inRange` is `undefined`;
+    - **V0** (notional), **MaxIL** (the cap, in amber), and **L** (the stored liquidity) when priceable; otherwise a degraded reason.
+
+    If you have no eligible positions, the empty-state explains the in-range gate rather than showing nothing.
+  </Accordion>
+  <Accordion title="The seeded demo LP — tokenId 3218" icon="seedling">
+    The deploy seeded a **~\$100k unprotected demo LP, `tokenId 3218`**, on the fee-500 dWETH/dUSDC pool. It powers the premium previews and the *illustrative* pricing on [Underwrite](/app/underwrite). You don't own it — mint your own in-range position to actually buy protection — but it's the reference geometry the docs and the app quote against.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  **MaxIL travels with the position, not with the protection price.** MaxIL is pure geometry, frozen at creation, and L-independent in the fair-rate sense — which is exactly what makes positions **fungible** to an underwriter. That is why an MM quote is [per-market, never per-NFT](/protocol/path-b-mm). You'll see MaxIL on every position row before you ever pick a market.
+</Note>
+
+## Step 4 — the optional backends
+
+The protocol's core flows run on **RPC alone**. Two optional services extend it; if either is absent, the app degrades to exactly what RPC can serve — it does not error.
+
+| Service | Env var | What it adds | If unset |
+| --- | --- | --- | --- |
+| **Path-B engine** (MM quote relay) | `NEXT_PUBLIC_ENGINE_URL` | The MM rail — firm signed quotes that can beat the pool | Path B unavailable → `/protect` previews **Path A only**, `premiumB` undefined; `/underwrite` signs but **cannot publish** |
+| **Public REST API** (history) | `NEXT_PUBLIC_API_URL` | Historical and aggregate surfaces | DataClient history surfaces return `{ available: false }` and render a typed pending state |
+| **RPC** | `NEXT_PUBLIC_RPC_URL` | Everything — the transport for all reads/writes | No RPC; all reads fail at the transport layer |
+
+RPC is **not** optional — it is the floor the whole app stands on. The engine and the API are the extensions.
+
+<Warning>
+  **Limit:** without `NEXT_PUBLIC_ENGINE_URL`, the Path-B market-maker rail is dark — LPs see no competing MM quote and MMs can sign but not publish.
+
+  **Why:** Path B is an off-chain quote relay by design. The engine matches firm EIP-712 quotes to LP demand; without it there is simply nowhere for a signed quote to go.
+
+  **Mitigation:** the app falls back to **Path A, the always-on signature-free pool** — [`createSwapRouted`](/protocol/routing) routes to the cheaper rail and **never reverts on a missing or bad MM quote**, it silently uses the pool. And on `/underwrite`, when the engine URL is unset the page renders the **exact wire envelope** the MM would have published, so the signing flow is still fully demonstrable.
+</Warning>
+
+## What is live today
+
+Here is the split between what runs **right now over RPC** and what waits on the subgraph indexer.
+
+<Tabs>
+  <Tab title="Live now (RPC)">
+    - Premium preview and the payoff-with-cap chart
+    - Buy and settle on **Path A** (the cvAMM pool)
+    - Vault deposit / withdraw (depositor)
+    - Market pricing and the current **clearing-load surface**
+    - σ_ref (the reference vol) and the regime badge
+    - The book (on-chain swap scan) and **coarse** fills
+  </Tab>
+  <Tab title="Pending the subgraph">
+    - Per-market history and volume
+    - NAV history
+    - The time-series [data-moat signals](/concepts/data-moat) (Signals 2–5)
+    - Precise MM fill attribution (the `QuoteFilled` join)
+
+    These are not errors — they degrade to a typed `pending` state.
+  </Tab>
+</Tabs>
+
+## Pending is not error
+
+This is the most important thing to internalize before you use the app — and the design principle the whole UI is built around.
+
+**The subgraph is not yet indexed.** The rich on-chain events (`SwapPriced`, `QuoteFilled`, and the lifecycle events) have been emitted on-chain since deploy block `274081134`, but the indexer is still pending deployment. Anything historical, aggregate, or time-series therefore has no data source yet.
+
+What it does **not** do is throw, freeze, or fake a number. Every such surface degrades into a typed, honest state:
+
+<Steps>
+  <Step title="Reads return a typed envelope, never a throw">
+    Any read needing a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders a calm *pending* / *degraded* state — **never an error**.
+  </Step>
+  <Step title="The pending note names its future route">
+    A `PendingNote` prints the reason and, where applicable, the **exact future API route + query** the surface will be served from once the subgraph deploys. It is a promise, not a placeholder.
+  </Step>
+  <Step title="Writes degrade at click-time, not at construction">
+    With no `walletClient`, LP/MM writes throw a clear error only **when you click** (not when the SDK is built); the `DepositorClient` returns `WriteResult { status: 'deferred-no-wallet' }` so an external signer can take the unsigned tx.
+  </Step>
+  <Step title="Live-but-degraded oracle states are honest too">
+    If the live oracle reverts (stale feed / sequencer down), a position is shown as *not priceable now* — the protection still exists and becomes quotable when the oracle recovers, and Buy is disabled rather than producing a wrong number.
+  </Step>
+</Steps>
+
+<Info>
+  **Why it's built this way.** Showing fabricated history looks polished and is dishonest. Crashing on a missing backend looks broken. Inflexion does neither: a missing data source becomes a *typed, self-describing pending state* that tells you precisely what is missing and where it will come from. Treating "pending" as a first-class, honest state — not a bug and not a fake number — is itself the trust signal.
+</Info>
+
+<Maturity />
+
+## A few cross-cutting things to expect
+
+These show up on every write page, so it's worth knowing them up front.
+
+<AccordionGroup>
+  <Accordion title="Three different approval spenders (the recurring gotcha)" icon="key">
+    Approvals do **not** all go to the same contract:
+
+    - **LP premium** → spender is **InflexionCore**
+    - **Depositor deposit** → spender is the **ConvexityVault** (not Core)
+    - **MM collateral** → spender is the **UnderwriterVault**
+
+    These are three distinct spenders. The Protect and Earn flows auto-approve for you; the MM collateral flow is a direct two-tx approve+deposit.
+  </Accordion>
+  <Accordion title="Transaction states" icon="spinner">
+    Every write drives its button through `signing → pending → success / error` via `useTx`, waits for the receipt, and trims viem's verbose revert dumps to the first line so errors are readable.
+  </Accordion>
+  <Accordion title="Addresses always come from the registry" icon="address-book">
+    The app never hardcodes contract addresses — they load from the on-chain address registry via `@inflexion/sdk`. The canonical table:
+
+    <AddressTable />
+  </Accordion>
+</AccordionGroup>
+
+## The two separate guarantees — keep them apart
+
+Before you put any capital in, internalize that Inflexion makes **two distinct claims** that are never merged.
+
+<ClaimA />
+
+<ClaimB />
+
+If you are an **LP** buying protection, Claim A is yours. If you are a **depositor or market maker** supplying capital, Claim B is yours — your capital is at risk; the no-bad-debt guarantee is for the LP you underwrite, not for you.
+
+## Where to go next
+
+You're set up. Pick your door.
+
+<CardGroup cols={2}>
+  <Card title="Protect an LP position" icon="shield-halved" href="/app/protect">
+    Buy in-range IL protection on your v3 NFT. LP / claim A.
+  </Card>
+  <Card title="Earn in the cvAMM" icon="piggy-bank" href="/app/earn">
+    Deposit into the pooled vault — senior or junior tranche. Depositor / claim B.
+  </Card>
+  <Card title="Underwrite as a market maker" icon="gavel" href="/app/underwrite">
+    Post collateral and stream firm per-market signed quotes. MM / claim B.
+  </Card>
+  <Card title="Browse markets (no wallet)" icon="table-cells" href="/app/markets">
+    The 9 markets with live clearing load — fully live over RPC.
+  </Card>
+  <Card title="The data moat (no wallet)" icon="chart-line" href="/app/data">
+    The first public view into the LP volatility-risk premium.
+  </Card>
+  <Card title="Status & caveats" icon="clipboard-list" href="/reference/status-caveats">
+    The full honest ledger of what's live, pending, and why.
+  </Card>
+</CardGroup>

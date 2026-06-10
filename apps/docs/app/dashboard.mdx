@@ -1,0 +1,307 @@
+---
+title: "Dashboard — your portfolio"
+description: "One page across all three roles: aggregated LP protections, dual-tranche depositor positions, and your MM book — with per-card settle and withdraw. Plus an account of the on-chain scan bound and the under-stated-fees read, each with its why and its mitigation."
+---
+
+The Dashboard is the single place a connected wallet sees everything it touches in
+Inflexion, across all three roles at once:
+
+1. **Protections (LP, [claim A](/concepts/no-bad-debt))** — every swap where you are the
+   protected LP, with a per-card **Settle** button at expiry.
+2. **Deposits (depositor, [claim B](/concepts/tranches))** — your senior and junior NAV
+   in the pooled cvAMM vault, with inline **request-withdrawal** and **withdraw**.
+3. **MM Book (market maker, [claim B](/concepts/tranches))** — the swaps you underwrite on
+   [Path B](/protocol/path-b-mm), plus your collateral usage in the `UnderwriterVault`.
+
+Unlike [`/markets`](/app/markets) or [`/data`](/app/data), the Dashboard is **per-user**
+and **write-capable**: it is where the asymmetric actions happen — collect an LP payout,
+queue a tranche exit. It is built on a **bounded on-chain swap scan** rather than the
+subgraph, so it is fully live today within that bound.
+
+<Note>
+**Reads degrade, never throw.** Discovery walks the chain directly (no subgraph yet); any
+read that can't resolve — a reverting oracle, an absent record, the not-yet-indexed
+subgraph — renders a typed `PendingNote` with its reason, never an error. "Pending" is a deliberate trust signal, not a bug.
+See [degradation](/sdk/degradation) and [status & caveats](/reference/status-caveats).
+</Note>
+
+## What you need before it shows anything
+
+<Steps>
+<Step title="Connect on Arbitrum Sepolia">
+The whole page is behind a `ConnectGate`: *"Connect a wallet on Arbitrum Sepolia to see
+your protections, deposits, and MM book"*. Every query is
+`enabled: !!owner` — nothing fetches until a wallet is connected. See [prerequisites](/app/prerequisites).
+</Step>
+<Step title="Have actually transacted">
+The Dashboard is a mirror, not a faucet. It shows protections you bought on
+[`/protect`](/app/protect), deposits you made on [`/earn`](/app/earn), and fills you
+underwrote on [`/underwrite`](/app/underwrite). With no activity, each of the three
+sections renders its own honest empty-state.
+</Step>
+</Steps>
+
+## How discovery works — one bounded scan, three slices
+
+There is no subgraph indexing events yet, so the page cannot ask "give me all of this
+user's swaps." Instead it enumerates the global swap table directly and filters client-side.
+
+The LP slice reads `nextSwapId` to bound the walk, then iterates **downward** from the
+most recent swap for up to `SCAN_LIMIT = 400` ids:
+
+```ts
+const next = await read('nextSwapId')          // swap ids are 1-indexed
+const last = next > 0n ? next - 1n : 0n
+const lo   = last > 400n ? last - 400n + 1n : 1n // bounded window
+
+for (let id = last; id >= lo && id >= 1n; id--) {
+  // 1. cheap pre-filter: raw swaps(id) → decode → match lp == you + status != 0
+  // 2. only then the expensive enriched read (oracle + settle preview)
+}
+```
+
+Each candidate is **cheap-pre-filtered** on the raw `swaps(id)` record — decode it,
+keep only rows where `lp == you` and `status != 0` — *before* paying for the enriched
+`getProtectionStatus`, which touches the oracle and computes a settlement preview. An unreadable id is skipped, not fatal: a single bad row
+cannot break the whole scan. The two underwriter slices
+reuse the same idea — `mm.getBook(owner, { fromSwapId: 1n })` walks the same range
+internally.
+
+The three slices are independent React-Query subscriptions, so a degraded depositor read
+never blanks your LP protections, and vice-versa. A single
+`invalidateAll()` re-fetches everything after any write succeeds.
+
+<Card title="Why a scan, not the subgraph?" icon="magnifying-glass">
+The subgraph is the right tool for *unbounded history and aggregates*; it is not yet
+indexed (events have been emitted on-chain since deploy block `274081134`). Rather than
+block the portfolio behind an offline indexer, the Dashboard reads the chain directly for
+the recent, actionable window — the swaps you can still settle or manage. See
+[the subgraph integration](/integrate/subgraph) and [what's live](/status).
+</Card>
+
+## Section 1 — Protections (LP, claim A)
+
+Each discovered protection is enriched into a `ProtectionStatus` and paired with its
+checkpointed fees, then rendered as a card with its **own** settle transaction state — so
+each row settles independently.
+
+A protection card surfaces the load-bearing facts of the hedge: the cap and the
+[no-bad-debt](/concepts/no-bad-debt) framing. The section note restates the **qualified**
+claim verbatim:
+
+> *LPs are always paid — no bad debt in FULL (capped payout + solvent USDC +
+> oracle/settlement liveness). Payout = `min(realized IL, MaxIL)`; the cap is load-bearing.*
+
+The payout an expired protection pays is exactly:
+
+$$
+\text{payout} \;=\; \min\!\bigl(\text{realized\_IL},\; \text{MaxIL}\bigr)
+\;\le\; \text{collateral} \;=\; \text{MaxIL}
+$$
+
+which is why the cap is what makes the guarantee hold by construction. See the
+[IL formula](/math/il-formula) and the [MaxIL derivation](/math/maxil-derivation).
+
+### Settling at expiry
+
+The **Settle** button on each card calls `sdk.lp.settle(swapId)`.
+The SDK recovers the swap's expiry, walks the Chainlink feed for the round bracketing the
+expiry timestamp if you pass no hint, then submits `settle(swapId, hintRoundId)`. The
+button runs through [`useTx`](/sdk/getting-started) — `signing → pending → success` — and
+trims viem's verbose revert dumps to the first line.
+
+<Note>
+**Settlement is rail-agnostic and identical to [`/protect`](/app/protect).** Whether the
+counterparty is the [cvAMM pool](/protocol/path-a-cvamm) (Path A) or an
+[MM](/protocol/path-b-mm) (Path B), `settle` pays your realized IL — **capped at MaxIL** —
+from the underwriter's collateral, and returns your NFT. The settlement core does not
+branch on the rail; see [the lifecycle](/protocol/lifecycle).
+</Note>
+
+<ClaimA />
+
+## Section 2 — Deposits (depositor, claim B)
+
+This slice reads `depositor.getPosition(owner)` and renders a **senior** and a **junior**
+card side by side, each with **Your NAV** (your shares converted to assets via
+`convertToAssets`), **Shares**, any queued withdrawal with an unlock countdown, and inline
+withdraw controls. The junior card is badged
+**FIRST-LOSS**.
+
+The section note states the risk before any number:
+
+> *You underwrite pooled in-range IL via the dual-tranche cvAMM vault. Capital is NOT
+> guaranteed — junior is first-loss; senior is protected from underwriting loss only, not
+> the systemic tail.*
+
+This is **never merged** with the LP no-bad-debt claim. They are two separate claims:
+[claim A](/concepts/no-bad-debt) is a guarantee to the *LP being paid*; claim B is the
+*depositor's* capital being at risk. The senior tranche's structural protection is
+junior-first only:
+
+$$
+\text{senior protected from underwriting loss while}\quad
+\text{totalLocked} \;\le\; \text{juniorAssets}
+$$
+
+Senior still takes the **systemic tail** (USDC depeg, oracle/settlement failure, contract
+bug) once the junior buffer is exhausted. See [tranches](/concepts/tranches) and the
+[collateral models](/protocol/collateral-models).
+
+### Withdrawing a tranche
+
+Withdrawals are **two-step and cooldown-gated**, exposed inline on each card:
+
+<Steps>
+<Step title="Request withdrawal">
+The **Request withdrawal** button queues your full share balance via
+`sdk.depositor.requestWithdrawal(tranche, shares)`. It
+appears only while `shares > 0n`.
+</Step>
+<Step title="Wait out the cooldown">
+A queued withdrawal shows the share count and an **Unlocks in** countdown. The **Withdraw** button stays disabled until the request
+has matured — `withdraw.secondsRemaining === 0n`.
+</Step>
+<Step title="Withdraw">
+Once matured, **Withdraw** calls `sdk.depositor.withdraw(tranche)`.
+</Step>
+</Steps>
+
+<Warning>
+**Limit — a junior withdraw can revert `JuniorBelowLocked`.**
+**Why** — junior is the first-loss buffer; the vault will not let a junior exit drop
+`juniorAssets` below `totalLocked`, because that would silently strip the senior tranche's
+underwriting-loss protection (`totalLocked ≤ juniorAssets`).
+**Mitigation** — the revert is surfaced cleanly as an error `WriteResult` on the card,
+never a silent failure; it clears as locked collateral is
+released by settlements, or you can exit when utilization is lower. This is the protection
+working as designed. See [tranches](/concepts/tranches) and the
+[invariants](/security/invariants) (I5: `locked ≤ deposited`).
+</Warning>
+
+<ClaimB />
+
+## Section 3 — MM Book (claim B)
+
+The underwriter slice combines two reads: `mm.getMmCollateral(owner)` for the collateral
+card and `mm.getBook(owner, { fromSwapId: 1n })` for your active fills. The section note restates the risk:
+
+> *Active swaps you underwrite (Path B) + your collateral usage. MM capital is NOT
+> guaranteed — you are short the capped IL claim and post collateral == MaxIL per fill.*
+
+### Collateral card
+
+A degraded read or an address with no record renders a `PendingNote` inviting a deposit;
+otherwise the card shows three stats:
+
+| Stat | Meaning |
+|---|---|
+| **Deposited** | total dUSDC posted to the `UnderwriterVault` |
+| **Locked** (amber) | `Σ MaxIL` across your active fills — your committed collateral; sub-labelled **I5: locked ≤ deposited** |
+| **Available** (teal) | free capacity you can still quote against |
+
+The invariant on the card label is [I5 — vault solvency](/security/invariants):
+`locked ≤ deposited`, enforced per-MM on-chain. Each Path-B fill locks **exactly MaxIL**
+of your own collateral — that is what keeps `payout ≤ collateral` true for the swaps you
+write, the [no-bad-debt math](/math/no-bad-debt-math) applied to a single underwriter.
+
+### Active fills
+
+When you have open fills, a panel headers the count and your aggregate exposure — **Σ V0**
+and **Σ MaxIL** (amber) — over a per-swap table of swap / V0 / MaxIL / premium / expiry. Discovery is the same on-chain scan, so the **aggregate
+exposure is exact** for the scanned window. To manage outstanding *quotes* (cancel a nonce
+so it can never fill), go to [`/underwrite`](/app/underwrite) — `cancelNonces` lives there.
+
+<Warning>
+**Limit — fill-to-quote attribution is coarse on-chain.**
+**Why** — the `SwapCreated` event carries the `mm` address but **not** the `quoteId` or
+`nonce`, and a cancelled bit and a filled bit are indistinguishable on the bitmap nonce —
+so an on-chain reader cannot join a fill back to the specific signed quote it came from.
+**Mitigation** — the panel says so explicitly, and your **aggregate** exposure is still
+exact (it is read from the swap records themselves). Precise per-quote attribution arrives
+with the `QuoteFilled`-indexing subgraph, whose event is already emitted on-chain. See [the subgraph](/integrate/subgraph) and
+[Path B](/protocol/path-b-mm).
+</Warning>
+
+<ClaimB />
+
+## The two limits to read honestly
+
+The Dashboard is fully live within two well-understood bounds. Neither is hidden; both are
+named on the page with their reason and path-forward.
+
+<AccordionGroup>
+<Accordion title="The on-chain scan is bounded to the last 400 swaps">
+**Limit.** LP discovery and the MM book walk only the most recent `SCAN_LIMIT = 400` swap
+ids. A protection older than that window will not
+appear here.
+
+**Why.** With no subgraph yet, each id costs RPC reads (a cheap pre-filter plus, on a
+match, an enriched oracle-backed status). An unbounded scan would be slow and could
+rate-limit the public RPC; bounding it keeps the portfolio responsive and is more than
+enough to cover the actionable window — the swaps near or past expiry that you can still
+settle or manage.
+
+**Mitigation.** The section renders an explicit `PendingNote`: *"Discovered by a bounded
+on-chain scan of the last 400 swaps. Full position history (and exact uncollected fees)
+goes live with the subgraph; the on-chain scan works now"*.
+Full, unbounded history is exactly what the [subgraph](/integrate/subgraph) will serve once
+indexed. For the current cohort (a single fresh redeploy on 2026-06-05) every live swap is
+inside the window.
+</Accordion>
+
+<Accordion title="getClaimableFees under-states uncollected LP fees">
+**Limit.** The fees shown on an LP protection card come from `getClaimableFees`, which
+reads the position's **checkpointed `tokensOwed` only** — so it **under-states** the true
+uncollected fee balance.
+
+**Why.** Fees accrued since the last on-chain checkpoint live in the pool's per-position
+fee-growth accumulators and are not materialized into `tokensOwed` until a `collect`/poke
+touches the position. Reading the exact live figure would require replaying fee-growth
+math off-chain.
+
+**Mitigation.** The card frames this as a *floor*, not the answer, and the pending note
+points to the subgraph for the exact figure. Critically, this is a **display-only**
+caveat on a secondary number — it does **not** affect your IL payout. Your hedge payout is
+computed from `min(realized_IL, MaxIL)` at settlement and is unaffected by fee display. Note also that the LP keeps **all** position fee accrual
+throughout the hedge — Inflexion never custodies the fee stream
+(see [the lifecycle](/protocol/lifecycle)).
+</Accordion>
+</AccordionGroup>
+
+<Tip>
+Both bounds above are stated on the page with their *why*
+and their *path-forward*. The full catalogue lives at
+[status & caveats](/reference/status-caveats); the live/pending split is at
+[what's live](/status).
+</Tip>
+
+## Quick reference
+
+| Section | Role / claim | Source read | Per-card write |
+|---|---|---|---|
+| Protections | LP / claim A | scan → `lp.getProtectionStatus` + `lp.getClaimableFees` | `lp.settle(swapId)` |
+| Deposits | Depositor / claim B | `depositor.getPosition` | `depositor.requestWithdrawal`, `depositor.withdraw` |
+| MM Book | Market maker / claim B | `mm.getBook` + `mm.getMmCollateral` | (cancel nonces on [`/underwrite`](/app/underwrite)) |
+
+All discovery is a bounded on-chain swap scan (`SCAN_LIMIT = 400`), live today; precise
+history, aggregates, and exact fees follow the [subgraph](/integrate/subgraph).
+
+## See also
+
+<CardGroup cols={2}>
+<Card title="Buy & settle protection" icon="shield" href="/app/protect">
+The LP flow that creates the protections this page settles.
+</Card>
+<Card title="Deposit into the vault" icon="layer-group" href="/app/earn">
+The depositor flow behind the senior/junior tranche cards.
+</Card>
+<Card title="Underwrite as an MM" icon="signature" href="/app/underwrite">
+Sign firm quotes and cancel nonces — the source of your MM book.
+</Card>
+<Card title="Live deployment addresses" icon="server" href="/reference/deployments">
+Every contract this page reads, on Arbitrum Sepolia.
+</Card>
+</CardGroup>
+
+<Maturity />

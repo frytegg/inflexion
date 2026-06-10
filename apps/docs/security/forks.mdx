@@ -1,0 +1,234 @@
+---
+title: "The two architectural forks"
+description: "How two open audit items were resolved in code — the oracle settlement-liveness deadlock (round-at-T + lone-spike + a 24h backstop, I8) and the no-last-look firm-quote pickoff (a deterministic oracle-anchored price band, I9) — each framed Limit -> Why -> Mitigation."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The multi-LLM spec audit closed twelve issues outright but left **two architectural forks** open — design decisions where the audit could see the failure mode but the correct fix was a genuine fork in the road. Both are now resolved in code, each as a dedicated invariant:
+
+- **Fork 1** — the oracle **settlement-liveness deadlock**, resolved to invariant **[I8](/security/invariants)**.
+- **Fork 2** — the no-last-look **firm-quote pickoff**, resolved to invariant **[I9](/security/invariants)**.
+
+This page walks each fork the way the audit did: the limitation first, then *why* it arises, then the mitigation that ships today. Neither fork touches the [no-bad-debt proof (I1)](/security/overview) — that is structural and oracle-independent. These forks protect **settlement liveness** and **underwriter fairness**, not LP payout integrity.
+
+<Info>
+These were the **two open items** carried forward through spec revisions v3.2 (Fork 1) and v3.3 (Fork 2). Both are fixed and Foundry-fuzzed today.
+</Info>
+
+---
+
+## Fork 1 — the oracle settlement-liveness deadlock
+
+<Warning>
+**Limit -> Why -> Mitigation: a settlement design can deadlock funds permanently if it requires two independent price sources to agree at a single frozen instant.**
+
+- **Limit.** v3.1 settled by pinning the Chainlink **round-at-T** *and* a pinned Uniswap **TWAP** at the same expiry instant, gated by a hard divergence check. If those two froze more than ~2% apart at T, `settle` would revert — **forever**. The price inputs at T never change, so the revert is permanent: funds are locked, with no path to recovery.
+- **Why.** Both inputs are evaluated at a single past timestamp. A hard "they must agree" gate at one frozen instant has no liveness valve — there is no later block at which the same two frozen numbers will start to agree. A transient glitch at exactly T becomes a permanent deadlock.
+- **Mitigation.** Keep the Chainlink round-at-T pin (it preserves fairness and is unique). **Replace** the hard TWAP gate with (a) a Chainlink **lone-spike sanity check** that only defers a *glitched* print, and (b) a **24h liveness backstop** that unconditionally accepts the round once the window elapses. TWAP is demoted to a non-blocking advisory event. This is invariant **[I8](/security/invariants)**, implemented in `OracleManager.getSettlementPrice`.
+</Warning>
+
+### What the audit found
+
+The audit flagged that v3.1's round-at-T-plus-pinned-TWAP scheme could deadlock *permanently*. Both the Chainlink round and the TWAP at T are frozen historical values, so a `>2%` divergence at T would revert `settle` on every future call. A single oracle hiccup at expiry would strand both sides' funds with no recovery path — and that directly threatens the **(c) oracle/settlement liveness** clause of the no-bad-debt guarantee:
+
+<ClaimA />
+
+### The fix in three parts
+
+<Steps>
+<Step title="Pin the Chainlink round-at-T (fairness, unchanged)">
+Settlement price is still the Chainlink round-at-T — the unique round bracketed below by `updatedAt ≤ expiry`. This is what makes settlement *fair*: both LP and MM settle at the same canonical, on-chain-derived price, never a caller-supplied one. See [price pinning](/security/price-pinning) for why the settlement price is derived on-chain, never from calldata.
+</Step>
+<Step title="Lone-spike sanity check (catches glitches, not real moves)">
+The hard TWAP gate is replaced by a **lone-spike check**: the round-at-T is treated as a glitch *only* if it differs from **both** neighbouring rounds by `≥ LONE_SPIKE_BPS = 500` (5%). Real fast moves persist across consecutive rounds and therefore pass — only a single isolated print that disagrees with both sides is deferred. A missing neighbour round across a Chainlink `phaseId` boundary is read **tolerantly** via `_tryRound` (try/catch returning `ok=false` instead of reverting), so a boundary gap degrades to the backstop rather than a permanent lock.
+</Step>
+<Step title="24h liveness backstop (the valve that makes deadlock impossible)">
+Even a genuine lone-spike defers only **until** `block.timestamp ≥ expiry + LIVENESS_WINDOW`. After that 24h window the backstop accepts the round **unconditionally**. This is the liveness valve the v3.1 design lacked: there is always a future block at which `settle` succeeds.
+</Step>
+</Steps>
+
+### Constants and the invariant
+
+The constants live in `OracleManager`; `MAX_STALENESS` is per-token (the Arbitrum Sepolia value is 90,000s):
+
+| Constant | Value | Role |
+| --- | --- | --- |
+| `GRACE_PERIOD` | `3600` (1h) | Sequencer-recovery grace after L2 sequencer downtime |
+| `LIVENESS_WINDOW` | `86_400` (24h) | After this, the backstop accepts the round-at-T unconditionally |
+| `LONE_SPIKE_BPS` | `500` (5%) | A round is "lone" only if it differs from **both** neighbours by this much |
+| `MAX_STALENESS` | per-token (Sepolia 90,000s) | A round older than this relative to T is "stale" |
+
+The invariant statement:
+
+> **I8 — Settlement liveness.** For any swap, under any price path, `settle()` succeeds by `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD` — the lone-spike check never *permanently* locks funds.
+
+Verified by 5 fuzz tests, ~1,280 runs:
+
+```solidity
+testFuzz_I8_settleSucceedsAnywhereInBackstopWindow
+testFuzz_I8_sustainedMoveSettlesImmediately          // real moves pass, no defer
+testFuzz_I8_loneSpikeDefersBeforeBackstop            // glitch defers, then backstop
+testFuzz_I8_sequencerRecoveryRespectsGrace
+test_I8_revertsPastStaleness_boundary                // the boundary documented below
+```
+
+### The resolution window
+
+The I8 *wording* — `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD` — reads as a generous additive sum. The actual usable window is narrower.
+
+<Warning>
+**Limit -> Why -> Mitigation: the real backstop window for a deferred round is ≈ 1 hour wide, not the full additive sum the I8 wording suggests.**
+
+- **Limit.** The literal staleness `require` fires *before* the backstop can recover the round, so the round-at-T is usable only in `[expiry + LIVENESS_WINDOW, expiry + MAX_STALENESS)` — with current constants that is `90,000 − 86,400 = 3,600s ≈ 1 hour` wide.
+- **Why.** `LIVENESS_WINDOW` (24h) opens the backstop; `MAX_STALENESS` (25h on Sepolia) closes the door on the *round-at-T specifically*. The two constants overlap by only an hour, so the round-at-T is recoverable in that overlap and not after.
+- **Mitigation.** This is a **bounded, not a broken, window** — and it is **symmetric for LP and MM**, so fairness is preserved. Past `expiry + MAX_STALENESS` funds still settle: settlement falls through to a *newer* Chainlink round (Arbitrum majors tick frequently on the 0.05% deviation threshold), just not via the exact round-at-T. So funds are never permanently locked; the only consequence of the narrow window is which round prices a glitched expiry. The boundary is asserted directly in `test_I8_revertsPastStaleness_boundary`.
+</Warning>
+
+<Note>
+**This is a documented design behaviour, not a bug.** Surfaced in NatSpec on `OracleManager` and pinned by a boundary test. The gap between the I8 *wording* and the real window is disclosed rather than restated to flatter the prose. The protocol behaviour (funds always settle, fairly, in bounded time) is correct.
+</Note>
+
+### Where the deferral logic lives
+
+```text
+OracleManager.getSettlementPrice          the full round-walking path
+  backstop (unconditional after window)
+  tolerant phaseId-boundary read          via _tryRound
+  staleness boundary (the ~1h window)     NatSpec + boundary test
+```
+
+---
+
+## Fork 2 — the no-last-look firm-quote pickoff
+
+<Warning>
+**Limit -> Why -> Mitigation: firm signed quotes are bearer instruments — a leaked quote can be picked off when volatility gaps, and the off-chain engine's cancel cannot stop a copy that already left.**
+
+- **Limit.** A `SignedQuote` plus a clock-based `validUntil` feeds a one-sided stale-quote pickoff. The signed payload is a **bearer instrument**: it survives in any hand that copied it, beyond the engine's ability to cancel it. When vol gaps, the MM is short convexity and a searcher can submit the leaked bytes on-chain at a price that no longer reflects the market.
+- **Why.** Trustless firm quoting means anyone holding a valid signature can fill it — that is the *feature* (no last-look, no fading). But it is also the attack surface: the off-chain engine can drop a quote from its book, yet it cannot revoke a signature that has already been copied. A pure clock is a weak defense — within the validity window the leaked quote is fully live regardless of price.
+- **Mitigation.** Each `SignedQuote` carries the `quotePrice` (the oracle price the MM saw at signing) plus a `priceBandBps`. At `createSwap` the contract reads the live oracle (the *same* read that pins `P0`) and **auto-voids the quote on-chain, deterministically, if `absBps(P_live, quotePrice) > priceBandBps`**. No MM discretion at fill ⇒ **not last-look**. This is invariant **[I9](/security/invariants)**.
+</Warning>
+
+### What the audit found
+
+The audit flagged that firm quotes plus *any* clock-based validity create a one-sided stale-quote pickoff. The key insight is that **signed payloads are bearer instruments**: they persist beyond the off-chain engine's cancel in any hand that copied them. When volatility gaps, the MM is short convexity and a searcher can submit the leaked bytes on-chain before the MM's intended cancel can take effect. The conventional CeFi answer — "last look", where the MM gets a final option to fade the fill — is **forbidden** by a hard rule, because it undercuts trustlessness and enables exactly the abuse pattern the audit flagged (MM fades at settlement). So the fix had to keep firm quotes *and* protect the MM, without any discretionary path.
+
+### The fix: a deterministic oracle-anchored band
+
+The band check is the **primary** defense; the short validity clock is a secondary leakage-window control.
+
+<Steps>
+<Step title="The quote carries an oracle anchor and a band">
+Every `SignedQuote` includes `quotePrice` (the oracle price the MM observed at signing) and `priceBandBps` (how far the MM is willing to let the live price drift before the quote voids). The quote is **per-market**, never per-NFT — it carries no `tokenId`. See [the MM rail](/protocol/path-b-mm) and [quote signing](/integrate/quote-signing).
+</Step>
+<Step title="createSwap reads the live oracle once — zero extra cost">
+At fill, the contract reads the live oracle price **once** — the *same* read that pins `P0` (`_prepareSwap` sets `g.livePrice = oracle.getPrice(...)`), so the band check adds no extra oracle cost. The deviation is `bandDevBps = oracle.absBps(g.livePrice, quote.quotePrice)`.
+</Step>
+<Step title="Auto-void on-chain, deterministically — not last-look">
+If `bandDevBps > quote.priceBandBps`, `createSwap` reverts with `PriceOutOfBand`. There is **no MM discretion at fill** — the check is pure arithmetic on the live oracle and the signed `quotePrice`. The MM is exposed only to drifts *within* the band it chose (it priced for them), never to gaps that blow through it.
+</Step>
+</Steps>
+
+The deviation condition and bounds:
+
+$$
+\text{revert iff} \quad \text{absBps}\!\left(P_{\text{live}},\; \text{quotePrice}\right) \;>\; \text{priceBandBps}
+$$
+
+| Bound | Value |
+| --- | --- |
+| `PRICE_BAND_MIN_BPS` | `25` (0.25%) |
+| `PRICE_BAND_MAX_BPS` | `500` (5%) |
+| MM default band | `100` (1%) |
+
+```solidity
+// PHASE 2 — CHECKS: I9 oracle-anchored band (deterministic, not last-look)
+uint256 bandDevBps = oracle.absBps(g.livePrice, quote.quotePrice);
+if (bandDevBps > quote.priceBandBps) revert PriceOutOfBand();
+```
+
+`absBps` is the pure helper on `OracleManager`. In [`createSwapRouted`](/protocol/routing) the same logic is mirrored as a **non-reverting boolean**: a quote that drifts out of band is simply not usable, and the router falls back to the always-on pool rather than reverting.
+
+### Tightened validity window — the secondary control
+
+The clock is the *secondary* defense, narrowing the leakage window:
+
+<Warning>
+**Limit -> Why -> Mitigation: a clock alone cannot stop a leaked bearer quote.**
+
+- **Limit.** A wide `validUntil` (the original `[5s, 60s]`) leaves a leaked signature live for up to a minute regardless of price.
+- **Why.** The clock bounds *time*, not *price* — within the window the quote is fully fillable even if the market has moved.
+- **Mitigation.** `validUntil` was tightened to a default **8s**, band **[5s, 15s]** (`VALIDITY_MIN_S=5` / `VALIDITY_MAX_S=15`). But the clock is explicitly the **secondary** control — the **oracle band is the primary** defense. A short clock plus a price band plus on-chain selective nonce invalidation are three independent deterministic mechanisms.
+</Warning>
+
+### Why firm + band beats last-look
+
+| Property | Last-look (rejected) | Firm + oracle band (shipped) |
+| --- | --- | --- |
+| MM fill discretion | Yes — MM can fade at settlement | **None** — band check is pure arithmetic |
+| Trustless | No — discretionary path | **Yes** — deterministic on-chain |
+| Stops the dominant pickoff | Only by letting the MM fade (the abuse pattern) | **Yes** — out-of-band quotes auto-void |
+| Protocol-rule compliant | Forbidden hard rule | **Yes** — no last-look path |
+
+MM protection is therefore **three deterministic on-chain mechanisms**: the oracle band (kills the dominant pickoff), the short `validUntil` (narrows the leakage window), and on-chain selective nonce invalidation (the MM flips one Permit2-style bitmap bit to cancel one quote — see [I7](/security/invariants)).
+
+### Path A has no such vector
+
+<Note>
+[Path A — the cvAMM pool](/protocol/path-a-cvamm) has **no signed quote**, so it has no quote-pickoff vector at all. It prices off the live oracle directly, signature-free. Fork 2 is a Path-B-only concern.
+</Note>
+
+### Acknowledged residuals — framed, not hidden
+
+<Warning>
+**Limit -> Why -> Mitigation: a spot price band does not catch every adverse move.**
+
+- **Vol-only moves.** An implied-vol jump with little spot drift is not caught by a *spot* band. **Why:** the band measures spot deviation, not surface deviation. **Mitigation:** this is a small surface on crypto majors and is mitigated by the short `validUntil`.
+- **Within-band drift.** Drift *inside* the band is borne by the MM. **Why:** the MM *chose* that band and priced for it — that exposure is intended, not a leak. **Mitigation:** none needed; it is the MM's deliberate risk budget.
+- **Oracle lag.** If Chainlink hasn't ticked, the live read can trail the true price. **Why:** the band reads the latest oracle round. **Mitigation:** majors tick on a 0.05% deviation threshold, so lag is small in practice.
+
+None of these are blockers — they are the residual surface that remains *after* the dominant pickoff is closed, disclosed so the MM can size around them.
+</Warning>
+
+### Where the band logic lives
+
+```text
+InflexionCore._prepareSwap              g.livePrice = oracle.getPrice(...)   (single read, pins P0)
+InflexionCore createSwap PHASE 2        bandDevBps check -> revert PriceOutOfBand
+InflexionCore createSwapRouted          same check as non-reverting boolean
+OracleManager.absBps                    pure deviation helper
+InflexionCore validity bounds           validUntil in [VALIDITY_MIN_S, VALIDITY_MAX_S]
+```
+
+Verified by `testFuzz_I9_priceBandViolationReverts` + `testFuzz_I9_priceBandWithinBandAccepts`, 256 runs each, both directions.
+
+---
+
+## How the two forks relate to the rest of security
+
+<CardGroup cols={2}>
+<Card title="They protect liveness and fairness — not the I1 proof" icon="shield-halved">
+Neither fork is part of the [no-bad-debt proof (I1)](/security/overview), which is structural and oracle-independent. Fork 1 guards **settlement liveness** (the (c) clause); Fork 2 guards **MM fairness**.
+</Card>
+<Card title="Both are now numbered invariants" icon="list-check" href="/security/invariants">
+Fork 1 -> **I8**, Fork 2 -> **I9**. Read each invariant's precise statement, why it holds, and the Foundry fuzz test that verifies it.
+</Card>
+<Card title="Fork 2 lives inside the firm-quote / no-last-look design" icon="signature" href="/protocol/path-b-mm">
+The oracle band is the load-bearing reason firm quotes can be trustless without last-look. See [the MM rail](/protocol/path-b-mm) and [quote signing](/integrate/quote-signing).
+</Card>
+<Card title="Both depend on on-chain price pinning" icon="anchor" href="/security/price-pinning">
+The same on-chain Chainlink derivation that pins `P0` and `P_T` (never calldata) is what makes both the round-at-T pin and the single-read band check work.
+</Card>
+</CardGroup>
+
+## Where this is enforced — live
+
+<AddressTable />
+
+The two forks are enforced primarily in `OracleManager` (Fork 1 / I8) and `InflexionCore` (Fork 2 / I9). See [the full deployment registry](/reference/deployments) for every address.
+
+<Card title="Next: the trust model" icon="diagram-project" href="/security/trust-model">
+What the off-chain matcher can and cannot do — and why Path A is immune to it entirely.
+</Card>

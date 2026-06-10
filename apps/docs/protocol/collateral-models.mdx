@@ -1,0 +1,236 @@
+---
+title: "FULL vs PARTIAL (the leverage dial)"
+description: "FULL is launch and the no-bad-debt headline (collateral == MaxIL). PARTIAL is a capital-efficient roadmap mode gated on the quant — every constant driven by the calibrated risk-parameter set, reverting until calibrated."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+FULL and PARTIAL are not two pools and not two products. They are **one dial** on the
+**one** [`ConvexityVault`](/protocol/vaults) — a choice about *how much collateral an
+underwriter posts per unit of [MaxIL](/concepts/maxil)*. Turn the dial all the way to
+collateral $=$ MaxIL and you get FULL: structurally no bad debt, no monitoring, no
+liquidation. Turn it down and you get PARTIAL: more positions per dollar of capital, but
+real bad-debt risk that must be *engineered away* with floors, fees, buffers, and circuit
+breakers — none of which can be invented; all of which come out of the Monte Carlo.
+
+<Note>
+**Today the dial only turns to FULL.** `CollateralModel` is `{FULL, PARTIAL}` in the
+shipped enum, but every create path requires `model == FULL` and PARTIAL reverts
+`UnsupportedModel`. PARTIAL is a *designed-in,
+gated-off* roadmap mode — the gate is the quant, not the code.
+</Note>
+
+## The dial, defined
+
+Define the **leverage** of a swap as the ratio of MaxIL to the collateral the underwriter
+actually locks:
+
+$$
+\text{leverage} \;=\; \frac{\text{MaxIL}}{\text{collateral}}, \qquad
+\text{collateral}_{\text{FULL}} = \text{MaxIL}\ \Rightarrow\ \text{leverage} = 1.
+$$
+
+- **FULL** posts $\text{collateral} = \text{MaxIL}$, so leverage is exactly $1$. The
+  underwriter sets aside the entire maximum possible payout up front.
+- **PARTIAL** posts $\text{collateral} = r \cdot \text{MaxIL} + \text{buffer}$ for some
+  ratio $r < 1$ (`partialRatioBps` in the [SignedQuote](/concepts/two-rails)), so leverage
+  is $> 1$ and the same capital underwrites more notional. The shortfall is what the rest
+  of the PARTIAL machinery exists to cover.
+
+Both modes share the **identical settlement core** — the same `settle`, the same
+$\min(\text{realized\_IL}, \text{MaxIL})$ cap, the same [MaxIL](/concepts/maxil) geometry.
+The dial lives entirely *upstream* of settlement, in how much is locked at create. What
+changes downstream is only the question **"is the locked collateral always $\ge$ the
+payout?"** — which FULL answers structurally and PARTIAL answers probabilistically.
+
+## FULL — the launch mode and the no-bad-debt headline
+
+FULL is the only mode live today, and it is the headline because of one line of algebra.
+Because the contract locks $\text{collateral} = \text{MaxIL}$ at create
+(on Path A and on Path B) and the payout is capped at MaxIL at
+settle:
+
+$$
+\text{payout} \;=\; \min(\text{realized\_IL},\, \text{MaxIL}) \;\le\; \text{MaxIL} \;=\; \text{collateral}.
+$$
+
+So $\text{payout} \le \text{collateral}$ holds **by construction of the cap** — under
+*every* price path, with no assumption about volatility, no monitoring, and no liquidation.
+This is [invariant I1](/security/invariants), and it is *structural*: it does not depend on
+the [volatility oracle](/protocol/oracles) being right, only on the cap equalling the lock.
+
+<Info>
+This is exactly why **FULL needs no risk engine.** Liquidation is mathematically
+impossible — there is no margin to maintain, no health
+factor to watch, no keeper to keep the position solvent. The collateral was correct the
+moment it was locked and stays correct until settle. The price oracle is
+**not** load-bearing for I1; it only affects pricing and depositor solvency.
+</Info>
+
+The qualifying clause matters and must always travel with the claim:
+
+<ClaimA />
+
+### FULL on both rails
+
+The dial reads the same on FULL regardless of which [rail](/concepts/two-rails) opens the
+swap, because FULL is enforced at create on both:
+
+| | **Path A — cvAMM** | **Path B — MM** |
+| --- | --- | --- |
+| Collateral locked | `MaxIL`, from `ConvexityVault` | `MaxIL`, from the MM's `UnderwriterVault` |
+| Model gate | implicit FULL (PARTIAL has no Path-A entry) | `require model == FULL` else `UnsupportedModel` |
+| Vault solvency invariant | `totalLocked ≤ juniorAssets` | `locked ≤ deposited` per MM, I5 |
+| Settlement | identical `settle` core | identical `settle` core |
+
+On Path B the FULL gate is explicit: `createSwap` reverts `UnsupportedModel` for any
+`model != FULL`, and `partialRatioBps` is required to be `0` in
+FULL (the `SignedQuote` struct). On Path A there simply is no
+PARTIAL entry point to reach.
+
+## PARTIAL — the capital-efficiency mode, gated on the quant
+
+PARTIAL would let an underwriter lock *less than* MaxIL per swap and so write more notional
+per dollar of capital. That is genuinely valuable — but it **breaks the structural
+guarantee**: once $\text{collateral} < \text{MaxIL}$, the inequality
+$\text{payout} \le \text{collateral}$ no longer holds for free. A position that runs to its
+MaxIL can now exceed the collateral behind it, and the difference is **real bad debt**.
+
+PARTIAL therefore replaces a *proof* (FULL's one-line algebra) with a *control system*: a
+stack of floors, fees, buffers, exposure caps, and circuit breakers tuned so that the
+probability and magnitude of bad debt stay inside an explicitly chosen risk budget. None of
+those numbers can be guessed.
+
+<Warning>
+**Limit → Why → Mitigation — PARTIAL is not live today.**
+
+- **Limit.** Every PARTIAL create path reverts `UnsupportedModel`. You cannot under-collateralize a swap on the live
+  deployment.
+- **Why.** PARTIAL's safety is *statistical*, not structural. The floor curve, fee curve,
+  liquidation buffer, circuit-breaker thresholds, withdrawal delay, exposure caps, and
+  first-loss size that keep bad-debt risk inside budget can only be derived from a
+  **Monte-Carlo calibration** of the actual return/vol distribution
+  ([the quant](/protocol/pricing-stack)). Shipping PARTIAL with *placeholder* constants
+  would be shipping a control system tuned to a fictional world.
+- **Mitigation.** PARTIAL is **gated** behind the quant and **fully params-driven**: every
+  one of those constants is read from the calibrated risk-parameter set,
+  never hardcoded. The enum value exists so the wiring is in place; the mode stays
+  `UnsupportedModel` until the calibrated risk-parameter set carries a calibrated PARTIAL block. The gate opens
+  by *data landing*, not by code being written.
+</Warning>
+
+### Why no PARTIAL constant may ever be hardcoded
+
+This is the single most load-bearing rule in the PARTIAL design, and it is a direct
+response to the [external audit](/security/audits). Hardcoding any PARTIAL primitive — a
+liquidation buffer of "10%", a circuit breaker at "σ × 3", a first-loss slice of "5%" — is
+exactly the failure the audit flagged: it bakes a guess about the world into the contract
+and calls it a safety margin. The correct shape is a calibration pipeline, not a constant:
+
+$$
+\underbrace{\text{return/vol distribution}}_{\text{historical + simulated}}
+\;\xrightarrow{\;\text{Monte Carlo}\;}\;
+\text{calibrated risk-parameter set}
+\;\xrightarrow{\;\text{owner setter}\;}\;
+\text{on-chain PARTIAL parameters}
+$$
+
+The precedent is already shipped for the FULL load stack: `baseLoad` regimes, both skew
+curves, and `maxLoadBps` are read from the calibrated risk-parameter set via `LoadParams`,
+set by the owner through `InflexionCore.setLoadParams` — none hardcoded. PARTIAL extends the same pattern to its
+full constant set.
+
+### The PARTIAL parameter set — every constant is params-driven
+
+Each of these is a constant *today's FULL mode does not need* and *PARTIAL cannot ship
+without*. All are sourced from the calibrated risk-parameter set, none hardcoded.
+
+| Constant | What it controls | Why it cannot be a guess |
+| --- | --- | --- |
+| **Floor curve** | Minimum collateral ratio $r$ as a function of geometry / vol regime — the lower bound on how thin PARTIAL may run | The thinnest safe ratio depends on the tail of the IL distribution for that geometry; only the Monte Carlo knows where it sits |
+| **Fee curve** | The extra premium PARTIAL charges for the bad-debt risk it takes on | Must price the *expected shortfall* the under-collateralization creates — a distributional quantity |
+| **Liquidation buffer** | Headroom held above the floor so a position can be unwound before it crosses into bad debt | Sized to the speed of adverse moves vs the unwind latency — pure simulation output |
+| **Circuit-breaker thresholds** | Vol / drawdown levels at which new PARTIAL writing pauses | The level that meaningfully reduces tail risk without over-tripping is a calibrated trade-off |
+| **Withdrawal delay** | Cooldown on depositor exits so capacity cannot evaporate mid-stress | Must outlast the worst plausible stress window in the simulated paths |
+| **Exposure caps** | Maximum PARTIAL notional per market / concentration | The cap that keeps correlated MaxIL hits inside budget is a portfolio-level Monte-Carlo result |
+| **First-loss size** | The junior slice that absorbs PARTIAL bad debt before it touches anyone else | Sized so $P(\text{loss} > \text{first-loss})$ stays inside the risk budget — a tail quantile |
+
+The first-loss / junior interaction here is about *PARTIAL bad debt*, distinct from the
+ordinary [tranche](/concepts/tranches) waterfall that operates in FULL today — see the
+[tranches page](/concepts/tranches) for the SENIOR/JUNIOR mechanics that ship now. This
+page is about the FULL/PARTIAL dial; it deliberately does not re-derive the tranche
+accounting.
+
+## FULL vs PARTIAL side by side
+
+| | **FULL (live)** | **PARTIAL (roadmap, gated)** |
+| --- | --- | --- |
+| Collateral per swap | $= \text{MaxIL}$ (leverage $1$) | $< \text{MaxIL}$ + buffer (leverage $> 1$) |
+| No-bad-debt | **Structural** — `payout ≤ collateral` by construction (I1) | **Statistical** — kept inside a risk budget by the control stack |
+| Bad-debt risk | None under the [qualified clause](/concepts/no-bad-debt) | Real — the reason for floors / fees / buffers / breakers |
+| Monitoring | None — liquidation mathematically impossible | Active — circuit breakers, liquidation buffer, exposure caps |
+| Constants needed | FULL load stack only (already params-driven) | Full PARTIAL set, **all** from the calibrated risk-parameter set |
+| Capital efficiency | Lower — one MaxIL locked per swap | Higher — same capital underwrites more notional |
+| Status in code | Enforced on every path | Reverts `UnsupportedModel` |
+| Gate to ship | — (live) | Monte-Carlo-calibrated PARTIAL block |
+
+The honest framing: **FULL trades capital efficiency for a proof; PARTIAL would trade the
+proof for capital efficiency, and the price of that trade is a calibration the protocol
+refuses to fake.**
+
+## Who carries the risk in each mode
+
+The no-bad-debt guarantee (Claim A) is about the **LP being paid**. It is a *separate*
+claim from whether the **underwriter's** capital is safe (Claim B) — and the two never
+merge. The dial changes the underwriter's risk profile, not the LP's:
+
+- In **FULL**, the LP is paid under the qualified clause and the underwriter's only
+  underwriting loss is the ordinary $\text{payout} = \min(\text{IL}, \text{MaxIL})$ out of
+  collateral they posted — never *bad* debt, because they posted the full MaxIL.
+- In **PARTIAL**, the LP is still paid up to the protocol's coverage, but the
+  under-collateralization means some of that payout can exceed the individual swap's
+  collateral, and the **first-loss / junior** capital is what stands behind the gap. That
+  is precisely why PARTIAL's first-loss size is one of the calibrated constants above.
+
+In both modes, depositor and MM capital is **not** guaranteed:
+
+<ClaimB />
+
+## Where this sits in the roadmap
+
+FULL vs PARTIAL is the collateral leverage dial, and it is explicitly a
+**roadmap** item: FULL is the only launch mode and the no-bad-debt headline; PARTIAL is
+capital-efficient, carries real bad-debt risk, and is gated on the quant with every
+constant from the calibrated risk-parameter set. The enum ships
+(`CollateralModel{FULL, PARTIAL}`), the wiring ships, and the gate stays closed until the
+calibration lands.
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — the cap and the unit" icon="ruler" href="/concepts/maxil">
+    Why MaxIL is both the load-bearing payout cap (the FULL guarantee) and the fungible
+    unit of risk.
+  </Card>
+  <Card title="No bad debt — the qualified claim" icon="shield-check" href="/concepts/no-bad-debt">
+    The exact clause under which FULL produces no bad debt, and why PARTIAL cannot inherit
+    it for free.
+  </Card>
+  <Card title="The tranches" icon="layer-group" href="/concepts/tranches">
+    SENIOR / JUNIOR mechanics that ship in FULL today — distinct from the PARTIAL
+    first-loss sizing.
+  </Card>
+  <Card title="The pricing stack &amp; the quant" icon="calculator" href="/protocol/pricing-stack">
+    How the calibrated risk-parameter set feeds on-chain parameters — the same pipeline that gates PARTIAL.
+  </Card>
+  <Card title="The invariants" icon="list-check" href="/security/invariants">
+    I1 (no bad debt, FULL) and where every invariant is enforced in code.
+  </Card>
+  <Card title="The audit" icon="magnifying-glass" href="/security/audits">
+    Why hardcoding any PARTIAL constant is the exact failure the audit flagged.
+  </Card>
+</CardGroup>

@@ -1,0 +1,336 @@
+---
+title: "Protocol constants"
+description: "Every load-bearing constant in one table — settlement timing, the price band, the validity window, dust floors, and the calibrated load/skew/regime values — with where it lives and whether it comes from the calibrated risk-parameter set."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx';
+
+This is the flat lookup table for every constant the protocol reads. There are two
+kinds, and the distinction is **load-bearing for correctness**:
+
+- **Hard-coded protocol constants** — fixed in the contract source. Settlement timing,
+  the price-band envelope, the validity window, the dust floors. These are safety
+  bounds, not pricing knobs: they constrain *when* and *how* a swap can settle, never
+  *how much* it costs.
+- **Calibrated parameters from the calibrated risk-parameter set** (the cvAMM block) —
+  the `baseLoad` regimes, both skew curves, `maxLoadBps`, and the σ_ref windows/floor.
+  **No PARTIAL or pricing primitive is ever hard-coded** — every one is read from the
+  Monte-Carlo output. Hard-coding any of them is the exact failure the audit flagged.
+
+<Note>
+**One rule decides which bucket a constant lives in.** Anything that prices risk
+(load, skew, regime band, σ_ref window) comes from the quant. Anything that bounds
+liveness, fairness, or correctness (settle timing, bands, floors) is a fixed constant.
+`fairRate` itself has **no** calibrated coefficients at all — it is an
+[exact closed-form Φ-sum](/math/fair-value-phi-sum), so there is no "fairRate constant"
+to tune.
+</Note>
+
+## Settlement constants
+
+The settle path pins the price to the Chainlink **round active at expiry T** (so no
+party can pick a favorable instant by timing `settle`), then gates it with three health
+checks. These constants define those gates and the liveness backstop.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `GRACE_PERIOD` | `3600` s (1 h) | After the sequencer comes back up, settle must wait this long before trusting a round — guards against the post-downtime burst. |
+| `MAX_STALENESS` | `90000` s (25 h) | Max age of the round-at-T (per token; Sepolia value). = 86,400 s mainnet heartbeat + 1 h buffer, so the **same value works on testnet and mainnet**. |
+| `LONE_SPIKE_BPS` | `500` (5%) | A round-at-T is rejected as a *glitch* only if it differs from **both** immediate neighbours by ≥ this. A real fast move is sustained, so the next round confirms it and the check passes. |
+| `LIVENESS_WINDOW` | `86400` s (24 h) | After this much time past expiry, the backstop accepts the round-at-T **unconditionally** — funds can never lock indefinitely (Fork 1 / [I8](/security/invariants)). |
+| `TWAP_WINDOW` | `1800` s (30 m) | Uniswap v3 TWAP window. **Advisory only** — emitted as an event, **never reverts**. |
+| `MAX_DEVIATION_BPS` | `200` (2%, advisory) | The TWAP-vs-Chainlink divergence that *would have* gated under v3.1. After Fork 1 it is advisory-only — the hard gate is gone. |
+
+### How the settlement gates compose
+
+The Chainlink round is the price; the TWAP is a non-blocking advisory; the lone-spike
+check and the liveness backstop together guarantee settle **always** succeeds in a
+bounded window:
+
+<Steps>
+<Step title="Pin the round at T">
+`getSettlementPrice(token, expiry, hintRoundId)` walks to the Chainlink round with
+`updatedAt ≤ expiry < nextUpdatedAt`. The `hintRoundId` is keeper-supplied and
+**verified** on-chain — it cannot move the price, only locate the round.
+</Step>
+<Step title="Health-gate it">
+Sequencer up + `GRACE_PERIOD`, age ≤ `MAX_STALENESS`, and the lone-spike sanity check
+(differs from *both* neighbours by ≥ `LONE_SPIKE_BPS`).
+</Step>
+<Step title="Backstop if deferred">
+If the lone-spike check defers, settle is retryable; once `block.timestamp ≥ expiry +
+LIVENESS_WINDOW`, the round-at-T is accepted unconditionally by the backstop.
+</Step>
+</Steps>
+
+The invariant ([I8](/security/invariants)) is stated as: `settle()` always succeeds
+within
+
+$$
+\texttt{expiry} + \texttt{LIVENESS\_WINDOW} + \texttt{MAX\_STALENESS} + \texttt{GRACE\_PERIOD}.
+$$
+
+<Warning>
+**Limit → Why → Mitigation.** The spec-literal staleness `require` fires *before* the
+backstop can recover a deferred round, so the **actual usable backstop window is
+`[expiry + LIVENESS_WINDOW, expiry + MAX_STALENESS)` ≈ 1 hour wide** (90,000 − 86,400 =
+3,600 s), not the full additive sum the I8 wording suggests. **Why** it is acceptable:
+the window is *symmetric* for LP and MM (it preserves fairness — neither side can
+exploit it), and past `expiry + MAX_STALENESS` funds still settle via a *newer*
+Chainlink round (Arbitrum majors tick frequently), just not via the round-at-T.
+**Mitigation:** the behavior is documented in NatSpec and pinned by a boundary test
+(`test_I8_revertsPastStaleness_boundary`), not papered over.
+See [the forks](/security/forks).
+</Warning>
+
+## The price band — `[25, 500]` bps
+
+A Path-B [signed quote](/integrate/quote-signing) carries `quotePrice` (the oracle
+price the MM saw at signing) and `priceBandBps`. At fill, the contract reads the live
+oracle once (the same read that pins `P0` — zero extra oracle cost) and **auto-voids
+the quote on-chain, deterministically** if the price has drifted beyond the band:
+
+$$
+\texttt{createSwap reverts} \iff \texttt{absBps}(P_\text{live},\ \texttt{quotePrice}) > \texttt{priceBandBps}.
+$$
+
+This is **Fork 2 / [I9](/security/invariants)** — deterministic, no MM discretion at
+fill, so it is **not last-look**.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `PRICE_BAND_MIN_BPS` | `25` (0.25%) | Protocol floor — the tightest band an MM may set. Below this and `createSwap` reverts `PriceBandOutOfProtocolRange`. |
+| `PRICE_BAND_MAX_BPS` | `500` (5%) | Protocol ceiling — the widest band an MM may set. |
+| MM default | `100` (1%) | The default `priceBandBps` an MM uses inside the `[25, 500]` envelope. |
+
+<Info>
+**Path A has no band.** The cvAMM has no signed quote and prices off the live oracle
+directly, so it has no stale-quote vector at all. The band is a Path-B-only protection.
+</Info>
+
+## The validity window — `[5, 15]` s
+
+A signed quote also carries `validUntil` (an absolute timestamp). The protocol enforces
+that the quote's lead time `secondsAhead` falls in a tight band — this bounds how long
+a *bearer* signed payload can survive in an observer's hands (signed quotes are bearer
+instruments that outlive any off-chain cancel).
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `VALIDITY_MIN_S` | `5` s | Floor on `secondsAhead`; below it `createSwap` reverts `ValidityOutOfBand`. |
+| `VALIDITY_MAX_S` | `15` s | Ceiling on `secondsAhead`. (Tightened from the old `[5, 60]` s in Fork 2.) |
+| MM default | `8` s | Default `validUntil = now + 8s`. |
+
+The validity window is a **latency control, not risk capital**: the
+[oracle band](/security/forks) is the *primary* stale-quote defense; the short clock is
+a secondary leakage-window control on top of it. Together with on-chain
+[selective nonce invalidation](/integrate/quote-signing) (Permit2-style bitmap), these
+are the three deterministic Path-B protections — none of which is last-look.
+
+## Dust floors
+
+Two minimums block dust swaps that would grief capacity and open the integer-division
+free-coverage edge. Both are enforced on **all three** entry points.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `MIN_POSITION_V0` | `$100` | Minimum position value `V0` (numéraire). Rejects tiny positions. |
+| `MIN_PREMIUM` | `$1` | Minimum charged premium. Closes the integer-division free-coverage edge. |
+
+<Note>
+**Premiums round UP, never down.** Alongside the floors, every premium is computed as
+`ceilDiv(...)` (round up — finding F-#8), so integer division can never under-charge the
+LP into free coverage.
+</Note>
+
+## Calibrated load / skew / regime values (from the calibrated risk-parameter set)
+
+These are the **only** pricing parameters, and **none is hard-coded** — every one is
+read from the cvAMM block of the calibrated risk-parameter set (validated against its
+schema) and set on-chain by the owner via `setLoadParams`. The premium is
+
+$$
+\text{premium} = \text{FairPremium}\cdot\bigl(1 + \underbrace{\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}}_{\text{clamped to } \le\ \text{maxLoad}}\bigr),
+$$
+
+with the I10 clamp `totalLoad = min(baseLoad + util_skew + dispersion_skew, maxLoad)`
+making overcharge impossible by construction. See [the load stack](/math/load-stack) for
+the full derivation. WAD-scaled: `1e18 = 1.0 = 100% load`, `1 bps = 1e14 WAD`.
+
+### `baseLoad` — the structural volatility-risk premium, banded by σ_ref regime
+
+The load *over* fair value, keyed by which σ_ref regime band the market is in. Motivated
+by the lone-writer CVaR gap (~91–100% of MaxIL for a single writer) that diversification
+collapses:
+
+| Regime | σ_ref band | `baseLoad` |
+| --- | --- | --- |
+| **calm** | `< 0.60` | `2000` bps (+20%) |
+| **normal** | `0.60 – 1.025` | `3000` bps (+30%) |
+| **stressed** | `≥ 1.025` | `5000` bps (+50%) |
+
+<Warning>
+**Do not confuse the load *regime* with `sigmaComponents.binding`.** The regime
+(calm/normal/stressed) is σ_ref measured against the `baseLoad` bands above. `binding`
+(0 = short EWMA, 1 = long EWMA, 2 = floor) is *which input set σ_ref* — a different
+classification entirely.
+</Warning>
+
+### `util_skew` — utilization scarcity (the drawdown lever)
+
+Rises as the pool nears full commitment, on `u = locked / (locked + free)`. Flat below a
+knee, convex above, capped:
+
+$$
+\text{util\_skew}(u) = \min\!\Bigl(\text{cap},\ \text{slope}\cdot\Bigl(\tfrac{\max(0,\ u - \text{knee})}{1 - \text{knee}}\Bigr)^{\text{power}}\Bigr)
+$$
+
+| Parameter | Value |
+| --- | --- |
+| `knee` | `0.45` |
+| `slope` | `0.6` |
+| `power` | `2.0` |
+| `cap` | `0.6` |
+
+The same locked/free accounting that prices new coverage *up* before over-commitment
+also powers the withdrawal-cooldown run defense. The heavy run found utilization is the
+dominant **drawdown** lever: `u = 0.40 → P(3y DD>50%) = 2.7%` vs `u = 0.60 → 18.0%`.
+
+### `dispersion_skew` — single-pair concentration (the honest analogue)
+
+Rises as outstanding coverage *clusters* in one width/moneyness/duration corner —
+many positions bunched at one edge all hit MaxIL together in one move. Measured by a
+normalized Herfindahl index `h ∈ [0, 1]` over the MaxIL-weighted coverage histogram,
+computed O(1) from an incremental `Σ lockedByMarket²` accumulator:
+
+$$
+\text{dispersion\_skew}(h) = \min\!\bigl(\text{cap},\ \text{slope}\cdot h^{\text{power}}\bigr)
+$$
+
+| Parameter | Value |
+| --- | --- |
+| `slope` | `0.5` |
+| `power` | `1.5` |
+| `cap` | `0.5` |
+
+This is **single-asset calibrated** — it deliberately does not inherit the degenerate
+cross-asset correlation `k ≈ 1.0`, which collapses to a useless constant on a one-pair
+book.
+
+### `maxLoadBps` — the I10 ceiling
+
+The principled ceiling is `premium ≤ MaxIL` — **never charge more than the maximum
+possible payout**. Since `premium = fairRate·MaxIL·(1 + load)`, that gives
+`maxLoad = 1/fairRate − 1`, naturally width/duration/σ-conditional. The on-chain form
+evaluates it live and clamps:
+
+$$
+\texttt{maxLoadBps} = \mathrm{clamp}\!\Bigl(\mathrm{round}\bigl((1/\text{fairRate}(\sigma_\text{ref}) - 1)\cdot 10000\bigr),\ \text{floor},\ 16000\Bigr)
+$$
+
+Static ceiling at `σ_ref = 0.75` (normal regime), clamped at `16000`:
+
+| width | 7d | 30d | 90d |
+| --- | --- | --- | --- |
+| ±5% | `3282` | `1375` | `744` |
+| ±10% | `8502` | `3082` | `1578` |
+| ±20% | `16000` | `7773` | `3559` |
+
+Tight/long cells get tiny load room — *economically exact*: a near-certain payout
+(`fairRate ≈ 1`) cannot carry a risk premium beyond itself.
+
+### σ_ref windows + floor (the only stochastic pricing input)
+
+`σ_ref = max(σ_short, σ_long, floor)` — a conservative max of two time-aware EWMAs of
+Chainlink-tick log-returns plus a hard floor. The windows and floor are calibrated, not
+hard-coded:
+
+| Parameter | Value |
+| --- | --- |
+| `short_halflife` | `86400` s (1 day) |
+| `long_halflife` | `2592000` s (30 days) |
+| `floor` | `0.50` |
+
+<Note>
+**The floor sits *above* calm ETH vol on purpose.** `floor = 0.50 > ~0.45` observed
+calm ETH vol, so the pool **overcharges calm months** and is net-conservative to
+depositors (heavy-run all-months realized payout/premium = `0.654`). And the `max(...)`
+construction is *mandatory*, not optional engineering: realized vol understates risk
+right before a regime change, so a single fast EWMA could collapse to a deceptively calm
+number exactly before a crash. See [σ_ref](/math/sigma-ref).
+</Note>
+
+## Decimals & fixed-point units
+
+The unit constants every amount is denominated in:
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| dUSDC (numéraire) | **6 decimals** | All premiums, MaxIL, V0, payouts are 6-dec raw integers. |
+| dWETH (token0) | **18 decimals** | The volatile token. |
+| Chainlink feeds | **8 decimals** | All four USD price feeds. |
+| `WAD` | `1e18` | Fixed-point 1.0. Used for σ_ref, fairRate, load components, `a`/`b` ratios. |
+| `BPS_TO_WAD` | `1e14` | 1 basis point in WAD. |
+| `SECONDS_PER_YEAR` | `31_536_000` | 365-day year — matches the Python model. |
+| `sqrtPriceX96` | Uniswap **Q64.96** | sqrt-price representation. |
+| FairValueOracle internal | `1e24` | Lifts WAD→1e24 for precision, rounds back to WAD half-up. |
+
+For the full units convention and SDK helpers, see
+[addresses & units](/sdk/addresses-units) and
+[decimals & units](/reference/decimals-units).
+
+## Quick reference — which constants come from the calibrated risk-parameter set
+
+<AccordionGroup>
+<Accordion title="Fixed protocol constants (in contract source — NOT calibrated)">
+Settlement timing (`GRACE_PERIOD`, `MAX_STALENESS`, `LONE_SPIKE_BPS`,
+`LIVENESS_WINDOW`, `TWAP_WINDOW`, `MAX_DEVIATION_BPS`), the price-band envelope
+(`PRICE_BAND_MIN_BPS = 25`, `PRICE_BAND_MAX_BPS = 500`), the validity window
+(`VALIDITY_MIN_S = 5`, `VALIDITY_MAX_S = 15`), and the dust floors
+(`MIN_POSITION_V0 = $100`, `MIN_PREMIUM = $1`). These bound liveness, fairness, and
+correctness — never price. They live in `OracleManager` and `InflexionCore`.
+</Accordion>
+<Accordion title="Calibrated parameters (from the calibrated risk-parameter set — the cvAMM block)">
+The `baseLoad` regime bands (20/30/50%), `util_skew` (knee/slope/power/cap), 
+`dispersion_skew` (slope/power/cap), `maxLoadBps` (or its live `1/fairRate − 1` form),
+and the σ_ref windows + floor (`short_halflife`, `long_halflife`, `floor = 0.50`). Read
+from the Monte-Carlo output, validated against its schema, set on-chain via
+`setLoadParams`. **`fairRate` itself has NO calibrated coefficients** — it is an
+exact closed form, so there is nothing to tune there.
+</Accordion>
+<Accordion title="Why the split matters">
+Hard-coding any PARTIAL or pricing primitive is the **exact failure the external audit
+flagged**. Keeping every load/skew/σ value in the calibrated risk-parameter set is
+what lets the quant gate PARTIAL and re-calibrate without a contract change. The safety
+bounds are fixed precisely because they must *not* be tunable by anyone — a tighter
+liveness window or a looser dust floor would be a vector, not a feature.
+</Accordion>
+</AccordionGroup>
+
+<Maturity />
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    The full derivation of baseLoad + the two skews + the I10 clamp, with worked
+    numbers.
+  </Card>
+  <Card title="σ_ref — the vol oracle" icon="wave-square" href="/math/sigma-ref">
+    Why the EWMA max(...) is mandatory and the floor sits above calm vol.
+  </Card>
+  <Card title="The forks" icon="code-branch" href="/security/forks">
+    How the settlement constants and the price band resolve the two audited deadlock /
+    pickoff classes (I8, I9).
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    The ten invariants these constants enforce — I8 (liveness), I9 (band), I10 (cap).
+  </Card>
+  <Card title="The oracles" icon="satellite-dish" href="/protocol/oracles">
+    How OracleManager and VolOracle apply these constants at entry and settlement.
+  </Card>
+  <Card title="Deployments" icon="server" href="/reference/deployments">
+    The live Arbitrum Sepolia registry — the source of truth the constants are read
+    against.
+  </Card>
+</CardGroup>

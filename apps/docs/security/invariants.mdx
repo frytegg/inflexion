@@ -1,0 +1,509 @@
+---
+title: "The ten invariants (I1–I10)"
+description: "Every protocol invariant — precise statement, why it holds, where it is enforced, and how it is verified by Foundry fuzz — plus the senior-protection structural invariant that backs the junior-first-loss waterfall."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+
+Inflexion's safety is not a story about good intentions — it is ten machine-checked
+invariants, each one a precise predicate over the contract state, each one enforced
+in the contracts and exercised by Foundry fuzz over the whole price domain. The
+settle-path set **I1–I9** is unchanged from before the v4.0 hybrid pivot; **I10**
+is the price cap, added *upstream* of `settle` and orthogonal to the rest.
+
+This page gives each invariant the full treatment: what it says, *why* it is true at
+the formula and code level, exactly where it is enforced, and the test that proves it.
+It closes with the **senior-protection structural invariant** — not numbered I1–I10,
+but central to the trust story for [the tranches](/concepts/tranches).
+
+<Note>
+The one structural fact everything else hangs on: in FULL mode collateral is locked
+at `MaxIL` and coverage is `min(realized_IL, MaxIL)`, so `payout ≤ collateral` **by
+construction** (I1/I2). That proof is *oracle-independent* — it holds under any price
+path. See [the no-bad-debt math](/math/no-bad-debt-math) and [MaxIL](/concepts/maxil).
+</Note>
+
+## The ten at a glance
+
+| ID | Statement | Where enforced | Verified by |
+| --- | --- | --- | --- |
+| **I1** | No bad debt (FULL): $\text{payout} \le \text{collateral} = \text{MaxIL}$ | `InflexionCore` cap; vaults re-check `payout ≤ lockedAmount` in `ConvexityVault` and `UnderwriterVault` | `testFuzz_I1_I2_payoutCappedAtMaxIL` (256 runs) |
+| **I2** | Cap correctness: $\text{payout} = \min(\text{realized\_IL}, \text{MaxIL})$ | `InflexionCore` settle | same fuzz as I1 |
+| **I3** | Non-negativity / no underflow (guarded subtraction) | `ILMath` | `testFuzz_I3_ilNonNegative` (256 runs) |
+| **I4** | LP never profits from the swap: $V_{lp} \ge V_{hold} \Rightarrow \text{payout} = 0$ | `ILMath` (the `: 0` arm) | `test_il_atEntryIsZero` + I3 fuzz |
+| **I5** | Vault solvency: $\text{locked} \le \text{deposited}$ per MM; $\text{totalLocked} \le \text{juniorAssets}$ for the pool | `UnderwriterVault`; `ConvexityVault` | `invariant_I5_lockedLeDeposited` (256 runs × 128k calls × 0 reverts) |
+| **I6** | Liquidity immutability: settle uses `L` stored at creation | `InflexionCore` create and settle paths | `testFuzz_I6_settleUsesStoredLiquidity` + the F-2 e2e test |
+| **I7** | Capacity authority: $\text{consumedNotional}[\text{quoteId}] \le \text{maxNotionalV0}$; a cancelled bit cannot fill | `InflexionCore`; router reads only | `test_createSwap_consumedNotional_tracked` + `_rejectsUsedNonce` |
+| **I8** | Settlement liveness (Fork 1): `settle()` always succeeds within the window | `OracleManager.getSettlementPrice` backstop | 5 fuzz tests, ~1,280 runs |
+| **I9** | Band enforcement (Fork 2): `createSwap` reverts iff $\lvert\text{bps}(P_{live}, \text{quotePrice})\rvert > \text{priceBandBps}$ (Path B only) | `InflexionCore` band check | `testFuzz_I9_priceBandViolationReverts` + `_withinBandAccepts` (256 each) |
+| **I10** | Price cap (launch): $\text{premium} \le \text{FairPremium}\cdot(1 + \text{maxLoadBps})$ on both paths, by construction | Path A clamp in `CvammPricing`; Path B `require` in `InflexionCore` | `testFuzz_I10_clamp` + invariant-suite assertion |
+
+<ClaimA />
+
+---
+
+## I1 — No bad debt (FULL): `payout ≤ collateral == MaxIL`
+
+<Steps>
+<Step title="Statement">
+In FULL mode the LP's payout can never exceed the collateral the underwriter locked,
+because that collateral was set to `MaxIL` and the payout is capped at `MaxIL`:
+
+$$\text{payout} \;\le\; \text{collateral} \;=\; \text{MaxIL}.$$
+</Step>
+<Step title="Why it holds">
+Two facts compose. Coverage is $\text{payout} = \min(\text{realized\_IL}, \text{MaxIL})$,
+so $\text{payout} \le \text{MaxIL}$ for *any* price path. And in FULL mode the locked
+collateral *is* `MaxIL`. Therefore $\text{payout} \le \text{MaxIL} = \text{collateral}$.
+This is **structural, not heuristic** — provable by fuzz over the *whole* price domain
+(in-range, below `Pa`, above `Pb`, and the no-IL region). Crucially it is
+*oracle-independent*: `settle` caps the payout at `MaxIL == collateral` regardless of
+any pricing oracle, so the [FairValue](/concepts/fair-value) and Vol oracles are **not**
+load-bearing for I1.
+</Step>
+<Step title="Where enforced">
+The payout cap is the ternary in `settle`:
+
+```solidity
+uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
+```
+
+Collateral was locked at `MaxIL` at creation on both Path A and Path B. Both vaults
+*defensively* re-check `payout ≤ lockedAmount` at release in `ConvexityVault` and
+`UnderwriterVault`, so the cap is enforced twice.
+</Step>
+<Step title="How verified">
+`testFuzz_I1_I2_payoutCappedAtMaxIL` — 256 runs, asserting `payout ≤ maxIL` across the
+full price domain.
+</Step>
+</Steps>
+
+<Info>
+I1 is one of two never-merged claims. **Claim A** (LPs are always paid, FULL,
+code-enforced) is structural. **Claim B** (depositors/MMs can lose principal) is a
+separate fact — see [the tranches](/concepts/tranches) and `<ClaimB />` below.
+</Info>
+
+---
+
+## I2 — Cap correctness: `payout == min(realized_IL, MaxIL)`
+
+<Steps>
+<Step title="Statement">
+$$\text{payout} = \min(\text{realized\_IL}, \text{MaxIL}).$$
+The payout is exactly the cap applied to the recomputed IL — never more, never less,
+never caller-influenced.
+</Step>
+<Step title="Why it holds">
+The same line that enforces I1 *is* the `min`. The decisive detail is the input:
+`realized_IL` is **recomputed on-chain at settle** from the Chainlink-pinned settlement
+price, never caller-supplied. The settlement sqrt price is derived on-chain via
+`_oracleSqrtPriceX96` from the Chainlink round-at-T, not from calldata. This
+closes the hole where a permissionless settler could otherwise set the payout anywhere
+in `[0, MaxIL]`. See [price pinning](/security/price-pinning).
+</Step>
+<Step title="Where enforced">
+`computeIL` over the oracle-pinned price in `InflexionCore` settle, then the cap
+ternary.
+</Step>
+<Step title="How verified">
+The same fuzz as I1, `testFuzz_I1_I2_payoutCappedAtMaxIL`: it asserts the
+payout equals the capped IL, not merely that it is bounded.
+</Step>
+</Steps>
+
+---
+
+## I3 — Non-negativity / no underflow
+
+<Steps>
+<Step title="Statement">
+$$\text{realized\_IL} = \begin{cases} V_{hold} - V_{lp} & V_{hold} > V_{lp} \\ 0 & \text{otherwise}\end{cases}$$
+— *never* an unchecked subtraction.
+</Step>
+<Step title="Why it holds">
+The IL kernel uses a guarded ternary, so the subtraction is only ever evaluated when
+`V_hold > V_lp`. (Note: `assert(payout >= 0)` is vacuously true on `uint256`; the real
+content is that the subtraction is *guarded*, and the fuzzer drives `V_lp > V_hold`
+cases asserting no-revert and `payout == 0`.)
+</Step>
+<Step title="Where enforced">
+```solidity
+return V_hold > V_lp ? V_hold - V_lp : 0; // I3: guarded subtraction
+```
+</Step>
+<Step title="How verified">
+`testFuzz_I3_ilNonNegative` — 256 runs, including price paths
+where the LP would have out-performed hold.
+</Step>
+</Steps>
+
+---
+
+## I4 — LP never profits from the swap
+
+<Steps>
+<Step title="Statement">
+$$V_{lp} \ge V_{hold} \;\Rightarrow\; \text{realized\_IL} = 0 \;\Rightarrow\; \text{payout} = 0.$$
+The LP is made whole, never more — the swap is a hedge, not a lottery.
+</Step>
+<Step title="Why it holds">
+The same guarded clamp as I3: when the LP would have profited versus passively holding,
+IL is zero, so the payout is zero. Settlement uses the oracle-pinned $P_T$, so the
+outcome reflects the *true* price, not a settler-chosen one — which restores I4
+alongside I2. This is about the *payout* only; the LP still
+earns Uniswap fees on the custodied position, so total P&L can be positive. That is
+correct, not a leak — Inflexion hedges **gross in-range IL**, not net P&L. See
+[the IL formula](/math/il-formula).
+</Step>
+<Step title="Where enforced">
+`ILMath` — the `: 0` arm of the guarded ternary.
+</Step>
+<Step title="How verified">
+`test_il_atEntryIsZero` plus the I3 fuzz; the invariant suite
+asserts `if (vLp >= vHold) payout == 0`.
+</Step>
+</Steps>
+
+---
+
+## I5 — Vault solvency: `locked ≤ deposited` per MM (and `totalLocked ≤ junior` per pool)
+
+<Steps>
+<Step title="Statement">
+For every underwriter the locked collateral never exceeds what was deposited:
+$$\text{locked}[\text{mm}] \le \text{deposited}[\text{mm}] \quad\text{(Path B)},\qquad \text{totalLocked} \le \text{juniorAssets} \quad\text{(Path A pool)}.$$
+</Step>
+<Step title="Why it holds (by construction)">
+`lockCollateral` requires $\text{available}(\text{mm}) = \text{deposited} - \text{locked} \ge \text{amount}$,
+so post-lock $\text{locked}' \le \text{deposited}$. `releaseAndDistribute` requires
+$\text{payout} \le \text{lockedAmount} \le \text{locked}$, so
+$\text{deposited}' - \text{locked}' \ge 0$ in `UnderwriterVault`. For the
+pool, `freeAssets() = totalAssets − totalLocked` and `lockCollateral` requires
+`free ≥ amount` in `ConvexityVault`; the pool analogue
+$\text{totalLocked} \le \text{juniorAssets}$ is the senior-protection invariant below.
+</Step>
+<Step title="Where enforced">
+**Path B:** `UnderwriterVault.lockCollateral` (the `avail < amount` revert)
+and `releaseAndDistribute`. **Path A:** `ConvexityVault` free-asset
+accounting and the lock check.
+</Step>
+<Step title="How verified">
+`invariant_I5_lockedLeDeposited` — recorded at
+**256 runs × 128,000 fuzzed vault-op calls × 0 reverts** — plus
+`testFuzz_I5_lockedNeverExceedsDeposited`.
+</Step>
+</Steps>
+
+---
+
+## I6 — Liquidity immutability: settle uses `L` stored at creation
+
+<Steps>
+<Step title="Statement">
+Settlement computes IL with the liquidity `L` snapshotted at creation; an external
+`increaseLiquidity` on the custodied NFT cannot inflate `payout` above `MaxIL`.
+</Step>
+<Step title="Why it matters (attack F-2)">
+The position NFT is held in protocol custody during the swap, but `increaseLiquidity`
+on a Uniswap v3 NFT is **not owner-gated** — anyone can call it. If `settle` re-read
+`positions(tokenId).liquidity`, an attacker could blow up the computed IL after
+creation. Storing `L` once neutralizes this entirely; the extra liquidity is simply
+returned with the NFT at settle.
+</Step>
+<Step title="Where enforced">
+`L` is read exactly once in `_prepareSwap` and stored at execution on both Path A and
+Path B. Settle passes the **stored** `s.liquidity` to `computeIL`, never a re-read.
+</Step>
+<Step title="How verified">
+`testFuzz_I6_recordsStoredLiquidity` +
+`testFuzz_I6_settleUsesStoredLiquidity`, plus the end-to-end
+`testFuzz_F2_externalIncreaseLiquidity_arbitraryAmount`, which
+mutates the on-chain `L` between create and settle and asserts `payout` unchanged.
+</Step>
+</Steps>
+
+---
+
+## I7 — Capacity authority: `consumedNotional[quoteId] ≤ maxNotionalV0`; a cancelled bit cannot fill
+
+<Steps>
+<Step title="Statement">
+The on-chain ledger is authoritative over the off-chain engine. A signed quote can fill
+repeatedly only up to its capacity, never after its nonce bit is cancelled, and
+concurrent submissions cannot over-consume. Path B only — Path A has no
+signed quote.
+</Step>
+<Step title="Why it holds">
+Check-and-increment is **atomic in one transaction, in PHASE 3 effects, before any
+external call**. The capacity check (`consumedNotional[quoteId] + g.V0 > maxNotionalV0`
+⇒ revert) runs in PHASE 2; the atomic
+`consumedNotional[quote.quoteId] += g.V0` and `_useNonce(...)` run together in
+`_executePathB`. Capacity is denominated in **V0 (position value)**, not
+collateral. Nonces are a **Permit2-style bitmap** (`nonce = word<<8 | bit`),
+so an MM cancels *one* quote by flipping *one* bit — never cancel-all.
+</Step>
+<Step title="Router subtlety (also I7)">
+In [`createSwapRouted`](/protocol/routing), **only the executed rail mutates
+nonce/capacity/lock.** The router's Path-B usability predicate
+`_quoteUsableAndPremiumB` is `view`: it *reads* `isNonceUsed`/`consumedNotional` but
+never calls `_useNonce`. A quote that loses the route consumes nothing.
+</Step>
+<Step title="Where enforced">
+`InflexionCore` — the capacity mutation, the capacity check, and `_useNonce`.
+</Step>
+<Step title="How verified">
+`test_createSwap_consumedNotional_tracked` + `test_createSwap_rejectsUsedNonce`.
+</Step>
+</Steps>
+
+<Warning>
+**Limit:** full handler-driven *stateful* fuzz of the capacity ledger is deferred to
+post-mainnet. **Why:** stateful capacity fuzzing requires a
+dedicated quote-lifecycle handler that models concurrent fills and selective cancels —
+a larger harness than the current scope allowed. **Mitigation:** the atomic
+check-and-increment lives in a single transaction *before any external call*, so the
+race it would test for cannot occur within a transaction; the unit tests cover replay,
+used-nonce rejection, and capacity tracking directly. Stateful fuzz hardens confidence;
+it is not load-bearing for the property itself.
+</Warning>
+
+---
+
+## I8 — Settlement liveness (Fork 1): `settle()` always succeeds within the window
+
+<Steps>
+<Step title="Statement">
+For any swap, under any price path, `settle()` succeeds by
+$\text{expiry} + \text{LIVENESS\_WINDOW} + \text{MAX\_STALENESS} + \text{GRACE\_PERIOD}$
+— the lone-spike check never *permanently* locks funds. This is the
+[Fork 1](/security/forks) resolution.
+</Step>
+<Step title="Constants">
+`GRACE_PERIOD = 3600`, `LIVENESS_WINDOW = 86_400` (24h), `LONE_SPIKE_BPS = 500` (5%) in
+`OracleManager`; `MAX_STALENESS` is per-token, Sepolia value `90,000s` in the on-chain
+address registry.
+</Step>
+<Step title="Why it holds">
+Settle pins the Chainlink round-at-T (unique, bracketed by `updatedAt ≤ expiry`). A
+*glitched* print — a "lone spike" differing from **both** neighbours by ≥ `LONE_SPIKE_BPS`
+— is deferred, but only until `block.timestamp ≥ expiry + LIVENESS_WINDOW`, after which
+the backstop accepts the round **unconditionally**. A
+missing neighbour round across a Chainlink `phaseId` boundary is read *tolerantly* via
+`_tryRound` (try/catch returning `ok=false` instead of reverting), so it
+degrades to the backstop rather than a permanent lock. A real fast move
+persists across rounds and passes the lone-spike check immediately.
+</Step>
+<Step title="Where enforced">
+`OracleManager.getSettlementPrice`.
+</Step>
+<Step title="How verified">
+The `OracleManager` invariant suite — 5 fuzz tests, ~1,280 runs:
+`testFuzz_I8_settleSucceedsAnywhereInBackstopWindow`,
+`testFuzz_I8_sustainedMoveSettlesImmediately`,
+`testFuzz_I8_loneSpikeDefersBeforeBackstop`,
+`testFuzz_I8_sequencerRecoveryRespectsGrace`,
+`test_I8_revertsPastStaleness_boundary`.
+</Step>
+</Steps>
+
+<Warning>
+**Limit / documented design observation (NOT a bug):** the spec-literal staleness
+`require` fires *before* the backstop can recover the round, so the **actual usable
+window is $[\text{expiry} + \text{LIVENESS\_WINDOW},\ \text{expiry} + \text{MAX\_STALENESS})$
+≈ 1 hour wide** (90,000 − 86,400 = 3,600s), not the full additive sum the I8 wording
+suggests. **Why:** the staleness gate and the liveness backstop are two independent
+checks whose windows overlap by exactly one hour with the current constants.
+**Mitigation:** past `expiry + MAX_STALENESS` the *round-at-T* is stale, but funds can
+still settle via a *newer* Chainlink round (Arbitrum majors tick frequently), and the
+1h window is **symmetric** for LP and MM, so fairness is preserved. Surfaced in
+`OracleManager` NatSpec and in a boundary test — not papered over.
+</Warning>
+
+---
+
+## I9 — Band enforcement (Fork 2): `createSwap` reverts iff drift exceeds the band
+
+<Steps>
+<Step title="Statement">
+A Path-B signed quote auto-voids on-chain, deterministically, iff the live oracle has
+drifted beyond the MM's chosen band:
+$$\text{createSwap reverts} \iff \lvert\text{bps}(P_{live}, \text{quotePrice})\rvert > \text{priceBandBps}.$$
+This is *not* last-look. Path A has no signed quote and thus no such
+vector — it prices off the live oracle directly. This is [the Fork 2](/security/forks)
+resolution.
+</Step>
+<Step title="Bounds">
+`PRICE_BAND_MIN_BPS = 25` (0.25%), `PRICE_BAND_MAX_BPS = 500` (5%), MM default 100 (1%)
+in `InflexionCore`.
+</Step>
+<Step title="Why it holds">
+At `createSwap` the contract reads the live oracle price **once** — the same read that
+pins `P0`, so zero extra oracle cost, carried as `g.livePrice` — and checks
+$\lvert\text{bps}(P_{live}, \text{quote.quotePrice})\rvert \le \text{quote.priceBandBps}$.
+Beyond the band ⇒ revert. Because the check is deterministic with no MM discretion at
+fill, it is **not last-look**: the MM is exposed only to drifts *within* the band it
+chose (it priced for them), never to gaps that blow through it. Signed quotes are bearer
+instruments that survive past an off-chain cancel, so an on-chain band is the only sound
+defense. See [no last-look](/protocol/path-b-mm).
+</Step>
+<Step title="Where enforced">
+`InflexionCore` PHASE 2 band check:
+`bandDevBps = oracle.absBps(g.livePrice, quote.quotePrice)`, then revert
+`PriceOutOfBand`. `absBps` is the pure helper in `OracleManager`. The
+single live read is in `_prepareSwap`. The router mirrors this as a
+non-reverting boolean.
+</Step>
+<Step title="How verified">
+`testFuzz_I9_priceBandViolationReverts` +
+`testFuzz_I9_priceBandWithinBandAccepts` — 256 runs each, both directions.
+</Step>
+</Steps>
+
+---
+
+## I10 — Price cap (launch; by construction; upstream of settle)
+
+<Steps>
+<Step title="Statement">
+On **both** paths the charged premium can never exceed the fair value plus the maximum
+load:
+$$\text{premium} \;\le\; \text{FairPremium}\cdot(1 + \text{maxLoadBps}).$$
+Overcharge is impossible *by code*, not by trust.
+</Step>
+<Step title="Why it holds (Path A)">
+The load sum is a **mechanical, deterministic clamp**:
+$$\text{total} = \min(\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew},\ \text{maxLoad}),$$
+so the premium ceiling holds for **all** sequences of states and all price paths (FULL
+and PARTIAL both), with no MM discretion and no graceful-degradation path.
+`CvammPricing.totalLoadWad` and `loadComponents` both apply the
+`total > maxLoad ? maxLoad : total` clamp; `premiumFromLoad` then computes
+$\lceil \text{FairPremium}\cdot(1+\text{total}) \rceil$. Wired in
+`_pricePathAFromFair`. See [the load stack](/math/load-stack).
+</Step>
+<Step title="Why it holds (Path B)">
+The premium is **derived from the on-chain FairPremium**, not streamed raw:
+$\text{premium} = \lceil \text{FairPremium}\cdot(1 + \text{loadBps}/10^4) \rceil$ with a
+hard `require(loadBps ≤ maxLoadBps)`. The quote can only set a *load over the published
+fair value*, never the premium itself — the `LoadExceedsMax` revert and `_pricePathB`
+in `InflexionCore`.
+</Step>
+<Step title="Both paths also cap premium at MaxIL">
+Neither path ever charges more than the max possible payout, on both Path A and Path B
+in `InflexionCore`.
+</Step>
+<Step title="How verified">
+`testFuzz_I10_clamp` plus an invariant-suite assertion that
+`charged ≤ fairPremium·(1e4 + maxLoadBps)/1e4`.
+</Step>
+</Steps>
+
+<Note>
+**Orthogonality:** I10 lives in **PHASE 1 (pricing, READ)**, strictly
+*upstream* of `settle`. It does **not** touch `settle`, the MaxIL formula, or I1–I9. The
+no-bad-debt proof (I1) is structural ($\text{collateral} = \text{MaxIL} \ge \text{payout}$)
+and always true by code, while I1 additionally depends on oracle/settlement liveness;
+I10 is always true by code with **no** liveness dependency. Neither the senior/junior
+premium split nor the `totalLocked ≤ juniorAssets` constraint affects I10 or settle
+semantics.
+</Note>
+
+---
+
+## The senior-protection structural invariant (distinct from I5)
+
+Not numbered I1–I10, but central to the trust story for [the tranches](/concepts/tranches)
+and enforced in `ConvexityVault`:
+
+$$\text{totalLocked} \;\le\; \text{juniorAssets} \quad\text{at every } \texttt{lockCollateral}.$$
+
+<Steps>
+<Step title="Why it protects senior">
+Since every payout $\le$ its `MaxIL` $=$ its locked amount, total payouts
+$\le \text{totalLocked} \le \text{juniorAssets}$. So the **junior-first-loss waterfall
+absorbs all underwriting loss before senior is ever touched.** The waterfall in
+`releaseAndDistribute` takes $\text{juniorLoss} = \min(\text{payout}, \text{juniorAssets})$
+first and $\text{seniorLoss} = \text{payout} - \text{juniorLoss}$ only after; by the
+invariant the `min` is defense-in-depth — senior is never reached.
+</Step>
+<Step title="Where enforced">
+`ConvexityVault` — the `SeniorProtectionBreached` revert in `lockCollateral` and the
+junior-first waterfall in `releaseAndDistribute`.
+</Step>
+<Step title="The adaptive-vs-fixed distinction">
+This is the **adaptive code form** of the $u \le 1 - sf$ rule, keyed to the
+*actual* junior buffer (safer than a fixed ratio). The target tranche ratio $sf = 0.60$
+is for UX/incentives, **not** the hard cap. With
+$sf = 0.60$, junior $= 1 - sf = 0.40$, so the invariant is exactly $u \le 0.40 = 1 - sf$.
+</Step>
+<Step title="Run defense">
+Withdrawals are cooldown-gated (`requestWithdrawal` → `withdraw` after
+`withdrawalCooldown`) and **junior cannot be withdrawn below `totalLocked`** (the
+`JuniorBelowLocked` revert). The same locked/free accounting that prevents a
+run also drives `util_skew` *up* before the pool over-commits.
+</Step>
+</Steps>
+
+<Warning>
+**Limit:** senior $P(\text{loss}) = 0$ is a **calibration** result, not a structural
+guarantee. **Why:** it holds only while $u \le 1 - sf$; the *structural* invariant
+$\text{totalLocked} \le \text{juniorAssets}$ guarantees senior is shielded from
+*underwriting* loss specifically, but never from the systemic tail (USDC depeg, oracle
+failure, contract bug). **Mitigation:** the invariant is enforced on every lock, the run
+defense keeps junior $\ge$ `totalLocked`, and the disclosure below is mandatory on every
+depositor surface. Capital-not-guaranteed is the umbrella for **both** tranches.
+</Warning>
+
+<ClaimB />
+
+---
+
+## How these are checked, in one place
+
+<AccordionGroup>
+<Accordion title="Foundry invariant fuzz — the headline number">
+The aggregate vault-solvency run is recorded at **256 runs × 128,000 fuzzed vault-op
+calls × 0 reverts** for I5. I1/I2, I3, I6, I9, and I10 each run
+256-run targeted fuzz; I8 runs 5 tests at ~1,280 runs total. The settle-path invariants
+are exercised over the *whole* price domain — in-range, below `Pa`, above `Pb`, and the
+no-IL region — not just the happy path.
+</Accordion>
+<Accordion title="Static analysis (Slither 0.11.5)">
+Two passes. The core pass produced 27 findings → **1 fixed** (`reentrancy-no-eth` in
+`settle`, resolved by hoisting `status = SETTLED` before any external call) **+ 26
+accepted false-positives**. The cvAMM pass produced 74 results → **0 high, 0 confirmed
+vulnerabilities, 1 cleanup**, with manual confirmation of the junior-first-loss
+waterfall, the run defense, and the `lockedAfter ≤ juniorAssets` senior-protection
+check. See [audits](/security/audits) and
+[CEI / reentrancy](/security/cei-reentrancy).
+</Accordion>
+<Accordion title="Where the invariants are oracle-independent vs oracle-dependent">
+I1–I7 and the senior-protection invariant are *structural* — they hold by construction
+regardless of any pricing oracle. I8 depends on Chainlink/sequencer liveness (that is
+exactly the property it bounds). I9 depends on the live oracle read at create. I10 is a
+deterministic clamp with **no** liveness dependency. The FairValue and Vol oracles are
+load-bearing for **I10 and depositor solvency**, *not* for I1's no-bad-debt guarantee.
+</Accordion>
+</AccordionGroup>
+
+## Related reading
+
+<CardGroup cols={2}>
+<Card title="The no-bad-debt math" icon="square-root-variable" href="/math/no-bad-debt-math">
+The formula-level proof behind I1/I2 — why `payout ≤ collateral` holds on every arm of
+the payoff.
+</Card>
+<Card title="The two architectural forks" icon="code-branch" href="/security/forks">
+The full Fork 1 (I8) and Fork 2 (I9) story: the deadlock and pickoff classes, and the
+chosen resolutions.
+</Card>
+<Card title="Price pinning" icon="anchor" href="/security/price-pinning">
+How on-chain Chainlink derivation of `P0` and `P_T` closes the settler-chosen-price hole
+(restoring I2/I4).
+</Card>
+<Card title="Attack vectors" icon="shield-halved" href="/security/attack-vectors">
+The attack ↔ mitigation ↔ invariant table mapping each audited vector to its enforcing
+invariant.
+</Card>
+</CardGroup>

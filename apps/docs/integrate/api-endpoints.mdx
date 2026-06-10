@@ -1,0 +1,452 @@
+---
+title: "API endpoint guide"
+description: "A walkthrough of the public REST API — system, markets, pool, pricing, swaps, data-signals, MM and sigma routes — with copy-pasteable curl, and a map of what is live now vs subgraph-pending."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+The public REST API (`@inflexion/api`) is a **read-only, cached facade** over the protocol: no wallet, no signer, no RPC key for consumers. It is framework-free `node:http`, matching the [engine's](/integrate/engine) style, and it composes **three independently-degrading backings** behind one stable envelope.
+
+<Info>
+This page is the guide — it explains what each route is for, the reasoning behind its backing, and gives a worked curl for every endpoint. The complete machine-readable contract lives in the API Reference tab (served verbatim at `GET /openapi.json`, the single source of truth).
+</Info>
+
+## The mental model: three backings, one envelope
+
+The API never re-derives protocol truth. It forwards it. There are exactly three sources of data, and the routing rule is fixed: *needs history or an aggregate → subgraph (consumed via this API); needs frictionless public access with no wallet and no RPC key → this API.*
+
+<CardGroup cols={3}>
+  <Card title="Subgraph [SG]" icon="database">
+    History and aggregates via GraphQL. **Not deployed yet** — these surfaces return a typed `pending` body **with the exact future query embedded**.
+  </Card>
+  <Card title="Live RPC [RPC]" icon="bolt">
+    Reuses `@inflexion/sdk` `DataClient` / `DepositorClient`. **The SDK owns pricing — the API never re-derives the fair rate or load stack**. Works **now**.
+  </Card>
+  <Card title="Telemetry [TEL]" icon="file-lines">
+    Reads the engine's append-only JSONL sinks (`DEMAND_LOG`, `COMPETITION_LOG`) for the two dynamic moat halves — files, not events, because unfilled interest on-chain would break [invariant I7](/security/invariants). Works **now**.
+  </Card>
+</CardGroup>
+
+The single hard rule behind backing [RPC]: the Φ-sum fair rate is computed in exactly one place — the Stylus [`FairValueOracle`](/concepts/fair-value) — surfaced through the SDK; the API only *forwards* it. See [the Φ-sum](/math/fair-value-phi-sum) for the closed form.
+
+### The response envelope — `available:true` vs typed `pending`
+
+Every data endpoint returns one of two shapes and **never throws** (the OpenAPI `ApiResult`):
+
+```jsonc
+// Available
+{ "available": true, /* ...payload */ }
+
+// Pending (typed, degraded — not an error)
+{ "available": false,
+  "reason": "<PendingReason>",
+  "detail": "human note describing what unblocks this surface",
+  "query": "<the future GraphQL query this surface WILL run>" }   // present on subgraph routes
+```
+
+<Warning>
+**Limit → Why → Mitigation.** The subgraph is **not yet deployed**, so every `[SG]` route returns `pending` today.
+
+- **Why:** the moat dataset begins at a single redeploy block (`_deployBlock = 274081134`, the subgraph `startBlock`); deploying earlier would index a pre-redeploy chain state that is deliberately excluded.
+- **Mitigation:** the pending body is **self-documenting and wired-and-ready** — it embeds the exact GraphQL query the surface will run, so a consumer sees precisely what will appear, and the redeploy is *a flip, not a rewrite*. History degrades to a typed `pending` state — never an error.
+</Warning>
+
+`PendingReason` is a closed enum:
+
+| Reason | When |
+| ------ | ---- |
+| `subgraph-not-deployed` | no `SUBGRAPH_URL` configured (the default state today) |
+| `subgraph-unreachable` | configured but HTTP / network / timeout failure |
+| `rich-events-pre-redeploy` | subgraph deployed-but-quiet: `SwapPriced` / `QuoteFilled` not yet firing |
+| `telemetry-sink-absent` | `COMPETITION_LOG` / `DEMAND_LOG` not configured on the engine |
+| `rpc-unavailable` | no RPC wired, or a live RPC read failed |
+
+### Standing disclosures attach to the relevant surfaces
+
+Three disclosures travel **in the response body** so a consumer cannot read a number without its caveat. They are **never merged** — `/pool` is a Claim-B surface; `/swaps` and `/mm` are Claim-A surfaces.
+
+<ClaimA />
+
+<ClaimB />
+
+<Maturity />
+
+### Cross-cutting behavior
+
+<AccordionGroup>
+  <Accordion title="GET-only, CORS-open, preflight 204">
+    Non-`GET` → `405 { available:false, reason:'method-not-allowed', detail:'read-only API; GET only' }`. `OPTIONS` → `204` with CORS. Every JSON response sends `access-control-allow-origin: *` so the browser dApp (a different origin) can read freely.
+  </Accordion>
+  <Accordion title="bigint-safe wire format">
+    `JSON.stringify` uses a replacer that coerces every `bigint` → decimal string. Numbers that exceed `2^53` are always strings on the wire — see [decimals & units](/reference/decimals-units).
+  </Accordion>
+  <Accordion title="Caching — short, per-route TTLs; errors never cached">
+    JSON responses send `Cache-Control: public, max-age=5`; the `/docs` HTML sends `max-age=300`. Internally a per-route TTL cache memoises producers; **errors are NOT cached**. Per-route TTLs: markets 60s, marketById 5s, pricingPreview 3s, poolState 5s, navHistory 60s, swapById 5s, loadSurface 60s, convexitySurface 300s, netGamma 60s, sigmaHistory 60s, mmFills 30s.
+  </Accordion>
+  <Accordion title="Last-resort guards">
+    Handlers never throw by design; a stray bug returns `500 { available:false, reason:'internal', detail }` rather than crashing the process. An unmatched route → `404 { available:false, reason:'not-found', detail:'no route for <path>' }`.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+All examples below use `http://localhost:8088` (default `PORT=8088`). For the live deployment base URL and contract addresses, see [deployments](/reference/deployments). For the env vars that wire each backing, see [env vars](/reference/env-vars).
+</Note>
+
+---
+
+## System / docs routes — [STATIC]
+
+These three are unconditional: they always answer, regardless of which backings are wired.
+
+### `GET /health` — which backings are live right now
+
+The fastest way to see the API's state of the world. Each flag is a *configuration* fact, not a *reachability* proof.
+
+```bash
+curl -s http://localhost:8088/health
+# → {"ok":true,"subgraph":false,"live":true,"telemetry":{"demand":true,"competition":true}}
+```
+
+`subgraph` = a `SUBGRAPH_URL` is configured; `live` = an RPC is wired; `telemetry.*` = each sink path is configured. The example above is the canonical today-state: subgraph off, live RPC + both telemetry halves on.
+
+### `GET /openapi.json` and `GET /docs`
+
+```bash
+# The OpenAPI 3.1 document — the single source of truth for the contract
+curl -s http://localhost:8088/openapi.json
+
+# Interactive Swagger UI (open in a browser)
+#   http://localhost:8088/docs
+```
+
+`GET /openapi.json` returns the OpenAPI 3.1 document verbatim. `GET /docs` serves a Swagger-UI HTML shell that renders it from a CDN.
+
+<Tip>
+The OpenAPI doc is **hand-authored** — no codegen, no network — so it stays offline-CI-safe and models the `available`/`pending` discriminated union once, then `$ref`s it everywhere. When in doubt about a field, trust `/openapi.json` over any prose, including this page.
+</Tip>
+
+---
+
+## Markets directory — [SG]
+
+The catalogue of tradeable [markets](/protocol/markets). Subgraph-backed, so it returns `pending` today — with its query embedded.
+
+### `GET /markets`
+
+```bash
+curl -s http://localhost:8088/markets
+# → {"available":false,"reason":"subgraph-not-deployed",
+#    "detail":"no subgraph url configured (not deployed yet)",
+#    "query":"query Markets($first: Int = 100) { markets(...) { id token0 token1 fee ... } }"}
+```
+
+`getMarkets` runs the `Q_MARKETS` query. Each market row carries `token0/token1/fee`, `durationSeconds/durationBucket`, `oracleToken`, `active`, `cvammEnabled`, and the rollups `totalSwaps/totalSettled/totalV0/totalPremium/totalPayout/pathBFills`.
+
+### `GET /markets/:id`
+
+```bash
+curl -s http://localhost:8088/markets/0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2
+# → pending today; will return {"available":true,"market":{...}}
+```
+
+`getMarketById` runs the `Q_MARKET_BY_ID` query; the route regex requires `:id` to be a bytes32 hex. See [marketId parity](/integrate/marketid-parity) for how the id is derived identically on-chain and off-chain.
+
+---
+
+## Pool / vault routes
+
+The [vault](/protocol/vaults) surfaces. Two of the three work **now** over live RPC; the NAV history is subgraph-backed. All three are **Claim-B** surfaces — depositor capital is at risk on both [tranches](/concepts/tranches).
+
+### `GET /pool` — live vault state — [RPC], Claim B
+
+The composite vault state via the SDK `getVaultState`: NAV, senior/junior assets, utilization, concentration, the two skews, and the regime.
+
+```bash
+curl -s http://localhost:8088/pool
+# → {"available":true,"pool":{ /* NAV, senior/junior, util, conc, skews, regime */ },
+#    "disclosure":"Depositor capital is NOT guaranteed..."}
+```
+
+`getPoolState` backs this route. Optional `marketIds` (CSV bytes32) narrows the composite. With no `depositor` client wired (no RPC) it reports `rpc-unavailable`; an SDK degrade is surfaced as-is rather than masked.
+
+### `GET /pool/load-surface` — the price-to-beat — [RPC]
+
+The current pool-load surface — the cvAMM's *price-to-beat* — via an SDK multicall. **This works now, pre-redeploy**, because it reads public getters, not rich events.
+
+```bash
+curl -s 'http://localhost:8088/pool/load-surface?marketIds=0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69'
+# → {"available":true,"surface":{...},
+#    "note":"LIVE uncached pool-load surface...","disclosure":"Structures ship..."}
+```
+
+`getCurrentLoadSurface` backs this route; it carries the maturity disclaimer. This surface is what the [Path-A pool](/protocol/path-a-cvamm) charges; an MM on [Path B](/protocol/path-b-mm) must beat it to win the [route](/protocol/routing).
+
+### `GET /pool/nav-history` — [SG], Claim B
+
+```bash
+curl -s 'http://localhost:8088/pool/nav-history?bucket=day'
+# → pending today; will return per-tranche NAV time series + Claim-B disclosure
+```
+
+`getNavHistory` runs the `Q_POOL_DAY/HOUR_SNAPSHOTS` queries. `bucket=day|hour` (default `day`).
+
+---
+
+## Pricing — [RPC]
+
+### `GET /pricing/preview` — live fair + pool premium
+
+The one route that prices a hypothetical position. It forwards the SDK's current-load surface row, which already carries `fairPremium` and `poolPremium` — **the API never re-derives the fair rate**. See the [pricing stack](/protocol/pricing-stack) for the full derivation.
+
+```bash
+# marketId is required; the geometry override is applied only when a, b AND maxIL are all supplied
+curl -s 'http://localhost:8088/pricing/preview?marketId=0x67c4...d69&a=...&b=...&maxIL=1669240000'
+# → {"available":true,"pricing":{...,"fairPremium":...,"poolPremium":...},
+#    "note":"LIVE cached fair + pool premium..."}
+```
+
+`getPricingPreview` backs this route. The geometry inputs are raw WAD bigints:
+
+<ParamField query="marketId" type="bytes32 hex" required>
+The market to price against. Invalid → `400 { available:false, reason:'bad-request', detail:'marketId (bytes32 hex) required' }`.
+</ParamField>
+<ParamField query="a" type="bigint (WAD)">
+$a = (P_a / P_0)^2$ in WAD. See [the IL formula](/math/il-formula) for the geometry.
+</ParamField>
+<ParamField query="b" type="bigint (WAD)">
+$b = (P_b / P_0)^2$ in WAD.
+</ParamField>
+<ParamField query="maxIL" type="bigint">
+The position's [MaxIL](/concepts/maxil) — the unit of risk, frozen at creation.
+</ParamField>
+
+<Note>
+The override is applied **only when all three of `a`, `b`, `maxIL` are supplied** — a partial geometry is ambiguous, so the SDK falls back to a neutral reference. Pass all three for a position-specific preview, or none for the market-neutral reference rate.
+</Note>
+
+---
+
+## Swaps — [SG], Claim A
+
+The realized fills — the on-chain record of every protected position. Subgraph-backed (`pending` today), Claim-A disclosure attached.
+
+### `GET /swaps`
+
+```bash
+curl -s 'http://localhost:8088/swaps?status=active&first=50'
+# → pending today; will return {"available":true,"swaps":[...],
+#    "disclosure":"LPs are always paid... qualified..."}
+```
+
+`getSwaps` runs the `Q_SWAPS` query.
+
+<ParamField query="status" type="active | settled">
+`active` → `isActive:true`; `settled` → `status:'SETTLED'`.
+</ParamField>
+<ParamField query="mm" type="address">
+Filter to one market maker (lowercased handler-side).
+</ParamField>
+<ParamField query="market" type="bytes32">
+Filter to one market (lowercased handler-side).
+</ParamField>
+<ParamField query="first" type="int (1–1000)" default="100">
+Page size.
+</ParamField>
+
+<Warning>
+**No injection surface.** The GraphQL `where` clause is built **handler-side from validated filters**, never assembled from raw user input. Unknown filter values are dropped, not forwarded.
+</Warning>
+
+### `GET /swaps/:swapId`
+
+```bash
+curl -s http://localhost:8088/swaps/1
+# → pending today; will return {"available":true,"swap":{...}} + Claim-A disclosure
+```
+
+`getSwapById` runs the `Q_SWAP_BY_ID` query; `:swapId` is a decimal id. A swap row carries the full economics: `v0`, `maxIL`, `premium`, `path`, `mmLoadBps`, `cappedAtMaxIL`, `realisedIL`, `payout`, `pnlForMm`, `settlementPrice`. For a worked example of these fields end-to-end, see the [lifecycle](/protocol/lifecycle) and the [worked example](/math/worked-example).
+
+---
+
+## The five moat signals — `/data/*`
+
+The first public view into the microstructure of the DeFi LP volatility-risk premium. The taxonomy is fixed. Read [the five signals](/moat/five-signals) for the thesis and [circular vs behavioral](/moat/circular-vs-behavioral) for why each is non-circular.
+
+| Path | Signal | Backing |
+| ---- | ------ | ------- |
+| `GET /data/load-surface?marketId` | 1 — historical clearing-load | [SG] |
+| `GET /data/convexity-surface` | 1 + 2 structural | [SG] |
+| `GET /data/term-structure?width&distance` | 3 — convexity term structure | [SG] |
+| `GET /data/demand-requests?marketId&since` | 4 — demand skew | [SG] + [TEL] |
+| `GET /data/quote-competition?marketId&since` | 2 — dynamic half | [TEL] |
+| `GET /data/net-gamma` | 5 — net gamma | [SG] |
+| `GET /data/supply-depth` | 5 — raw active set | [SG] |
+
+`marketId` / `since` filters are parsed by `parseFilter`: `marketId` must be bytes32, `since` a unix-ts integer. Every `/data/*` route carries the [maturity disclaimer](/moat/state-and-limits).
+
+### `GET /data/load-surface` — Signal 1
+
+```bash
+curl -s 'http://localhost:8088/data/load-surface?marketId=0xb8bb...39c2'
+# → pending today; will return {"available":true,"snapshots":[...]} + maturity
+```
+
+The *historical* clearing-load over a transparent σ_ref bucketed by geometry — `getLoadSurfaceHistory` runs the `Q_MARKET_STATE` query. Distinct from `/pool/load-surface`, which is the **live** price-to-beat over RPC.
+
+### `GET /data/convexity-surface` — Signal 1 + 2 structural
+
+```bash
+curl -s http://localhost:8088/data/convexity-surface
+# → pending today; will return {"available":true,"buckets":[...]} + maturity
+```
+
+Clearing-load over [σ_ref](/math/sigma-ref) and the pool-vs-MM spread, bucketed by width × distance × duration, **excluding cap-bound fills** — `getConvexitySurface` runs the `Q_BUCKET_AGGREGATES` query.
+
+<Note>
+Cap-bound fills are excluded **by construction** — `BucketAggregate` accumulates non-capped fills only. A fill that hit MaxIL no longer reflects the *fair* convexity load, so including it would bias the surface. `Q_BUCKET_FILLS` returns per-fill rows for an exact median, since the subgraph store has no median operator.
+</Note>
+
+### `GET /data/term-structure` — Signal 3
+
+```bash
+curl -s 'http://localhost:8088/data/term-structure?width=medium&distance=mid'
+# → pending today; will return {"available":true,"points":[...]} + maturity
+```
+
+The 7/30/90d points for one `(width, distance)` cell — `getTermStructure` runs the `Q_TERM_STRUCTURE` query; defaults `width=medium`, `distance=mid`. **The signal is the slope** of `medianMMLoadBps` across `durationBucket` — Path-B behavioral; Path A is duration-flat.
+
+### `GET /data/demand-requests` — Signal 4 (the only split surface)
+
+```bash
+curl -s http://localhost:8088/data/demand-requests
+# → {"available":true,
+#    "realized":{"available":false,"reason":"subgraph-not-deployed","query":"..."},
+#    "latent":[{"marketId":"0x...","widthBucket":"tight",...,"count":3,"previews":2,"quoteRequests":1}],
+#    "latentEnabled":true,"disclosure":"Structures ship..."}
+```
+
+`getDemandRequests` backs this route. This is the **only intrinsically split surface**: the *realized* half comes from the subgraph (`pending` today), the *latent* half from the engine's `DEMAND_LOG` (**LIVE now**) — each with its own availability flag.
+
+<Tip>
+This is the demand the chain never sees: everything an LP priced but did not buy. Because [invariant I7](/security/invariants) keeps an unchosen quote off-chain, the latent half is *unreconstructable retroactively* — which is exactly why the [engine](/integrate/engine) captures it to JSONL from the first interaction. The surface is therefore **partially live before the redeploy**.
+</Tip>
+
+### `GET /data/quote-competition` — Signal 2 dynamic — [TEL]
+
+```bash
+curl -s 'http://localhost:8088/data/quote-competition?marketId=0x...&since=1900000000'
+# → {"available":true,"competition":[{"mm":"0x...","quotes":12,"accepted":10,"rejected":2,
+#    "minLoadBps":480,"avgLoadBps":510,...}],"enabled":true,...}
+```
+
+`getQuoteCompetition` backs this route; it reads `COMPETITION_LOG` — **winners AND losers** — aggregated per `(market × MM)`.
+
+<Warning>
+**Limit → Why → Mitigation.** If `COMPETITION_LOG` is not configured on the engine, this returns `{ "available": false, "reason": "telemetry-sink-absent", "detail": "COMPETITION_LOG not configured..." }`.
+
+- **Why:** the chain only ever records the *realized* fill; who else quoted, how wide, and who widened or withdrew under stress leaves no on-chain trace by design.
+- **Mitigation:** set `COMPETITION_LOG` on the engine **from the first deploy** — these records cannot be reconstructed later. See [env vars](/reference/env-vars) and the [engine guide](/integrate/engine).
+</Warning>
+
+### `GET /data/net-gamma` and `GET /data/supply-depth` — Signal 5
+
+```bash
+curl -s http://localhost:8088/data/net-gamma
+# → pending today; will return {"available":true,"snapshots":[...],"protocolState":{...}} + maturity
+
+curl -s http://localhost:8088/data/supply-depth
+# → pending today; will return {"available":true,"activeSwaps":[...]} + maturity
+```
+
+`getNetGamma` runs the `Q_NET_GAMMA` query and reports the protocol's net convexity exposure; `getSupplyDepth` runs the `Q_ACTIVE_SWAPS` query and returns the raw `isActive` open set the API sums off-chain [Greeks](/sdk/greeks-hedge) over (finite-differencing the deployed ILMath / FairValueOracle).
+
+---
+
+## MM + sigma — [SG]
+
+### `GET /mm/:address/fills` — Claim A
+
+```bash
+curl -s http://localhost:8088/mm/0xe632B215120dD43A719458487bA3e03638fec953/fills
+# → pending today; will return {"available":true,"marketMaker":{...},"swaps":[...]} + Claim-A disclosure
+```
+
+`getMmFills` runs the `Q_MARKET_MAKER` query; `:address` is a 40-hex address. The Path-B underwriter's realized book — see [Path B](/protocol/path-b-mm).
+
+### `GET /sigma/:token/history`
+
+```bash
+curl -s http://localhost:8088/sigma/0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D/history
+# → pending today; will return {"available":true,"points":[...]}
+```
+
+`getSigmaHistory` runs the `Q_SIGMA_HISTORY` query. The [σ_ref](/math/sigma-ref) reference-volatility history per token, including `SwapPriced` backfill points. This is the *transparent denominator* every clearing-load signal is measured against — non-circular by construction.
+
+---
+
+## What is live now vs subgraph-pending
+
+A consolidated map. Use `GET /health` to confirm the runtime state of any deployment.
+
+<Tabs>
+  <Tab title="Live now (RPC + telemetry)">
+    These answer with real data today, no subgraph required:
+
+    | Route | Backing |
+    | ----- | ------- |
+    | `GET /health` | [STATIC] |
+    | `GET /openapi.json`, `GET /docs` | [STATIC] |
+    | `GET /pool` | [RPC] |
+    | `GET /pool/load-surface` (the price-to-beat) | [RPC] |
+    | `GET /pricing/preview` | [RPC] |
+    | `GET /data/demand-requests` (**latent half only**) | [TEL] |
+    | `GET /data/quote-competition` | [TEL] |
+
+    The live surfaces read **public getters and JSONL sinks**, not rich events — so they predate the subgraph.
+  </Tab>
+  <Tab title="Subgraph-pending (typed, embedded query)">
+    These return `{available:false, reason:'subgraph-not-deployed', query:…}` today — wired-and-ready, awaiting the redeploy:
+
+    | Route | Backing |
+    | ----- | ------- |
+    | `GET /markets`, `GET /markets/:id` | [SG] |
+    | `GET /pool/nav-history` | [SG] |
+    | `GET /swaps`, `GET /swaps/:swapId` | [SG] |
+    | `GET /data/load-surface` | [SG] |
+    | `GET /data/convexity-surface` | [SG] |
+    | `GET /data/term-structure` | [SG] |
+    | `GET /data/demand-requests` (**realized half**) | [SG] |
+    | `GET /data/net-gamma`, `GET /data/supply-depth` | [SG] |
+    | `GET /mm/:address/fills` | [SG] |
+    | `GET /sigma/:token/history` | [SG] |
+  </Tab>
+</Tabs>
+
+<Warning>
+**Limit → Why → Mitigation: the subgraph is not yet deployed.**
+
+- **Limit:** all `[SG]` routes are `pending` today.
+- **Why:** the dataset is anchored to one redeploy block (`startBlock 274081134`) so the moat dataset is clean from genesis; the deploy is staged behind the contract redeploy.
+- **Mitigation:** every pending body embeds its exact future query, so integrators can build against the final shape **today** — the redeploy is a flip, not a rewrite. When it lands, `SwapPriced` / `QuoteFilled` join the structural moat halves to the dynamic halves already captured in telemetry. Track the live status on [status & caveats](/reference/status-caveats) and [what's live](/status).
+</Warning>
+
+---
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="API overview" icon="map" href="/integrate/api-overview">
+    The three-layer architecture, the envelope, and when to reach for the API vs the SDK vs the subgraph.
+  </Card>
+  <Card title="The engine" icon="tower-broadcast" href="/integrate/engine">
+    The Path-B quote relayer — the WS protocol, the SignedQuote, and the day-one telemetry sinks the `/data/*` routes read.
+  </Card>
+  <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
+    The entities and the redeploy plan that flips every `[SG]` route from pending to live.
+  </Card>
+  <Card title="Data client (SDK)" icon="chart-line" href="/sdk/data-client">
+    The typed client for the same surfaces — when you want SDK ergonomics instead of raw curl.
+  </Card>
+</CardGroup>

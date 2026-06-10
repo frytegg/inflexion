@@ -1,0 +1,330 @@
+---
+title: "State of the dataset & honest limits"
+description: "What is live (on-chain events + off-chain telemetry) vs pending (the subgraph), the one real subgraph gap, and every honest limit framed Limit → Why → Mitigation — never naked."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+This page states plainly what is
+**live**, what is **pending**, and the **one real gap** in the indexer — and frames
+every limitation as **Limit → Why → Mitigation**, because a naked caveat is a defect.
+The companion design pages are [the moat thesis](/moat/thesis),
+[the five signals](/moat/five-signals), and [the on-chain primitives](/moat/primitives);
+the cross-cutting protocol caveats live at
+[/reference/status-caveats](/reference/status-caveats).
+
+<Maturity />
+
+## The one-screen status (as of 2026-06-09)
+
+The data moat is built from three layers, each on its own clock. Two are serving real
+data **today**; one (the indexer) is built and passing all offline checks but awaiting a single deploy.
+
+| Layer | What it carries | State |
+| --- | --- | --- |
+| **On-chain events** | `SwapPriced`, `QuoteFilled`, `CvammPricing.loadComponents` — the per-fill clearing record + the single non-circular load datum + the on-chain load breakdown | **LIVE** — shipped in the 2026-06-05 full redeploy |
+| **Off-chain telemetry** | `DEMAND_LOG` (Signal 4 latent half), `COMPETITION_LOG` (Signal 2 dynamic half) — the data that *never reaches the chain* by [invariant I7](/security/invariants) | **CAPTURING NOW** — append-only from the first interaction |
+| **The subgraph (indexer)** | History + geometry-bucketed aggregates: `BucketAggregate`, `GeometryDemandBucket`, `NetGammaSnapshot`, `MarketStateSnapshot` | **BUILT, NOT YET DEPLOYED** — passing all offline checks; `SUBGRAPH_URL` unset |
+
+<Info>
+**The shape of the honesty.** The contracts emit *every* event the moat needs, and the
+telemetry sinks capture the unreconstructable halves *now*. The single outstanding
+dependency for the **history/aggregate** surfaces is one subgraph deploy — a **build
+gap, not a contract gap**. Nothing in the protocol needs to change for the dataset to
+mature; it needs flow, MM competition, and one deploy.
+</Info>
+
+## What is live now
+
+<CardGroup cols={2}>
+<Card title="On-chain moat events" icon="cube">
+`SwapPriced` (every create path) and `QuoteFilled` (every Path-B fill), plus the
+on-chain load decomposition `CvammPricing.loadComponents`, shipped in the fresh full
+redeploy **2026-06-05**.
+</Card>
+<Card title="The dataset's genesis block" icon="flag-checkered">
+Redeploy block **`274081134`** is the subgraph `startBlock` — **the on-chain moat
+dataset begins here**.
+</Card>
+<Card title="Off-chain telemetry sinks" icon="satellite-dish">
+`DEMAND_LOG` and `COMPETITION_LOG` write append-only JSONL from the first interaction;
+the SDK `previewPremium` ping fires now.
+</Card>
+<Card title="The live load surface (Signal 1, current)" icon="bolt">
+`DataClient.getCurrentLoadSurface` serves the "price-to-beat" pool load surface from a
+single multicall over public getters — live RPC, no API, no subgraph.
+</Card>
+</CardGroup>
+
+Live deployment addresses (never hardcoded inline): <AddressTable />.
+
+### The two on-chain primitives that make the moat legible
+
+The redeploy landed the two events the moat is built on. They are **on-chain now**;
+only the indexer that aggregates their history is pending.
+
+<CodeGroup>
+```solidity SwapPriced — the per-fill clearing record
+// emitted on ALL THREE create paths
+event SwapPriced(
+    uint256 indexed swapId,
+    uint8   path,            // 0 = cvAMM pool (A), 1 = MM (B)
+    uint256 fairPremium,     // the WAD baseline the load multiplies
+    uint256 baseLoadWad,     // pool load decomposition (Path A); 0 on Path B
+    uint256 utilSkewWad,     //   "
+    uint256 dispSkewWad,     //   "
+    uint256 totalLoadWad,    // Path A: clamped pool load; Path B: MM loadBps in WAD
+    uint256 sigmaRefWad,     // the σ_ref the swap was priced against
+    bool    cappedAtMaxIL    // true ⇒ premium hit the cap ⇒ ZERO load info
+);
+```
+
+```solidity QuoteFilled — the single non-circular load datum
+// emitted on every Path-B fill
+event QuoteFilled(
+    uint256 indexed swapId,
+    address indexed mm,
+    bytes32 indexed quoteId,
+    uint256 nonce,
+    uint16  loadBps          // the MM's actor-chosen load, attributed to the exact quote
+);
+```
+</CodeGroup>
+
+A representative pair of live fills, demonstrating the load → moat path, with dUSDC = 6 decimals as the numéraire:
+
+| Swap | Path | Premium | MaxIL | Load datum | Note |
+| --- | --- | --- | --- | --- | --- |
+| #1 | A (cvAMM pool) | \$9.70 | \$1,669.24 | premium = 0.58% of MaxIL | mechanical baseline |
+| #2 | B (MM) | \$8.93 (`premiumB`) | — | `mmLoadBps = 1000` | routed to MM; `premiumB` \$8.93 < cvAMM `premiumA` \$13.80, settled from MM collateral |
+
+## What is pending — and exactly why
+
+<Warning>
+**Limit.** The subgraph is **built but not yet deployed**. `SUBGRAPH_URL` is unset, so
+every **history / aggregate** surface degrades to a typed `pending` state naming its
+future route.
+
+**Why.** This is a *build gap, not a contract gap*. The contracts already emit every
+event the moat needs; the subgraph passes all offline checks (codegen, type-check, and
+unit tests all pass) and awaits a single deploy. No contract change is required to close
+it.
+
+**Mitigation / path forward.** Every history/aggregate route returns a discriminated
+union — `{ available:true, … } | { available:false, reason, … }` — and **never
+throws**; subgraph-backed routes return a typed `pending` body *with the exact future
+GraphQL query embedded* until `SUBGRAPH_URL` is set, so wiring the API later is a
+one-line body swap. Meanwhile the **live RPC** and
+**telemetry** surfaces return real data today.
+</Warning>
+
+Concretely, what degrades to `pending` vs what is real **right now**, per signal:
+
+| Signal | Live now | Pending on the subgraph deploy |
+| --- | --- | --- |
+| **1 — clearing load** | `getCurrentLoadSurface` (live RPC, "price-to-beat") | `getLoadSurfaceHistory` / `BucketAggregate` history |
+| **2 — pool-vs-MM spread** | `COMPETITION_LOG` telemetry (dynamic half, losing/withdrawn quotes) | `Swap.spreadWad`, `MarketMaker` win counts (structural half) |
+| **3 — term structure** | per-fill points exist on-chain | the 7/30/90d slope from `BucketAggregate[]` |
+| **4 — demand skew** | `DEMAND_LOG` telemetry (latent half, unfilled interest) | `GeometryDemandBucket` realized aggregate |
+| **5 — net gamma** | the open set is tracked on-chain (`SwapCreated`/`SwapSettled`) | `NetGammaSnapshot` / off-chain Greeks compute over the indexed set |
+
+(Per-signal access detail and the SDK method names are tabulated on
+[/moat/access-map](/moat/access-map); the SDK methods are
+`getCurrentLoadSurface`, `getLoadSurfaceHistory`,
+`getQuoteCompetition`, `getDemandRequests`, and `getNetGamma`.)
+
+## The one real subgraph gap — the per-market dimension
+
+There is exactly **one** known gap inside the indexer itself, and it is bounded. State
+it plainly, then frame it.
+
+<Warning>
+**Limit.** When the subgraph is deployed, the **per-MARKET** dimension is *declared but
+not yet populated*: `Market` lifetime counters and `MarketStateSnapshot` stay
+zero-initialised.
+
+**Why.** `SwapCreated` / `SwapPriced` / `QuoteFilled` carry **no `marketId`**, and the
+handler does not yet derive it, so per-market aggregation has no key to group on. This
+is the same design choice that keeps the events lean — geometry is recovered off-chain
+by the `NPM.positions` decode, not stored in the event.
+
+**Mitigation / path forward.** The **GEOMETRY-keyed** aggregates — `BucketAggregate`
+(Signals 1/2/3) and `GeometryDemandBucket` (Signal 4) — **are fully populated**, so the
+**geometry-bucketed moat signals are unaffected**. Closing the market dimension is a
+bounded follow-up: derive the key in `handleSwapCreated`:
+
+$$
+\text{marketId} \;=\; \text{keccak256}\bigl(\text{abi.encodePacked}(\text{token0},\,\text{token1},\,\text{fee},\,\text{uint32}(\text{duration}))\bigr)
+$$
+</Warning>
+
+<Note>
+**Read the blast radius correctly.** This gap touches only the *per-market* roll-up
+(e.g. "show me the ETH/USDC 30d market's lifetime fill count"). It does **not** touch
+the five behavioral signals, which are bucketed by **geometry** (width ×
+distance-to-edge × duration), not by market — and those aggregates populate from the
+first fill once the subgraph is live. The signals do not wait on the market-dimension
+follow-up.
+</Note>
+
+## The honest limits — every one, framed
+
+These six limits MUST travel with any data-product page. None is stated naked; each carries its WHY and its
+mitigation.
+
+<AccordionGroup>
+<Accordion title="1 — The clearing load is contaminated">
+**Limit.** The clearing load is not pure convexity premium — it is *contaminated* by
+liquidity premium, smart-contract-risk premium, capital-lock cost, and inventory skew.
+
+**Why.** An MM (or the pool) prices *everything* it bears into one load number: the cost
+of hedging, of locking collateral, of holding inventory — not only its forward-vol
+view. The *level* of the load mixes all of these.
+
+**Mitigation.** **Trade the SPREAD (MM − pool), not the level.** Both legs carry the
+same contamination over the same transparent baseline, so the *difference* cancels the
+shared premia and isolates the actor's forward view — which is exactly why
+[Signal 2](/moat/five-signals) is sold as a spread, not a level.
+</Accordion>
+
+<Accordion title="2 — The implied-vol-inversion idea was dropped as circular">
+**Limit.** The "invert `fairRate` for an implied-vol surface" claim is **DROPPED** — it
+is not a signal.
+
+**Why.** By construction `charged / MaxIL = fairRate(σ_ref)·(1 + load)`. Both `fairRate`
+([the Phi-sum](/math/fair-value-phi-sum)) and `σ_ref` are the protocol's *own* published
+outputs, so inverting `fairRate` recovers nothing but our own `σ_ref` plus our own load
+stack — a tautology, not a market-implied vol.
+
+**Mitigation.** The moat is reframed around **behavior**: the MM's freely chosen
+`loadBps` and the LP's geometry/duration choice, measured *against* the mechanical
+baseline, never *derived from* it. The full treatment, signal by signal, is at
+[/moat/circular-vs-behavioral](/moat/circular-vs-behavioral).
+</Accordion>
+
+<Accordion title="3 — Cap-bound fills carry zero load information">
+**Limit.** Fills with `SwapPriced.cappedAtMaxIL == true` must be **excluded** from the
+load surfaces (Signals 1, 2, 3).
+
+**Why.** When `premium == MaxIL` the load was *truncated by the cap* — the number you
+observe is the cap, not the actor's load. Including it biases the load distribution
+toward the cap.
+
+**Mitigation.** The explicit `cappedAtMaxIL` boolean on `SwapPriced` lets every consumer
+filter cap-bound fills cheaply and unambiguously — it was added precisely because
+deriving `premium == MaxIL` off-chain is brittle under rounding.
+</Accordion>
+
+<Accordion title="4 — The signal is reflexive as the protocol scales">
+**Limit.** As the protocol grows, the dataset begins to influence the very behavior it
+measures — the signal is *reflexive*.
+
+**Why.** This is intrinsic to **any** derivative market: once participants can see the
+clearing surface, they price against it, and their pricing feeds back into the surface.
+
+**Mitigation.** Reflexivity is **normal and expected**, not a defect — it is the mark of
+a functioning price-discovery venue. We disclose it rather than pretending the dataset is
+an inert observation, and the behavioral framing (measuring choices, not derivations)
+remains valid under reflexivity.
+</Accordion>
+
+<Accordion title="5 — Calibration lags at launch">
+**Limit.** There is no historical realized-IL dataset to calibrate against at launch.
+
+**Why.** No such dataset exists anywhere — *because the protocol is the mechanism that
+creates it*. No prior venue priced the in-range convexity of a specific Uniswap v3 range,
+so there is nothing to import.
+
+**Mitigation.** This absence **is the moat**: the genesis of the dataset is the
+genesis of the protocol, captured from block `274081134` forward. A competitor cannot license or scrape what only accrues at
+the clearing mechanism.
+</Accordion>
+
+<Accordion title="6 — Structures day one, dynamics with volume">
+**Limit.** At launch (1 MM, a handful of fills) we ship the **architecture and the
+static STRUCTURES**, not the full **DYNAMICS**.
+
+**Why.** A spread needs two sides and a distribution needs many draws. With one MM you
+observe *one* undercut — which conflates "the market expects vol to fall" with "this MM
+has cheaper hedges", two orthogonal drivers that cannot be separated until competing MMs
+exist. The
+dynamic / latent halves (Signals 2 & 4) need day-one telemetry plus ≥3 competing MMs.
+
+**Mitigation.** Every primitive is captured from day one so the dynamics are
+*reconstructable as volume arrives, never retroactively lost*: the on-chain halves of
+Signals 1/2/3/5 begin at the redeploy, and the off-chain telemetry halves begin at the
+first interaction — and that latent/dynamic data is *unreconstructable retroactively* by
+[invariant I7](/security/invariants), which is exactly why it is logged now. The structures sharpen into dynamics with ≥3
+competing MMs and ~30–50 fills/bucket — weeks-to-months at launch flow, not a redesign.
+</Accordion>
+</AccordionGroup>
+
+## Why the unreconstructable halves are captured now (I7)
+
+Two of the five signals depend on data that **never reaches the chain by design**, and
+this is the single most important reason the telemetry sinks run from day one.
+
+<Warning>
+**Limit.** An LP who priced but did not buy, and an MM quote that lost or was withdrawn,
+leave **no on-chain trace**.
+
+**Why.** [Invariant I7](/security/invariants) guarantees an *unchosen* quote touches no
+nonce and no capacity — so the latent half of [Signal 4](/moat/five-signals) (demand
+that was priced but not filled) and the dynamic half of
+[Signal 2](/moat/five-signals) (losing/withdrawn MM quotes) have no on-chain footprint.
+Putting them on-chain would both cost gas and *break* I7.
+
+**Mitigation.** These halves live in **off-chain engine telemetry** — `DEMAND_LOG` and
+`COMPETITION_LOG` — captured from the very first interaction precisely because they are
+**unreconstructable retroactively**. The writer is
+*best-effort*: a telemetry failure never breaks a quote ack, preview, or `/quote`
+request. Both sinks are **capturing now**, and
+`GET /health` reports their status as `{ telemetry: { demand: true, competition: true } }`.
+</Warning>
+
+## Degradation is typed, never an error
+
+The whole access layer is built so that "pending" is a **first-class, typed state**, not
+a failure mode.
+
+<Tabs>
+<Tab title="API">
+Every endpoint returns a discriminated union `{ available:true, … } | { available:false,
+reason, detail, query? }` and **never throws**. Subgraph-backed routes return a typed
+`pending` body — with the exact future GraphQL query embedded — until `SUBGRAPH_URL` is
+set; the live-RPC and telemetry routes return real data now.
+</Tab>
+<Tab title="SDK">
+History methods return a typed `ApiPending` naming the FUTURE route plus the query that
+would be sent, so wiring the API later is a one-line body swap. The one live exception is
+`getCurrentLoadSurface`, which hits live RPC for the "price-to-beat" surface.
+</Tab>
+<Tab title="Per-market graceful degradation">
+Inside the live load surface, an unknown/inactive market or a reverting oracle yields an
+inlined *degraded* `SurfaceRow` rather than a thrown call — one bad market never poisons
+the others.
+</Tab>
+</Tabs>
+
+See [/sdk/degradation](/sdk/degradation) for the SDK contract and
+[/reference/status-caveats](/reference/status-caveats) for the protocol-wide caveat
+register.
+
+## Where to go next
+
+<CardGroup cols={2}>
+<Card title="The five signals" icon="list-ol" href="/moat/five-signals">
+Each behavioral signal, with its non-circularity verdict, sourcing, and maturity caveat.
+</Card>
+<Card title="Circular vs behavioral" icon="rotate" href="/moat/circular-vs-behavioral">
+Why inverting `fairRate` is circular, and the mechanical-vs-behavioral subtraction rule.
+</Card>
+<Card title="The on-chain primitives" icon="cube" href="/moat/primitives">
+`SwapPriced`, `QuoteFilled`, the load-breakdown library, and the I7 reason two signals
+can never be on-chain.
+</Card>
+<Card title="The access map" icon="map" href="/moat/access-map">
+SDK method, API route, and subgraph entity for each signal — and which are live today.
+</Card>
+</CardGroup>

@@ -1,0 +1,371 @@
+---
+title: "DataClient reference"
+description: "The data-moat SDK surface: one live load-surface read plus the typed ApiPending history methods that name their future API route and never fabricate data."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+
+`DataClient` is the SDK surface over the [data moat](/concepts/data-moat) — the first public view into the [microstructure of the DeFi LP volatility-risk premium](/moat/thesis). It carries no claim and holds no signer: every method is read-only and none of them ever mutate state.
+
+The surface splits cleanly into two classes, and the split is the whole design:
+
+<CardGroup cols={2}>
+  <Card title="One LIVE method" icon="bolt">
+    `getCurrentLoadSurface` (+ the `getSurfaceSigmaRef` annotation) reads live RPC: the same multicall MM `getMarketPricing` does, fanned across a set of markets. The current "price-to-beat" snapshot, uncached.
+  </Card>
+  <Card title="Five history methods" icon="clock-rotate-left">
+    `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNavHistory`, `getNetGamma` — every history/aggregate surface. Each returns a typed `ApiPending` naming the future API route until the subgraph + API ship.
+  </Card>
+</CardGroup>
+
+<Note>
+**The SDK never fabricates history.** Anything that needs the not-yet-deployed subgraph or the off-chain telemetry API returns a typed degraded envelope (`{ available:false, reason:'no-history-source', endpoint, query, detail }`) — never a throw, never a guessed number. The on-chain moat events (`SwapPriced`, `QuoteFilled`) are LIVE since the 2026-06-05 redeploy; what is pending is only the subgraph that indexes them.
+</Note>
+
+---
+
+## The method table
+
+Construct it from the SDK factory (`sdk.data`) or directly via `makeDataClient(publicClient)`. The constructor takes optional address overrides; by default it resolves `InflexionCore`, `ConvexityVault`, the Stylus `FairValueOracle`, and `VolOracle` from [the deployment registry](/reference/deployments).
+
+| Method | Args | Returns | Status | Backed by |
+| --- | --- | --- | --- | --- |
+| `getCurrentLoadSurface` | `{ markets: { marketId, geometry? }[] }` | `LoadSurface` | **LIVE** | RPC multicall: Core `loadParams`/`markets`, ConvexityVault `inventory`, FVO `fairPremium`; load via TS port |
+| `getSurfaceSigmaRef` | `token` | `Degraded<{ sigmaRefWad, regime }>` | **LIVE** | VolOracle `sigmaRef` + Core `loadParams` |
+| `getLoadSurfaceHistory` | `{ marketId, from?, to?, bucket? }` | `ApiPending` | pending | subgraph `/data/load-surface` |
+| `getQuoteCompetition` | `{ marketId?, from?, to? }` | `ApiPending` | pending | subgraph + engine `COMPETITION_LOG` → `/data/quote-competition` |
+| `getDemandRequests` | `{ marketId?, from?, to? }` | `ApiPending` | pending **by design** | engine `DEMAND_LOG` (off-chain only) → `/data/demand-requests` |
+| `getNavHistory` | `{ from?, to?, bucket? }` | `ApiPending` | pending | subgraph `/pool/nav-history` (carries claim B) |
+| `getNetGamma` | `{ marketId? }` | `ApiPending` | pending | off-chain compute → `/data/net-gamma` |
+
+Each history method maps 1:1 onto one of the [five behavioral signals](/moat/five-signals). The route strings are not free text — they are the SDK ↔ API contract, exported verbatim as `DATA_API_ROUTES` so the integration layer wires exactly the same paths the SDK already names.
+
+---
+
+## The live half — `getCurrentLoadSurface`
+
+This is the only `DataClient` method that hits live RPC instead of the (not-yet-built) API. It is the **live half of [Signal 1](/moat/five-signals)** — the current clearing-load "price-to-beat" — while its historical evolution is `getLoadSurfaceHistory`.
+
+### Read set
+
+Per call: one shared `loadParams()` + `inventory()`, then a per-market `markets()` multicall, then a per-market `fairPremium()` multicall — exactly the read set MM [`getMarketPricing`](/sdk-reference/mm) does, fanned out:
+
+```text
+InflexionCore.loadParams()                       → load-stack params      (read ONCE)
+ConvexityVault.inventory()                       → (total, locked, free, util, conc)   (ONCE)
+InflexionCore.markets(marketId)                  → config (oracleToken, durationSeconds…)
+FairValueOracle.fairPremium(token, a, b, T, maxIL) → (premium, fairRate, σ_ref)
+```
+
+The load stack is then **finished client-side** with the parity-locked [`CvammPricing` TS port](/sdk/cvamm-port): `load = loadComponents(σ_ref, util, conc, params)` and
+
+$$
+\text{poolPremium} = \min\!\Big(\big\lceil \text{fairPremium}\cdot(1+\text{totalLoad})\big\rceil,\; \text{MaxIL}\Big)
+$$
+
+The Φ-sum is read on-chain and **never reimplemented**; only the deterministic `pure` load stack is mirrored off-chain — the single permitted duplication, because the deployed `CvammPricing` library is delegatecall-only and reverts on a direct `eth_call`. See [the cvAMM port](/sdk/cvamm-port).
+
+<Tip>
+**Geometry is optional.** If a market supplies none, a neutral reference geometry is used: $a=0.81$, $b=1.21$ (i.e. $P_a/P_0=0.9$, $P_b/P_0=1.1$), MaxIL = \$1,000. The load **percentage** is geometry-independent — it is a function of $(\sigma_\text{ref}, \text{util}, \text{conc})$ only — so only the absolute dollar `fairPremium`/`poolPremium` figures scale with $a$/$b$/MaxIL. Pass real per-market geometry when you need dollar-accurate premiums.
+</Tip>
+
+### Return shape — `LoadSurface`
+
+```ts
+interface LoadSurface {
+  rows: SurfaceRow[]      // per-market; degraded rows are INLINED, never dropped
+  blockNumber?: bigint    // best-effort freshness (omitted if getBlockNumber fails)
+  note: string            // verbatim: "LIVE uncached pool-load surface…"
+}
+
+type SurfaceRow =
+  | ({ available: true } & MarketPricing)
+  | { available: false; marketId: Hex
+      reason: 'oracle-degraded' | 'market-unknown'; detail: string }
+```
+
+A live `MarketPricing` row carries the full price-to-beat decomposition:
+
+<ResponseField name="marketId" type="Hex" />
+<ResponseField name="fairPremium" type="bigint">
+FairPremium for the supplied geometry, USDC raw (6-dec) — from the Stylus FVO.
+</ResponseField>
+<ResponseField name="fairRateWad" type="bigint">
+`FairPremium / MaxIL` as a WAD ratio (1e18-scaled).
+</ResponseField>
+<ResponseField name="sigmaRefWad" type="bigint">
+The σ_ref (WAD) the fair value was computed against.
+</ResponseField>
+<ResponseField name="poolPremium" type="bigint">
+Path-A pool premium = `ceil(FairPremium·(1+totalLoad))`, capped at MaxIL, USDC raw.
+</ResponseField>
+<ResponseField name="maxIL" type="bigint">
+MaxIL for the geometry, USDC raw — the cap `poolPremium` is clamped to.
+</ResponseField>
+<ResponseField name="load" type="LoadBreakdown">
+The pool load stack — the price-to-beat decomposition.
+<Expandable title="LoadBreakdown fields (all WAD)">
+<ResponseField name="baseLoadWad" type="bigint">σ_ref regime band (calm/normal/stressed).</ResponseField>
+<ResponseField name="utilSkewWad" type="bigint">Utilization skew (flat below knee, convex above, capped).</ResponseField>
+<ResponseField name="dispSkewWad" type="bigint">Dispersion (HHI concentration) skew, capped.</ResponseField>
+<ResponseField name="totalLoadWad" type="bigint">I10-clamped sum (≤ `maxLoadBps` in WAD).</ResponseField>
+</Expandable>
+</ResponseField>
+<ResponseField name="util" type="bigint">Pool utilization (locked / total), WAD.</ResponseField>
+<ResponseField name="conc" type="bigint">Pool coverage concentration (HHI), WAD.</ResponseField>
+<ResponseField name="regime" type="'calm' | 'normal' | 'stressed'">
+Vol regime from σ_ref vs the `loadParams` bands.
+</ResponseField>
+
+### Per-market degradation
+
+A single bad market never throws the whole surface — the degraded row is **inlined** so the caller sees exactly which markets have gaps:
+
+| Failure | Row `reason` | When |
+| --- | --- | --- |
+| Pool-wide `loadParams()`/`inventory()` read fails | every row `oracle-degraded` | RPC unreachable / core unreachable |
+| `markets(marketId)` read fails, or zero config tuple | `market-unknown` | unregistered/inactive market (zero `oracleToken` or `durationSeconds==0`) |
+| `FairValueOracle.fairPremium` reverts | `oracle-degraded` | stale feed / sequencer down / σ_ref uninitialised |
+
+### Worked example
+
+```ts data-surface.ts
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+
+const surface = await sdk.data.getCurrentLoadSurface({
+  markets: [{ marketId: demo.marketId_fee500_7d }], // geometry optional → neutral ref geom
+})
+
+for (const row of surface.rows) {
+  if (row.available) {
+    console.log(
+      row.marketId,
+      row.fairPremium,         // e.g. 9_700_000n  ($9.70, 6-dec)
+      row.poolPremium,         // ceil(fair·(1+load)) capped at MaxIL
+      row.load.totalLoadWad,   // the I10-clamped price-to-beat
+      row.regime,              // 'calm' | 'normal' | 'stressed'
+    )
+  } else {
+    console.log(row.marketId, 'degraded:', row.reason) // 'oracle-degraded' | 'market-unknown'
+  }
+}
+
+// Annotate the surface with the σ_ref it was priced against.
+const sig = await sdk.data.getSurfaceSigmaRef(tokens.demoWeth)
+if (sig.available) console.log(sig.sigmaRefWad, sig.regime)
+```
+
+`getSurfaceSigmaRef` returns a `Degraded<{ sigmaRefWad, regime }>`: `{ available:false, reason }` if the VolOracle is uninitialised for the token (poke it first), never a throw. See [σ_ref](/math/sigma-ref) and [the load stack](/math/load-stack).
+
+---
+
+## The pending half — the `ApiPending` envelope
+
+Every history/aggregate method returns the **same** typed envelope:
+
+```ts
+interface ApiPending {
+  available: false                       // the API/subgraph is not wired yet
+  reason: 'no-history-source'            // typed — the source is absent
+  endpoint: DataApiRoute                 // the FUTURE public API route this forwards to
+  query: Record<string, string>         // the exact query that WOULD be sent, echoed back
+  detail: string                         // human-readable build-gap / maturity note
+}
+```
+
+This is the load-bearing design move: the envelope names the **future route** and the **exact query** that would be sent, so a UI can render "coming from `<route>`" today, and wiring the API later is a one-line body swap — replace the `pending(...)` call with a `fetch(endpoint?<query>)`, with zero re-derivation. The full type is `ApiBacked<T> = ({ available:true } & T) | ApiPending` — the rich `T` once the API ships, else the pending envelope.
+
+The `detail` string always carries the build-gap disclaimer verbatim, with any method-specific prefix folded in front:
+
+```text
+the subgraph + public API are not wired yet (build gap);
+this surface will be served by '<endpoint>'. Returning a typed degraded
+result — the SDK never fabricates history.
+```
+
+### `DATA_API_ROUTES` — the route contract
+
+The five routes are exported as a `const` so callers can read them and the API wires the same strings:
+
+| Constant | Route | Signal / purpose |
+| --- | --- | --- |
+| `loadSurface` | `/data/load-surface` | Signal 1: clearing-load surface time series (subgraph `MarketStateSnapshot[]`) |
+| `quoteCompetition` | `/data/quote-competition` | Signal 2: pool-vs-MM load spread + MM win-rate (`SwapPriced`/`QuoteFilled`) |
+| `demandRequests` | `/data/demand-requests` | Signal 4 latent half: off-chain `/quote` + `previewPremium` telemetry |
+| `navHistory` | `/pool/nav-history` | DEP-8: per-tranche NAV day-by-day (subgraph `PoolDaySnapshot[]`) |
+| `netGamma` | `/data/net-gamma` | Signal 5: protocol-wide net-gamma supply (off-chain Greeks over the open set) |
+
+### The `ApiPending` envelope, per method
+
+Each method assembles its `endpoint` + `query` deterministically from its args (optional args are omitted from `query` when absent; bucketed methods default the bucket). The table below is exact to source.
+
+<AccordionGroup>
+
+<Accordion title="getLoadSurfaceHistory — Signal 1 (history)">
+**Args:** `{ marketId: Hex; from?: number; to?: number; bucket?: '1h' | '1d' }`
+
+```ts
+const r = await sdk.data.getLoadSurfaceHistory({ marketId, from: 1_717_000_000 })
+// →
+{
+  available: false,
+  reason: 'no-history-source',
+  endpoint: '/data/load-surface',
+  query: { marketId: '0x67c4…d69', from: '1717000000', bucket: '1d' }, // bucket defaults to '1d'
+  detail: 'the subgraph + public API are not wired yet (build gap …) served by \'/data/load-surface\' …',
+}
+```
+
+`bucket` defaults to `'1d'`; `from`/`to` are stringified when present, omitted when absent. Source for the historical evolution of `getCurrentLoadSurface` — the subgraph indexes `MarketStateSnapshot` and joins the now-live `SwapPriced`/`QuoteFilled` per-fill load events. For the CURRENT surface, use `getCurrentLoadSurface` (live). See [Signal 1](/moat/five-signals).
+</Accordion>
+
+<Accordion title="getQuoteCompetition — Signal 2 (spread + win-rate)">
+**Args:** `{ marketId?: Hex; from?: number; to?: number }` (all optional)
+
+```ts
+const r = await sdk.data.getQuoteCompetition({ marketId })
+// →
+{
+  available: false,
+  reason: 'no-history-source',
+  endpoint: '/data/quote-competition',
+  query: { marketId: '0x67c4…d69' },   // all three args optional → only present ones appear
+  detail: '… served by \'/data/quote-competition\' …',
+}
+```
+
+Needs the now-live `SwapPriced` (mechanical pool baseline = the price-to-beat) joined with `QuoteFilled.loadBps` (the behavioral MM load) per swap once the subgraph indexes them, **plus** the off-chain engine `COMPETITION_LOG` telemetry for the dynamic half. The spread `poolLoad − mmLoad` is non-circular **as a spread** — the subtraction removes the circular component (see [circular vs behavioral](/moat/circular-vs-behavioral)). The dynamic half is **already capturing now** in engine telemetry; the structural half is subgraph-pending.
+
+<Warning>
+**Limit → Why → Mitigation.** At one MM the spread conflates "MM expects vol to fall" with "MM has cheaper hedges" — two un-separable drivers (the *limit*). *Why:* a competitive distribution requires multiple independent load views, which only exist with multiple MMs. *Mitigation:* the spread is visible **per fill** from day one, and the off-chain `COMPETITION_LOG` captures every losing/withdrawn quote from the first interaction — so the forward-vol read sharpens with ≥3 competing MMs without losing the early data. See [state and limits](/moat/state-and-limits).
+</Warning>
+</Accordion>
+
+<Accordion title="getDemandRequests — Signal 4 latent half (pending BY DESIGN)">
+**Args:** `{ marketId?: Hex; from?: number; to?: number }` (all optional)
+
+```ts
+const r = await sdk.data.getDemandRequests({})
+// →
+{
+  available: false,
+  reason: 'no-history-source',
+  endpoint: '/data/demand-requests',
+  query: {},                            // no args → empty query
+  detail: '… served by \'/data/demand-requests\' …',
+}
+```
+
+<Warning>
+**Limit → Why → Mitigation.** This surface is `ApiPending` **by design and permanently** — there is no live RPC fallback (the *limit*). *Why:* the latent half of demand (geometries an LP priced but did **not** buy) NEVER reaches the chain — invariant [I7](/security/invariants) guarantees an unchosen quote touches no nonce and no capacity, and putting unfilled interest on-chain would both cost gas and break I7. *Mitigation:* it is captured from the **first interaction** in the off-chain engine `DEMAND_LOG` (every `GET /quote` and every `previewPremium` ping), coarse-bucketed and PII-free, because it is unreconstructable retroactively. The realized half **is** on-chain (subgraph `GeometryDemandBucket`); the latent half is only ever telemetry. See [telemetry](/moat/telemetry).
+</Warning>
+</Accordion>
+
+<Accordion title="getNavHistory — per-tranche NAV (carries claim B)">
+**Args:** `{ from?: number; to?: number; bucket?: '1d' }`
+
+```ts
+const r = await sdk.data.getNavHistory({ from: 1_717_000_000 })
+// →
+{
+  available: false,
+  reason: 'no-history-source',
+  endpoint: '/pool/nav-history',
+  query: { from: '1717000000', bucket: '1d' }, // bucket defaults to '1d'
+  detail: 'depositor NAV history (claim B: depositor capital is NOT guaranteed — '
+        + 'junior is first-loss, senior is systemic-tail exposed). '
+        + 'the subgraph + public API are not wired yet …',
+}
+```
+
+The subgraph computes `PoolDaySnapshot` from `Deposited`/`Withdrawn`/`PremiumAccrued`/`SettlementReleased`/`JuniorLoss`. The claim-B disclosure is folded into `detail` **and never merged with claim A** — NAV history is a depositor-risk surface, distinct from the LP no-bad-debt guarantee. See [the tranches](/concepts/tranches).
+
+<ClaimB />
+</Accordion>
+
+<Accordion title="getNetGamma — Signal 5 (net convexity supply)">
+**Args:** `{ marketId?: Hex }` (optional; defaults to `{}`)
+
+```ts
+const r = await sdk.data.getNetGamma()
+// →
+{
+  available: false,
+  reason: 'no-history-source',
+  endpoint: '/data/net-gamma',
+  query: {},                            // marketId omitted when absent
+  detail: '… served by \'/data/net-gamma\' …',
+}
+```
+
+Off-chain compute over the subgraph-tracked open swap set (`SwapCreated` opens, `SwapSettled` closes), summing per-swap Greeks finite-differenced from the deployed `ILMath.computeIL` / `FairValueOracle.fairRate` — **no parallel pricing model**. NOT a contract event; the live SDK has no aggregator because it needs the open set. This is the most launch-robust signal — a sum, not a distribution, so it is meaningful from a handful of swaps. See [Signal 5](/moat/five-signals) and [the Greeks engine](/sdk-reference/greeks-hedge).
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## The five signals this surface maps to
+
+Each `DataClient` method maps onto one [behavioral signal](/moat/five-signals). All five are **non-circular** — their informative degrees of freedom come from the MM's `loadBps` or the LP's geometry/duration choice, measured **against** the transparent mechanical baseline, never derived from it.
+
+<Warning>
+The "invert `fairRate` for an implied-vol surface" idea is **deliberately DROPPED as circular** — it is *not* a sixth signal. Because every premium is `fairRate(σ_ref)·(1+load)` by construction, inverting `fairRate` from the charged premium recovers nothing but the protocol's own published σ_ref plus its own load stack — a tautology, not a market-implied vol. The full reasoning is on [circular vs behavioral](/moat/circular-vs-behavioral).
+</Warning>
+
+| # | Signal | DataClient method | Non-circular verdict |
+| --- | --- | --- | --- |
+| 1 | Realized clearing **load** over a transparent σ_ref | `getCurrentLoadSurface` (live) / `getLoadSurfaceHistory` | **Path B only** — MM `loadBps` is an actor choice; Path-A load is the mechanical baseline (circular), kept only as the price-to-beat |
+| 2 | Pool-vs-MM load **spread** + MM win-rate | `getQuoteCompetition` | **YES, as a spread** — the subtraction `poolLoad − mmLoad` removes the circular component |
+| 3 | Convexity **term structure** (7/30/90d slope) | via `getLoadSurfaceHistory` / API | **Path B only** — Path-A load is duration-independent (a flat line); the behavioral slope lives in MM `loadBps` |
+| 4 | **Demand skew** by geometry (incl. latent) | `getDemandRequests` | **PARTIAL** — realized demand (which `tokenId`/duration) is non-circular; the latent half is off-chain by I7 |
+| 5 | **Net gamma** the protocol is short | `getNetGamma` | **YES, as a quantity** — a supply gauge, a real-world fact, not a price computation |
+
+<Note>
+**Exclude cap-bound fills** from the load surfaces (Signals 1/2/3): when `premium == MaxIL` the load was truncated by the cap and the number carries **zero** load information. The on-chain `SwapPriced.cappedAtMaxIL` boolean makes this filter cheap and unambiguous. See [the five signals](/moat/five-signals).
+</Note>
+
+<Maturity />
+
+---
+
+## Live vs pending — the one-glance summary
+
+<Tabs>
+  <Tab title="Live today (no subgraph needed)">
+    - `getCurrentLoadSurface` — current pool load surface across markets (live RPC multicall).
+    - `getSurfaceSigmaRef` — the σ_ref + regime a surface is priced against.
+    - The on-chain moat **events** (`SwapPriced`, `QuoteFilled`) are emitting now (since 2026-06-05).
+    - The off-chain telemetry sinks (`DEMAND_LOG`, `COMPETITION_LOG`) are capturing now — the dynamic/latent halves of Signals 2 & 4.
+  </Tab>
+  <Tab title="Subgraph-pending (typed ApiPending)">
+    - `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNavHistory`, `getNetGamma`.
+    - Each returns `{ available:false, reason:'no-history-source', endpoint, query, detail }` — render the state, not an error.
+
+    <Warning>
+    **Limit → Why → Mitigation.** The history surfaces are not queryable yet (the *limit*). *Why:* the subgraph is built but `SUBGRAPH_URL` is unset — a single build gap, not a contract gap; the contracts already emit every event the moat needs. *Mitigation:* the surfaces degrade to a typed `ApiPending` naming the exact future route and query, so the UI shows "coming from `<route>`" and the API is wired later with zero re-derivation — and the data itself is being captured **now** on-chain and in telemetry. See [status & caveats](/reference/status-caveats).
+    </Warning>
+  </Tab>
+</Tabs>
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The data moat (concept)" icon="layer-group" href="/concepts/data-moat">
+    The thesis, the five signals, and why the dataset cannot exist anywhere else.
+  </Card>
+  <Card title="Circular vs behavioral" icon="rotate" href="/moat/circular-vs-behavioral">
+    Why inverting `fairRate` is circular, and what makes each signal legible.
+  </Card>
+  <Card title="DataClient (guide)" icon="book" href="/sdk/data-client">
+    The narrative walkthrough of the load surface and the degradation contract.
+  </Card>
+  <Card title="MmClient reference" icon="signature" href="/sdk-reference/mm">
+    The same multicall read set, per-market, plus quote signing.
+  </Card>
+</CardGroup>

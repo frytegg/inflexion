@@ -1,0 +1,278 @@
+---
+title: "CEI ordering & reentrancy"
+description: "How Inflexion's create and settle paths use strict Checks-Effects-Interactions ordering to make reentrancy structurally impossible — including the one Slither medium that was fixed."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+Reentrancy is the canonical smart-contract failure mode: a contract makes an external
+call before it has finished updating its own state, and the callee re-enters a function
+that still reads the stale state. Inflexion neutralizes this not with a single
+`nonReentrant` lock bolted on after the fact, but by **ordering every state transition so
+that all external calls happen last** — the Checks-Effects-Interactions (CEI) discipline,
+applied at the structural level to both the create paths and `settle`.
+
+This page covers three things:
+
+1. The **4-phase create structure** — READ, CHECKS, EFFECTS, INTERACTIONS — that every
+   create path follows.
+2. **`settle` flips status first** — the status write is hoisted ahead of any external
+   call, so a malicious oracle or IL-math contract cannot re-enter the same `swapId`.
+3. **The one Slither medium that was fixed** — `reentrancy-no-eth` in `settle`, and the 26
+   findings that were correctly classified as false positives.
+
+<Note>
+CEI is an *atomicity and ordering* discipline, not a custody guarantee. It is orthogonal to
+the no-bad-debt invariant I1, which is structural — `payout ≤ collateral == MaxIL` by
+construction — and holds regardless of call ordering. CEI protects the **state machine's
+integrity** (no double-spend of capacity, no replayed nonce, no re-entered settle), which
+in turn protects depositor and MM solvency.
+</Note>
+
+## The 4-phase create structure
+
+Every create path — `createSwap` (Path B, signed MM quote), the internal Path A and Path B
+executors, and the router `createSwapRouted` — follows the same four-phase
+Checks-Effects-Interactions structure. The phases are
+sequenced so that **nothing external is ever called while the contract's own books are in a
+half-updated state.**
+
+<Steps>
+  <Step title="PHASE 1 — READ (no state change)">
+    `_prepareSwap` performs every read the swap depends on and computes the derived
+    quantities, mutating nothing:
+
+    - `ownerOf(tokenId)` check — the caller must own the position NFT.
+    - `positions(tokenId)` read + `marketId` cross-check — the position's actual
+      `(token0, token1, fee)` must match the registered market (`MarketMismatch`).
+    - `sqrtPa` / `sqrtPb` derived on-chain from `tickLower` / `tickUpper` via TickMath
+      (so an LP cannot lie about the range geometry).
+    - The **oracle-pinned `P0`** — the live Chainlink price, read **once**
+      (carried as `g.livePrice`), reused for both the entry price and the I9 band
+      check (zero extra oracle cost).
+    - The in-range gate `Pa ≤ P0 ≤ Pb` (out-of-range entries are rejected).
+    - `computeMaxIL`, the entry snapshot, and `V0` (position value).
+    - `liquidity` is read **exactly once** here and stored at creation
+      (`// I6: stored once at creation`).
+
+    Fair-value is read and the premium is computed in this phase too. **No storage is
+    written.** Nothing here can be exploited by reentrancy because there is no external
+    call and no committed state.
+  </Step>
+
+  <Step title="PHASE 2 — CHECKS (pure validations, still no state change)">
+    Every precondition is validated before a single effect is committed:
+
+    - Dust gates (`MIN_POSITION_V0 = $100`, `MIN_PREMIUM = $1`).
+    - The MaxIL-ratio band and the `validUntil` validity window.
+    - The nonce check (`isNonceUsed`).
+    - **I9 — oracle-anchored band:** `bandDevBps = absBps(g.livePrice, quote.quotePrice)`,
+      revert `PriceOutOfBand` if it exceeds `quote.priceBandBps`.
+    - **I7 — capacity:** `consumedNotional[quoteId] + g.V0 > maxNotionalV0` reverts.
+    - MM solvency (available collateral covers the lock).
+    - **I10 — load ceiling:** `loadBps ≤ maxLoadBps`, else `LoadExceedsMax`.
+    - Slippage — the LP's `maxPremium`.
+
+    All of these are reverts on a clean slate. If any fails, the transaction unwinds with
+    no state touched.
+  </Step>
+
+  <Step title="PHASE 3 — EFFECTS (state writes, still no external calls)">
+    Only now does the contract mutate its own books — and it does so **completely, before
+    any external interaction** (`_executePathA` / `_executePathB`):
+
+    - Atomic `consumedNotional[quote.quoteId] += g.V0` and `_useNonce(...)` — the
+      check-and-increment for I7 capacity and the
+      bitmap-nonce burn happen in the same transaction, in effects, **before** any call
+      out. This is what makes concurrent fills unable to over-consume capacity and what
+      makes a bearer-quote replay impossible.
+    - `lockCollateral` on the underwriter's vault (the MM's `UnderwriterVault` on Path B,
+      the `ConvexityVault` on Path A).
+    - Write the `SwapRecord` — including the `liquidity` snapshotted in PHASE 1
+      (both tagged `// I6`).
+  </Step>
+
+  <Step title="PHASE 4 — INTERACTIONS (external calls, last)">
+    Only after every effect is committed does the contract reach outside itself
+    (Path A / Path B):
+
+    - Pull the premium (token transfer in).
+    - Take custody of the position NFT.
+    - Distribute the premium to the underwriter.
+
+    By the time any external code can run, capacity is already consumed, the nonce is
+    already burned, and the `SwapRecord` is already written. A re-entrant call into a
+    create path would see a fully updated ledger — there is no stale window to exploit.
+  </Step>
+</Steps>
+
+<Tip>
+The single most important consequence of this ordering: the **I7 check-and-increment is
+atomic in PHASE 3, before any external call.**
+That is what makes the on-chain ledger authoritative over the off-chain engine — a signed
+quote can fill only up to its capacity, never after its nonce bit is cancelled, and
+concurrent submissions cannot over-consume. See [the invariants](/security/invariants#i7)
+for the full I7 statement.
+</Tip>
+
+### Why this beats a bare `nonReentrant` modifier
+
+A reentrancy guard prevents *re-entry*, but it does nothing about the deeper hazard of an
+external call observing half-finished state across *different* functions, and it adds no
+guarantee about ordering. CEI removes the hazard at the source: there is no window in which
+an external call can observe an inconsistent ledger, because **all the writes are done
+before any call.** The router's read-only usability predicate is a clean illustration —
+`_quoteUsableAndPremiumB` *reads* `isNonceUsed` and `consumedNotional` but is `view` and
+**never calls `_useNonce`**. A quote that loses the route consumes nothing; only the executed
+rail mutates nonce, capacity, and lock.
+
+## `settle` flips status first
+
+Settlement is **strict CEI with status-flip-first**. The
+ordering is the entire defense, because `settle` deliberately calls two external,
+potentially-attacker-controlled contracts: the `oracle` (to derive the settlement price)
+and `ilMath` (to compute realized IL). If those calls happened *before* the status write,
+a malicious implementation could re-enter `settle` on the same `swapId` and trigger a
+second payout.
+
+The mitigation is to hoist the status write to **immediately after the validity checks,
+before any external call**:
+
+```solidity
+// PHASE: CHECKS — swap must be ACTIVE and past expiry
+// ...validity checks...
+
+s.status = Status.SETTLED;   // hoisted BEFORE any external call
+
+// PHASE: INTERACTIONS — derive price, compute IL, pay out
+//   _oracleSqrtPriceX96(...)  -> external oracle
+//   ILMath.computeIL(...)     -> external ilMath
+//   releaseAndDistribute(...) -> external vault
+```
+
+A re-entrant call into `settle` on the same `swapId` now hits the `Status.ACTIVE`
+precondition — which is already false — and **reverts.** The second settlement can never
+begin. Notice what is preserved across the external boundary:
+
+- The **settlement price** `sqrtPTX96` is derived on-chain from the Chainlink round-at-T
+  via `_oracleSqrtPriceX96` — never caller-supplied. A
+  permissionless settler cannot choose the payout (restores I2 / I4).
+- IL is computed from the **stored** `s.liquidity`, the `L` snapshotted at
+  creation — not re-read from the NFT, so an external `increaseLiquidity` cannot inflate
+  the payout (I6).
+- The **payout cap** is applied: `payout = realisedIL > s.maxIL ? s.maxIL :
+  uint128(realisedIL)`. Even if everything else were subverted, the cap holds —
+  `payout ≤ MaxIL == collateral`.
+
+<Warning>
+**Limit:** `settle` must call out to the `oracle` and `ilMath` contracts, which are
+external dependencies and could in principle be malicious if mis-wired.
+
+**Why it's safe:** the contracts are immutable and wired once via the one-shot
+`setCore` + `freezeCore` pattern (no admin path to redirect them after freeze), and the
+status-flip-first ordering means a re-entrant `settle` reverts on the `Status.ACTIVE`
+precondition regardless of what the callee does.
+
+**Path forward:** the no-bad-debt cap (I1) is the backstop of last resort — even a
+re-entrant settle that somehow proceeded could pay at most `MaxIL == collateral`. CEI plus
+the cap is defense-in-depth, not a single point of failure.
+</Warning>
+
+## The one Slither medium that was fixed
+
+Inflexion's core contracts were run through **Slither 0.11.5** in two passes.
+The core pass surfaced **27 findings**, of which exactly
+**one was a real issue that was fixed**, and **26 were classified as false positives** with
+written justifications.
+
+### The fix: `reentrancy-no-eth` in `settle`
+
+The single fixed finding was a `reentrancy-no-eth` flagged in `settle` — precisely the
+hazard the status-flip-first ordering now closes. The remediation was to hoist
+`s.status = Status.SETTLED` to ahead of the external calls. This is the same mechanism described above:
+a malicious `oracle` or `ilMath` re-entering `settle` on the same `swapId` now hits the
+`Status.ACTIVE` precondition and reverts.
+
+<AccordionGroup>
+  <Accordion title="The 26 accepted false positives — why each is benign">
+    The remaining 26 core-pass findings were reviewed and accepted as false positives:
+
+    - **`unused-return`** — flagged on idiomatic tuple destructuring (e.g. reading one
+      field of a multi-return call). The "unused" returns are intentionally discarded.
+    - **`reentrancy-benign` / `reentrancy-events`** — flagged on post-call `SwapRecord`
+      writes and event emissions in the create paths. These run in PHASE 4 *after* all
+      effects are already committed; they cannot corrupt state and the events are
+      informational telemetry.
+    - **`timestamp`** — flagged on protocol time checks (expiry, `validUntil`, the liveness
+      backstop window). Block-timestamp comparisons are the intended, correct mechanism for
+      these gates; the manipulation surface (a few seconds of miner drift) is bounded and
+      irrelevant to the windows in use.
+
+    None of these is exploitable; each is a known Slither pattern that fires on correct,
+    idiomatic code.
+  </Accordion>
+
+  <Accordion title="The cvAMM pass — 0 high, 0 confirmed vulnerabilities">
+    A second Slither pass over the cvAMM contracts returned **74 results → 0 high,
+    0 confirmed vulnerabilities, 1 cleanup** (a stray foundry-template `Counter.sol` —
+    the only `^0.8.13` file — was deleted).
+
+    Manual review on top of the static pass confirmed:
+    - the junior-first-loss waterfall in `releaseAndDistribute`;
+    - the withdrawal cooldown + locked/free accounting that defends against a pool run;
+    - the `lockedAfter ≤ juniorAssets` senior-protection check at every `lockCollateral`;
+    - and that the **FULL no-bad-debt guarantee (I1) is structural and independent of the
+      FairValue / Vol oracles** — `settle` caps payout at `MaxIL == collateral`.
+  </Accordion>
+</AccordionGroup>
+
+To reproduce the analysis:
+
+```bash
+slither packages/contracts --filter-paths "test|script|lib"
+```
+
+<Info>
+**CI scope:** GitHub Actions runs only `forge fmt + build + test`; `cargo stylus`, Node,
+and Python validation are manual (WSL2 / Nitro). Slither is run manually, not in CI. The
+Solidity `FairValueOracle` *is* exercised in CI — it is what `forge test` compiles — as the
+revm-executable cross-check of the shipped Stylus oracle.
+</Info>
+
+## How the pieces fit together
+
+The two reentrancy-relevant attack vectors and their mitigations, from the attack-vector
+table:
+
+| Attack vector | Mitigation | Invariant |
+| --- | --- | --- |
+| Re-entrant `settle` via a malicious oracle / ilMath | Status flips to `SETTLED` first, strict CEI | Status-flip-first ordering |
+| Capacity over-consumption from concurrent fills (F-#6) | Atomic check-and-increment in PHASE 3, before any external call | I7 |
+| Bearer-quote replay after off-chain cancel (F-#7) | Permit2-style bitmap nonces burned in PHASE 3 effects | I7 |
+
+CEI is the *connective tissue* of the security model: it is the reason the
+[invariants](/security/invariants) hold as committed facts rather than as best-effort
+hopes. I7 capacity authority depends on the increment happening atomically in EFFECTS;
+I6 liquidity immutability depends on the snapshot being written before any external call;
+the no-double-settle guarantee depends on the status flip preceding the oracle and IL-math
+calls. Remove the ordering and each of those invariants would have an exploitable window.
+
+<ClaimA />
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The ten invariants" icon="shield-check" href="/security/invariants">
+    I1–I10 — precise statement, why each holds, and where it is enforced in code.
+  </Card>
+  <Card title="Price pinning" icon="anchor" href="/security/price-pinning">
+    Why both the entry and settlement prices are derived on-chain from Chainlink, never
+    caller-supplied.
+  </Card>
+  <Card title="Attack vectors" icon="crosshairs" href="/security/attack-vectors">
+    The full attack ↔ mitigation table, including the F-# audit findings.
+  </Card>
+  <Card title="Lifecycle" icon="arrows-rotate" href="/protocol/lifecycle">
+    The end-to-end create → settle flow that the 4-phase structure implements.
+  </Card>
+</CardGroup>

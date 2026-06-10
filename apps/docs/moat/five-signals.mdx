@@ -1,0 +1,561 @@
+---
+title: "The five behavioral signals"
+description: "Exhaustive per-signal definitions, exact non-circularity verdicts, on-chain + telemetry sourcing, and launch maturity for the five signals that compose the DeFi LP volatility-risk-premium microstructure: clearing load, pool-vs-MM spread, convexity term structure, demand skew, and net gamma."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion is the **first venue that prices the in-range IL convexity of a *specific*
+Uniswap v3 range**. Every fill it clears is a labeled data
+point in a market that never had a price before — and the aggregate of those choices is
+the **first structured view into the microstructure of the DeFi LP volatility-risk
+premium**. That view is composed of exactly **five behavioral signals**.
+
+This page is the rigorous, per-signal treatment. For the conceptual overview read
+[the data moat](/concepts/data-moat); for the proof of *why the set is non-circular*
+read [circular vs behavioral](/moat/circular-vs-behavioral); for the events that source
+them read [the on-chain primitives](/moat/primitives) and
+[the telemetry pipeline](/moat/telemetry).
+
+<Note>
+**There are five signals — and exactly one circular idea that is deliberately NOT one
+of them.** "Infer implied vol by inverting `fairRate`" is **dropped as circular**: the
+inversion `charged/MaxIL = fairRate(σ_ref)·(1+load)` returns only the protocol's own
+[σ_ref](/math/sigma-ref) and [load stack](/math/load-stack), nothing external. The five below are *behavioral* — they extract free actor
+choices the protocol does **not** compute, measured against the transparent mechanical
+baseline. See [circular vs behavioral](/moat/circular-vs-behavioral) for the full
+worked argument.
+</Note>
+
+## The shape every signal shares
+
+Before the five, internalize the pattern they all share. Four of the five separate a
+**behavioral** leg — an actor's free choice — from a **mechanical** baseline — the
+protocol's transparent price-to-beat — and the **subtraction** is what isolates the
+actor's view and removes the circular component:
+
+```
+        BEHAVIORAL (the signal)              MECHANICAL (the baseline / price-to-beat)
+        ───────────────────────              ─────────────────────────────────────────
+Load:   QuoteFilled.loadBps  (Path B)   vs   SwapPriced.totalLoadWad  (Path A)
+Vol:    the MM's forward view (implied)  vs   SwapPriced.sigmaRefWad   (backward EWMA)
+Demand: which tokenId/duration LP picks  vs   (no mechanical counterpart — pure choice)
+```
+
+Path A — the cvAMM pool — is **never sold as a behavioral signal**. Its mechanical
+[load stack](/math/load-stack) `totalLoad = f(σ_ref, util, conc)` is a deterministic
+function of protocol state; inverting it just recovers our own formula. It is kept as
+the **price-to-beat** that the behavioral MM load is *measured against*. Two corollaries recur in every signal below:
+
+1. **The mechanical pool load is the yardstick, not the signal.** Its job is to be the
+   transparent baseline the behavioral MM load is subtracted from. The subtraction is
+   precisely what removes the circular component.
+2. **Cap-bound fills carry ZERO load information and MUST be excluded** from Signals 1,
+   2, and 3. When `premium == MaxIL` the load was truncated by the cap — the number you
+   observe is the cap, not the actor's load. This is why the `SwapPriced` event carries
+   an explicit `cappedAtMaxIL` boolean, enforced in the indexer.
+
+The decision rule, stated verbatim: a signal is non-circular
+**iff** its informative degrees of freedom come from the MM's `loadBps` or the LP's
+geometry/duration choice — measured against the transparent mechanical baseline, not
+derived from it.
+
+### The coordinate system: geometry buckets
+
+Every geometry-bucketed signal (1, 3, 4) keys on the same **width × distance-to-edge ×
+duration** triple, chosen to mirror the off-chain telemetry buckets so the realized
+(on-chain) and latent (off-chain) halves share one coordinate system the API can join
+on:
+
+| Axis | Definition | Buckets |
+| --- | --- | --- |
+| **width** | $\log(P_b/P_a)$, from tick span `tickUpper − tickLower` | `tight (~±3%)` ≤600, `medium (~±10%)` ≤2000, `wide (~±65%)` ≤10000, else `full` |
+| **distance-to-edge** | $\min(P_0-P_a,\,P_b-P_0)/P_0$ | `at-edge / near / mid / deep`; on-chain the handler reports `mid` for a well-formed range and the **API refines** `at-edge/near/deep` from $P_0$ vs $(P_a,P_b)$ |
+| **duration** | $\text{expiry} - \text{createdAt}$ | `hour / day / week / month / longer` |
+
+Geometry is **not stored in any event** — it is recovered off-chain by decoding the
+swap's `tokenId` via `NonfungiblePositionManager.positions(tokenId)` at the
+`SwapCreated` block (range ticks → $P_a/P_b$), plus `expiry − createdAt` for duration. That [MaxIL](/concepts/maxil) is
+the unit that makes positions fungible — premium quoted as % of MaxIL is range-agnostic —
+is exactly why bucketing the load by geometry is *informative* rather than noisy.
+
+---
+
+## Signal 1 — Realized clearing LOAD over a transparent σ_ref
+
+*bucketed by width × distance-to-edge × duration*
+
+<CardGroup cols={2}>
+  <Card title="Verdict" icon="circle-half-stroke">
+    **Non-circular: PARTIAL — Path B only.**
+  </Card>
+  <Card title="Maturity" icon="seedling">
+    **Structural at launch; a regime needs ≥3 MMs.**
+  </Card>
+</CardGroup>
+
+**What it is.** The convexity risk premium charged *above* the published realized-vol
+reference — the "convexity-premium index" / clearing load. It was deliberately renamed from the old `getLPStructuralIV` precisely to avoid the misleading "IV" connotation.
+
+**Precise definition.** Per geometry bucket, the distribution of two legs:
+
+- **POOL load** $= $ `SwapPriced.totalLoadWad` — the **mechanical** load stack (the
+  baseline / price-to-beat), itself the I10-clamped sum
+  $\text{clamp}\big(\text{baseLoad}(\sigma_{\text{ref}}) + \text{util\_skew}(u) + \text{disp\_skew}(h),\ \text{maxLoad}\big)$.
+- **MM load** $= $ `QuoteFilled.loadBps` — the **behavioral** actor choice (the real
+  signal), normalised against `SwapPriced.fairPremium` and `SwapPriced.sigmaRefWad` at
+  each fill.
+
+Both legs share the same fixed point: every premium is
+$\text{premium} = \text{FairPremium}\cdot(1 + \text{totalLoad})$, capped at MaxIL. The
+signal lives in the *load fraction*, anchored to a transparent
+[σ_ref](/math/sigma-ref).
+
+<Warning>
+**Non-circularity verdict — PARTIAL, Path B only.**
+
+- **The Path-B leg (`QuoteFilled.loadBps`) is NON-CIRCULAR.** It is an MM's free choice
+  of the price of risk, capped only by `loadParams.maxLoadBps` (invariant I10) — the
+  protocol does not compute it. It is *the single non-circular load datum*.
+- **The Path-A leg (`SwapPriced.totalLoadWad`) IS CIRCULAR.** It is a deterministic
+  function $f(\sigma_{\text{ref}}, \text{util}, \text{conc})$ of protocol state;
+  inverting it just recovers our own load stack.
+- **Verdict + use:** keep Path A as the **mechanical baseline** the MM is measured
+  against; do **not** sell it as a behavioral signal.
+</Warning>
+
+**How it is sourced.** `QuoteFilled.loadBps` (the load) + `SwapPriced.sigmaRefWad` /
+`fairPremium` (the baseline + reference vol) + `NPM.positions(tokenId)` at the
+`SwapCreated` block (width / distance) + `expiry − createdAt` (duration). The subgraph
+joins all of these on `swapId → tokenId` into the **`BucketAggregate`** entity, keyed
+`${width}-${distance}-${duration}`, accumulating `sumMMLoadBps`, `sumPoolLoadWad`,
+`sumSigmaRefWad`, and `totalNonCappedFills` over **non-capped fills only**; the API
+derives means as `sum / count` because the store has no median operator. The **current** (non-historical)
+load surface is served live now by the SDK `getCurrentLoadSurface` multicall — the one
+live-RPC exception, computing the price-to-beat client-side via the parity-locked
+`CvammPricing` TS port (see [the SDK port](/sdk/cvamm-port)).
+
+<Info>
+**Exclude cap-bound fills.** Filter `SwapPriced.cappedAtMaxIL == true` — a cap-bound
+fill priced against the cap, not against the risk, and would poison a load mean.
+</Info>
+
+**Maturity.** At 1 MM there is a single load point per bucket — this is **structural,
+not dynamic**. Bucketed *dispersion* (the spread across
+MMs' load views) needs **≥3 MMs** and ~30–50 fills/bucket to constitute a regime —
+weeks-to-months at launch flow.
+
+<Warning>
+**Honest caveat — trade the spread, not the level.**
+
+- **Limit:** the clearing load is **contaminated** — it mixes the convexity premium with
+  liquidity, smart-contract risk, capital-lock cost, and inventory-skew premia.
+- **Why:** a single observed load is a *sum* of several premia, not a clean vol-risk
+  number.
+- **Mitigation:** compare the **spread** (MM − pool, vs implied/forward vol), not the
+  level — the subtraction (Signal 2) cancels the shared contamination.
+</Warning>
+
+---
+
+## Signal 2 — Pool-vs-MM load SPREAD + MM win-rate / win-depth
+
+<CardGroup cols={2}>
+  <Card title="Verdict" icon="circle-check">
+    **Non-circular: YES — as a SPREAD.**
+  </Card>
+  <Card title="Maturity" icon="seedling">
+    **Structural at launch; dynamic only with ≥3 MMs.**
+  </Card>
+</CardGroup>
+
+**What it is.** The pool quotes a mechanical load; an MM undercuts when it has an edge.
+The **spread** — plus how often and how deeply MMs beat the pool — is **forward-vol
+expectation extracted from MM behavior**. The intuition is directional:
+
+- aggressive undercut ⇒ the market sees vol **cheaper** than the backward-looking
+  σ_ref ⇒ expects vol to **fall**;
+- MMs retreat **above** the pool ⇒ they expect vol to **rise**.
+
+This is a VIX-like signal for LP markets — a forward-vol read no other venue can
+produce, because no other venue runs a transparent mechanical baseline *and* a
+competitive bid in the same market.
+
+**Precise definition.** Per bucket:
+
+$$
+\text{spread} = \text{poolLoad} - \text{mmLoad}, \qquad
+\text{win-rate} = \frac{\#\{\text{path} = \text{MM\_B}\}}{\#\{\text{all fills}\}}, \qquad
+\text{win-depth} = \text{premium}_A - \text{premium}_B .
+$$
+
+On the subgraph, the per-fill `Swap` entity stores
+`spreadWad = poolLoadWad − mmLoadBps(WAD)` (meaningful only on a Path-B win),
+`BucketAggregate.sumSpreadWad` accumulates it per bucket, and `winDepth = premiumA −
+premiumB` is carried from the routed `SwapRouted` event.
+
+<Warning>
+**Non-circularity verdict — YES, as a SPREAD.**
+
+- Each side is well-defined: the **pool load** (mechanical, `SwapPriced` on the Path-A
+  candidate) and the **MM load** (behavioral, `QuoteFilled.loadBps`).
+- The **difference** isolates the actor's view *relative to* the transparent baseline.
+  The subtraction is exactly what removes the circular component — both contaminating
+  premia (liquidity, SC-risk, capital-lock) largely cancel, leaving the behavioral
+  forward-vol residual.
+</Warning>
+
+**How it is sourced.** On a Path-B win, `SwapPriced` carries the **losing pool quote's**
+`totalLoadWad` and `fairPremium` (the price-to-beat the MM beat), and `QuoteFilled.loadBps`
+carries the winning MM load — so the spread is in two joined events with **no archive
+call**. Per-MM win-rate is
+tracked on the `MarketMaker` entity as `cumulativeWinCount / cumulativeQuoteFillCount`.
+
+<Info>
+**The event-order subtlety (load-bearing).** On every Path-B create, the contract emits
+`QuoteFilled` **before** `SwapPriced` (the priced event is emitted *after* the
+`_executePathB` call). So the spread is
+computed in **`handleSwapPriced`** (the later handler), because only there are all three
+values available at once: the pool `totalLoadWad`, the authoritative `cappedAtMaxIL`,
+and the swap's persisted `mmLoadBps`. Computing it in `handleQuoteFilled` would read a
+not-yet-written `poolLoadWad` ⇒ spread always null.
+</Info>
+
+**The dynamic half is off-chain by design.** Quotes that *lost* or were *withdrawn*, and
+how MMs widen or retreat under stress, leave **no on-chain trace** — invariant I7
+guarantees an unchosen quote touches no nonce and no capacity (see
+[the invariants](/security/invariants)). That competitive distribution lives in the
+off-chain engine `COMPETITION_LOG`, written for **every** inbound WS quote — winners AND
+losers / stale / withdrawn (schema `CompetitionRecord`: `{ ts, marketId, mm, loadBps,
+validUntil, accepted, reason? }`); see
+[the telemetry pipeline](/moat/telemetry). This data is **unreconstructable
+retroactively**, which is exactly why the sink captures it from the first interaction.
+
+<Warning>
+**Maturity — structural at launch, dynamic only with ≥3 MMs.**
+
+- **Limit:** with one MM there is no competitive distribution — you see *one* undercut,
+  not a market view. At 1 MM the spread conflates "MM expects vol to fall" with "MM has
+  cheaper hedges" — two un-separable orthogonal drivers.
+- **Why:** a forward-vol *read* requires a cross-section of independent MM views;
+  separating expectation from hedge-cost requires competition.
+- **Mitigation / path-forward:** the spread is visible **per fill** from day one (the
+  structure ships now); the forward-vol read matures with MM competition. The
+  `COMPETITION_LOG` is capturing the losing/withdrawn distribution **now**, so the
+  dynamics are reconstructable the moment ≥3 MMs exist.
+</Warning>
+
+---
+
+## Signal 3 — TERM STRUCTURE of convexity
+
+*the slope of load across 7 / 30 / 90d markets, per range*
+
+<CardGroup cols={2}>
+  <Card title="Verdict" icon="circle-half-stroke">
+    **Non-circular: PARTIAL — watch the Path-A subtlety.**
+  </Card>
+  <Card title="Maturity" icon="seedling">
+    **Structure day-one; slope-as-signal matures with volume.**
+  </Card>
+</CardGroup>
+
+**What it is.** The same position is protectable at 7d / 30d / 90d (the duration is baked
+into the `marketId`, so the same geometry yields a different market and a different price
+per duration). How the load evolves with maturity *per range* is the
+LP-convexity-premium term structure. **The slope is the signal.**
+
+**Precise definition.** For a fixed `(width, distance)` range, the curve of
+`QuoteFilled.loadBps` across the three duration markets; its slope is the MM's term
+view. On the subgraph, the 7/30/90d rows of one `(width, distance)` pair in
+`BucketAggregate` give the slope directly.
+
+<Warning>
+**Non-circularity verdict — PARTIAL, and watch the subtlety.**
+
+- **Path B is NON-CIRCULAR.** The slope of `QuoteFilled.loadBps` across durations is
+  behavioral — the MM's free term view.
+- **Path A is DEGENERATE, not a signal.** The cvAMM load stack is
+  **duration-INDEPENDENT by construction** — none of `baseLoadWad`, `utilSkewWad`,
+  `dispSkewWad` takes `durationSeconds`. So a Path-A "term
+  structure of load" is a **flat line**. *All* maturity dependence lives in
+  $\text{fairRate}(a,b,\sigma_{\text{ref}},T)$ — the $\sigma_{\text{ref}}\sqrt{T}$
+  S-curve, our own published closed form.
+- **Framing matters — do not conflate the two.** Path A gives the *published `fairRate`
+  term structure* (mechanical, the [Phi-sum](/math/fair-value-phi-sum)); Path B gives
+  the *behavioral load term structure*. Only the latter is a moat signal.
+</Warning>
+
+**How it is sourced.** `QuoteFilled.loadBps` per fill + duration (`expiry − createdAt`)
++ geometry (`NPM.positions`), bucketed by range; `SwapPriced.fairPremium` /
+`sigmaRefWad` anchor each point; no archive call once `SwapPriced` lands. The duration
+ladder is one query against `BucketAggregate` filtered to a `(widthBucket,
+distanceBucket)` pair. **Exclude cap-bound fills.**
+
+```graphql
+query TermStructure {
+  bucketAggregates(where: { widthBucket: "tight", distanceBucket: "mid" }) {
+    durationBucket        # day | week | month | longer
+    sumMMLoadBps          # API: meanMMLoad = sumMMLoadBps / countMMFills
+    countMMFills
+    sumSigmaRefWad        # normalise the load over σ_ref
+    totalNonCappedFills
+  }
+}
+```
+
+<Warning>
+**Maturity — structure day-one; a clean slope needs volume.**
+
+- **Limit:** at 1 MM, a clean slope needs ~30 fills per `(range × duration)` — weeks per
+  bucket.
+- **Why:** a slope estimate requires multiple points per duration to be more than noise.
+- **Mitigation / path-forward:** the **structure exists day one** — you can place 7/30/90d
+  fills of one range on a single axis immediately. Slope-as-signal matures with volume;
+  the bucketing populates from the first fill.
+</Warning>
+
+---
+
+## Signal 4 — MONEYNESS / DEMAND SKEW by geometry
+
+<CardGroup cols={2}>
+  <Card title="Verdict" icon="circle-half-stroke">
+    **Non-circular: PARTIAL — realized is on-chain, latent is off-chain.**
+  </Card>
+  <Card title="Maturity" icon="seedling">
+    **Structural; leading-indicator quality needs flow + telemetry.**
+  </Card>
+</CardGroup>
+
+**What it is.** Which positions LPs seek to protect — tight vs wide, centered vs
+near-edge — is an LP-sentiment / leading-stress indicator. A surge in tight, near-edge
+protection demand ⇒ LPs expect an imminent move.
+
+**Precise definition.** Per geometry bucket: the **realized** demand surface (fill count,
+V0 volume) PLUS the **latent** demand (geometries priced/queried but not bought).
+
+<Warning>
+**Non-circularity verdict — PARTIAL.**
+
+- **Realized demand by geometry is NON-CIRCULAR** for the fills we see — it is an LP
+  choice (which `tokenId` / duration to bring); the protocol does not pick the geometry.
+- **But on-chain we observe only realized purchases**, biased by quote availability: a
+  geometry queried 100× but filled 10× because it was too expensive reads as *low*
+  demand. **True demand including UNFILLED interest is OFF-CHAIN** — it lives in relayer
+  `/quote` requests and SDK `previewPremium` calls that never hit the chain (I7).
+- **Verdict + use:** on-chain gives the realized half cleanly; the latent half needs
+  telemetry, and only the two together separate demand from price-sensitivity.
+</Warning>
+
+**How it is sourced.**
+
+<Tabs>
+  <Tab title="Realized (on-chain)">
+    `SwapCreated(swapId, lp, mm, tokenId, V0, …)` + `NPM.positions(tokenId)` + duration,
+    aggregated per geometry bucket — fully on-chain, **no new event**, the decode is
+    subgraph work. The subgraph entity is **`GeometryDemandBucket`**:
+    `realizedFillCount, realizedV0, firstSeen, lastSeen`, keyed by the same geometry
+    triple.
+
+    It is **separate from `BucketAggregate`** by design: demand skew counts *every*
+    create — including capped fills, because demand is demand — whereas `BucketAggregate`
+    excludes capped fills (load info only). Different inclusion rules ⇒ different entity.
+  </Tab>
+  <Tab title="Latent (off-chain telemetry)">
+    The off-chain engine **`DEMAND_LOG`** — written on every `GET /quote` request and
+    every `POST /telemetry/preview` ping. Schema `DemandRecord`: `{ ts, marketId,
+    widthBucket, distanceBucket, durationBucket, previewedPremium?, filled: false
+    (ALWAYS — this is the latent half), source (preview | quote-request) }`. **No PII, no
+    raw geometry, no tokenId, no addresses** — only coarse buckets + marketId; the SDK
+    computes the buckets client-side and POSTs only the labels; see
+    [the telemetry pipeline](/moat/telemetry).
+
+    The SDK `LpClient.previewPremium` fires a best-effort, fire-and-forget
+    `POST ${engineBaseUrl}/telemetry/preview` that never blocks or fails the preview.
+  </Tab>
+</Tabs>
+
+<Warning>
+**Maturity — structural; leading-indicator quality needs flow + telemetry.**
+
+- **Limit:** the realized demand surface populates from the first fills, but
+  surge-detection (the leading-indicator quality) needs both volume *and* the off-chain
+  request stream.
+- **Why:** to call a surge you must separate "more demand" from "less price-sensitivity"
+  — which requires the unfilled-interest stream, not just realized fills.
+- **Mitigation / path-forward:** the `DEMAND_LOG` is capturing the latent half **now**,
+  from the first interaction (it is unreconstructable retroactively), so the
+  leading-indicator quality matures as flow accumulates against an already-captured
+  baseline.
+</Warning>
+
+---
+
+## Signal 5 — NET CONVEXITY / GAMMA SUPPLY
+
+*protocol-wide*
+
+<CardGroup cols={2}>
+  <Card title="Verdict" icon="circle-check">
+    **Non-circular: YES — as a supply/quantity gauge.**
+  </Card>
+  <Card title="Maturity" icon="leaf">
+    **Meaningful from a handful of swaps — the most launch-robust of the five.**
+  </Card>
+</CardGroup>
+
+**What it is.** Total gamma being **sold** (pool + all MMs) and at what aggregate load
+across the surface — a real-time gauge of DeFi appetite to sell vol, tradeable against a
+reference like Deribit.
+
+**Precise definition.** The sum over all **ACTIVE** swaps of per-swap gamma — derived
+from each swap's *stored* geometry (the immutable `liquidity` / `amount{0,1}Entry` /
+ticks, fixed by invariant I6) — weighted by the realized load it was sold at (Path-B
+behavioral; Path-A mechanical baseline). Plus $\Sigma\,\text{free} / \Sigma\,\text{locked}$
+and the demand rate per market:
+
+$$
+\Gamma_{\text{net}} = \sum_{s \,\in\, \text{active}} \gamma\big(\text{geometry}_s\big) \cdot w_s, \qquad
+\text{VWLoad} = \frac{\sum_s \text{load}_s \cdot V0_s}{\sum_s V0_s}.
+$$
+
+<Warning>
+**Non-circularity verdict — YES, as a supply/quantity gauge.**
+
+- The aggregate is built from actor positions; the **quantity** (how much convexity the
+  protocol is short) is a real-world fact, not a price computation — it cannot be
+  circular because it is not derived from `fairRate` at all.
+- The per-swap **Greeks** are computed off-chain by finite-differencing the deployed
+  `ILMath.computeIL` / `FairValueOracle.fairRate` — anchored to the protocol's own
+  on-chain math, with **no parallel model** (the `GreeksEngine`). This is the same
+  no-reimplementation discipline as [the Phi-sum](/math/fair-value-phi-sum):
+  finite-difference the deployed contract, never re-derive it.
+</Warning>
+
+**How it is sourced.** Off-chain compute over the subgraph-tracked open set
+(`SwapCreated` opens, `SwapSettled` closes; `Swap.isActive` is open-set membership). The
+subgraph maintains the active-swap set with each swap's geometry; the API / GreeksEngine
+sums Greeks over it — **not a new event**. Two surfaces:
+
+- the **`ProtocolState`** singleton (`id = 'global'`) holds the live counters —
+  `activeSwapCount, totalActiveV0, totalActiveMaxIL, cumulativeSwaps, cumulativeSettled`
+  — bumped on `SwapCreated`, decremented on `SwapSettled` with floor-at-zero guards;
+- the **`NetGammaSnapshot`** time series holds `activeSwapCount, totalV0, totalMaxIL`
+  plus the **API-written-back** Greeks `aggGammaWad`, `aggVegaWad`, and
+  `volumeWeightedLoadWad` (null until the GreeksEngine computes them).
+
+<Info>
+**Indexer note.** `NetGammaSnapshot` is **schema-ready and API-populated**, not
+indexer-populated — no mapping handler currently writes a row; the live active-set
+counters are maintained on `ProtocolState` instead, and `ProtocolState.nextNetGammaBucket`
+exists to drive a future bucket roll. The current snapshot
+(via `ProtocolState`) is available the moment the subgraph deploys; the Greeks series is
+back-filled by the API.
+</Info>
+
+<Warning>
+**Maturity — the most launch-robust of the five.**
+
+- **Limit:** the gauge sharpens as the open book grows.
+- **Why:** it is a **sum, not a distribution** — so it is meaningful from a *handful* of
+  swaps, unlike Signals 1–3, which need a cross-section to form a regime.
+- **Mitigation / path-forward:** none needed at launch — this is the one signal that is
+  informative from day one. It simply tightens as more swaps open.
+</Warning>
+
+---
+
+## The five signals at a glance
+
+| # | Signal | Behavioral leg | Mechanical baseline | Non-circularity verdict | Launch maturity |
+| - | --- | --- | --- | --- | --- |
+| **1** | Clearing LOAD over σ_ref | `QuoteFilled.loadBps` | `SwapPriced.totalLoadWad` | **PARTIAL** — Path B only | Structural; regime needs ≥3 MMs |
+| **2** | Pool-vs-MM SPREAD + win-rate | MM load | pool load | **YES** — as a spread | Per-fill now; dynamic with ≥3 MMs |
+| **3** | TERM STRUCTURE of convexity | `loadBps` slope across 7/30/90d | duration-independent (flat) | **PARTIAL** — Path B; Path A is degenerate | Structure day-one; slope needs volume |
+| **4** | DEMAND SKEW by geometry | which `tokenId`/duration the LP brings | none (pure choice) | **PARTIAL** — realized on-chain, latent off-chain | Structural; surge-read needs flow + telemetry |
+| **5** | NET GAMMA supply | actor positions (a quantity) | n/a | **YES** — supply/quantity gauge | Meaningful from a handful of swaps |
+
+The decision-table source for these verdicts, and the full proof of why "invert
+`fairRate`" is the one excluded idea, is on
+[circular vs behavioral](/moat/circular-vs-behavioral).
+
+## How a consumer reaches each signal
+
+The three-layer routing rule: **needs to write or needs the
+exact price now → SDK; needs history or an aggregate → subgraph (consumed via the API);
+needs frictionless public access → API.** Per-signal access:
+
+| Signal | SDK method (`DataClient`) | API route | Subgraph entity | Live now? |
+| - | --- | --- | --- | --- |
+| **1** | `getCurrentLoadSurface` (live), `getLoadSurfaceHistory` | `GET /pool/load-surface` (live RPC), `GET /data/load-surface` (history) | `BucketAggregate`, `MarketStateSnapshot` | **current = live RPC NOW**; history = subgraph-pending |
+| **2** | `getQuoteCompetition` | `GET /data/quote-competition` | `Swap.spreadWad`, `MarketMaker` win counts + `COMPETITION_LOG` | **dynamic half = telemetry LIVE NOW**; structural = subgraph-pending |
+| **3** | via `getLoadSurfaceHistory` / API | `GET /data/term-structure?width&distance` | `BucketAggregate[]` across durations | subgraph-pending |
+| **4** | `getDemandRequests` | `GET /data/demand-requests` | `GeometryDemandBucket` + `DEMAND_LOG` | **latent half = telemetry LIVE NOW**; realized = subgraph-pending |
+| **5** | `getNetGamma` | `GET /data/net-gamma`, `GET /data/supply-depth` | `NetGammaSnapshot`, `ProtocolState` | subgraph-pending (off-chain Greeks) |
+
+For the full access map and the SDK methods see
+[the access map](/moat/access-map) and [the data client](/sdk/data-client).
+
+## State of the dataset
+
+The static *structures* ship now; the full *dynamics* require competition and flow.
+
+<Maturity />
+
+What that means concretely:
+
+| Layer | What it is | When it is real |
+| --- | --- | --- |
+| **On-chain moat events** | `SwapPriced` + `QuoteFilled` + the `CvammPricing.loadComponents` breakdown | **LIVE on-chain since the 2026-06-05 redeploy** — the dataset begins at the redeploy `startBlock` `274081134` |
+| **Off-chain telemetry** | `DEMAND_LOG` (Signal 4 latent) + `COMPETITION_LOG` (Signal 2 dynamic) | **CAPTURING NOW** — from the first interaction logged (unreconstructable retroactively) |
+| **History / aggregate surfaces** | the subgraph that indexes the events into bucketed aggregates | **subgraph-pending** — see the limit below |
+
+<Warning>
+**The subgraph is built but not yet deployed — so history and aggregate surfaces degrade
+to a typed `pending` state.**
+
+- **Limit:** until `SUBGRAPH_URL` is set, every *history* / *aggregate* moat surface
+  returns a typed `pending` body — never an error. There is also one declared-but-unfilled
+  dimension: the **per-MARKET** counters are zero-init because `SwapCreated`/`SwapPriced`/
+  `QuoteFilled` carry no `marketId` yet.
+- **Why:** this is a **build gap, not a contract gap**. The contracts already emit every
+  event the moat needs; the subgraph passes its offline build and test suite but is not yet pointed at a hosted endpoint, pending the
+  `inflexion-arb-sepolia` Studio slug.
+- **Mitigation / path-forward:** the **GEOMETRY-keyed** aggregates — `BucketAggregate`
+  (Signals 1/2/3) and `GeometryDemandBucket` (Signal 4) — ARE fully populated, so the
+  **geometry-bucketed moat signals are unaffected**. The current load surface is served
+  live now via the SDK; the telemetry halves capture now; the pending body even embeds
+  the exact future GraphQL query, so wiring the API at the subgraph deploy is a one-line
+  body swap. Closing the per-market gap is a bounded follow-up — derive `marketId` in
+  `handleSwapCreated`; see [degradation](/sdk/degradation).
+</Warning>
+
+For the exhaustive state and the full set of honest limits, see
+[state and limits](/moat/state-and-limits).
+
+## Go deeper
+
+<CardGroup cols={2}>
+  <Card title="Circular vs behavioral" icon="scale-balanced" href="/moat/circular-vs-behavioral">
+    The non-circularity decision table and the worked proof of why inverting `fairRate`
+    is circular — and the only idea excluded.
+  </Card>
+  <Card title="On-chain primitives" icon="cube" href="/moat/primitives">
+    The two moat events (`SwapPriced`, `QuoteFilled`) and the `CvammPricing.loadComponents`
+    breakdown library.
+  </Card>
+  <Card title="Telemetry pipeline" icon="satellite-dish" href="/moat/telemetry">
+    The off-chain `DEMAND_LOG` / `COMPETITION_LOG` sinks — the latent and dynamic halves
+    of Signals 4 and 2.
+  </Card>
+  <Card title="The access map" icon="map" href="/moat/access-map">
+    The three-layer routing rule and the full per-signal SDK / API / subgraph table.
+  </Card>
+  <Card title="The moat thesis" icon="bullseye" href="/moat/thesis">
+    The full argument for why the flow is a defensible dataset, and who consumes it.
+  </Card>
+  <Card title="State and limits" icon="circle-info" href="/moat/state-and-limits">
+    The exact state of the dataset and the complete set of known limits.
+  </Card>
+</CardGroup>

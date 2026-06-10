@@ -1,0 +1,410 @@
+---
+title: "Framing guardrails"
+description: "The framing rules the SDK itself encodes — in-range convexity hedge, qualified no-bad-debt, capital-not-guaranteed, per-market quotes, and the Phi-sum never reimplemented off-chain. The 'say it right' reference for integrators."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+The SDK is not neutral plumbing. It carries the protocol's load-bearing claims **in its
+types and exported constants**, so that any UI, bot, or integration that reads from it
+inherits the correct framing for free — and so that getting the framing wrong takes
+deliberate effort, not just inattention.
+
+This page is the "say it right" reference. Every rule below is something `@inflexion/sdk`
+encodes structurally. If you are building on Inflexion, treat these five rules as
+non-negotiable in your copy and your tooltips.
+
+<Note>
+The framing rules are also captured in code as a self-contained guardrail block: the
+no-bad-debt clause, claims A and B (exported verbatim as `LP_CLAIM_A` / `DEPOSITOR_CLAIM_B`),
+and the hedge caveat. When in doubt, quote the exported constant rather than paraphrasing.
+</Note>
+
+## The five rules at a glance
+
+<CardGroup cols={2}>
+  <Card title="1. In-range convexity hedge" icon="chart-line" href="#rule-1-in-range-convexity-hedge-not-il-insurance">
+    Not "IL insurance". Entry requires $P_a \le P_0 \le P_b$; payout is capped at MaxIL. The cap is load-bearing.
+  </Card>
+  <Card title="2. Qualified no-bad-debt (Claim A)" icon="shield-check" href="#rule-2-qualified-no-bad-debt-claim-a">
+    Exact only under the full clause. Never stated unqualified. Lives on the LP surface only.
+  </Card>
+  <Card title="3. Capital is not guaranteed (Claim B)" icon="triangle-exclamation" href="#rule-3-capital-is-not-guaranteed-claim-b">
+    Both tranches. Junior first-loss; senior protected from underwriting loss only. Never merged with Claim A.
+  </Card>
+  <Card title="4. Quotes are per-market" icon="layer-group" href="#rule-4-an-mm-quote-is-per-market-never-per-nft">
+    MaxIL is the unit of risk → positions are fungible. A `SignedQuote` carries no `tokenId`.
+  </Card>
+  <Card title="5. The Phi-sum is read, never reimplemented" icon="function" href="#rule-5-the-phi-sum-is-read-on-chain-never-reimplemented">
+    FairValue is an on-chain closed form. Only the deterministic load stack is mirrored off-chain, parity-locked.
+  </Card>
+</CardGroup>
+
+---
+
+## Rule 1 — In-range convexity hedge, not "IL insurance"
+
+Inflexion lets an LP transfer the **in-range** impermanent-loss risk of a specific
+position. Two structural facts make this a convexity hedge rather than insurance, and the
+SDK enforces both:
+
+<Steps>
+  <Step title="Entry requires Pa ≤ P0 ≤ Pb">
+    Out-of-range positions are rejected at creation. The SDK computes
+    `inRange = sqrtP0 >= sqrtPa && sqrtP0 <= sqrtPb` in `resolveGeometry`
+    and surfaces it on every `LpGeometry` and `EligiblePosition`. This mirrors the on-chain
+    `createSwap` in-range gate — there is no way to protect a position that is already out
+    of range.
+  </Step>
+  <Step title="Payout is min(realized_IL, MaxIL)">
+    The settlement payoff is the **capped** IL, not the raw IL. The cap is applied in
+    `getPayoffCurve` and in `ilToDate`, where `capHit = payout < il` tells you whether the
+    cap bound.
+  </Step>
+</Steps>
+
+The capped payoff is what makes this *convexity*: the LP is long gamma / long vega on the
+in-range region, and the protocol is short it. The cap is the **unit of risk** as well as
+the safety mechanism — see [Rule 4](#rule-4-an-mm-quote-is-per-market-never-per-nft).
+
+The realized-IL payoff, with the cap that is load-bearing for everything downstream:
+
+$$
+\text{payout} \;=\; \min\!\bigl(\,\text{realized\_IL},\; \text{MaxIL}\,\bigr),
+\qquad
+\text{realized\_IL} \;=\;
+\begin{cases}
+V_{\text{hold}} - V_{\text{lp}} & \text{if } V_{\text{hold}} > V_{\text{lp}} \\[2pt]
+0 & \text{otherwise}
+\end{cases}
+$$
+
+The right branch is invariant **I3** (non-negativity / no underflow) and **I4** (the LP
+never profits from the swap): if the LP would have done better holding LP than holding the
+underlying, payout is exactly zero. The SDK never produces a negative payout; the
+`Priceable<...>` envelope returns `il` and `payout` as unsigned `bigint`.
+
+<Warning>
+**Do not call it "IL insurance".** "Insurance" implies an uncapped indemnity against any
+loss. Inflexion is an *in-range convexity hedge*: the protection only exists while
+$P_a \le P_0 \le P_b$, and the payout is capped at MaxIL. The cap is not a deductible — it
+is the mechanism that makes the no-bad-debt guarantee exact (see
+[Rule 2](#rule-2-qualified-no-bad-debt-claim-a)). Removing or mis-describing the cap
+breaks the framing of the entire protocol.
+</Warning>
+
+See [the in-range convexity hedge](/concepts/in-range-convexity-hedge) and
+[the IL formula](/math/il-formula) for the full derivation.
+
+---
+
+## Rule 2 — Qualified no-bad-debt (Claim A)
+
+The LP-facing claim is: **LPs are always paid — no bad debt in FULL mode (invariant I1)**.
+The SDK carries this on the LP surface as `noBadDebtFull: true` on `ProtectionStatus` and
+exports the full sentence verbatim as `LP_CLAIM_A`.
+
+But the claim is **exact only under its full qualifying clause**. State it any other way
+and it is wrong.
+
+<ClaimA />
+
+The clause, spelled out — every term is load-bearing:
+
+| Condition | Why it is required |
+| --- | --- |
+| **FULL collateralization** | Collateral is locked at MaxIL at creation; `collateral == MaxIL` is invariant **I1**. PARTIAL mode is gated and not live in v1. |
+| **Capped payoff** | `payout ≤ MaxIL == collateral` only holds because the payoff is capped ([Rule 1](#rule-1-in-range-convexity-hedge-not-il-insurance)). An uncapped payoff could exceed the posted collateral. |
+| **Solvent USDC** | The numéraire (dUSDC, 6-dec) must hold its value. A depeg is a systemic tail the on-chain guarantee does not cover. |
+| **Oracle / settlement liveness** | `settle()` must be able to read a price within the liveness window (Fork 1, invariant I8). The SDK's `settle` walks Chainlink rounds to find the bracketing round. |
+| **No rehypothecation breach** | Locked collateral must stay instantly liquid — never routed to utilization-gated venues. This is an operational invariant, not an automatic one. |
+
+<Warning>
+**Never state no-bad-debt unqualified.** Writing "Inflexion can't produce bad debt" or
+"LPs can't lose" without the clause is a defect. It is exact *only* under FULL
+collateralization + capped payoff + solvent USDC + oracle/settlement liveness + no
+rehypothecation breach. Use the `<ClaimA />` snippet rather than re-wording, and quote
+`LP_CLAIM_A` if you need the canonical sentence in code.
+</Warning>
+
+<Note>
+Claim A is about the **LP being paid**. It says nothing about depositor or MM capital —
+that is a separate claim ([Rule 3](#rule-3-capital-is-not-guaranteed-claim-b)). The SDK
+keeps them on separate surfaces precisely so they cannot be accidentally merged.
+</Note>
+
+See [no-bad-debt](/concepts/no-bad-debt), [the no-bad-debt math](/math/no-bad-debt-math),
+and [the invariants](/security/invariants).
+
+---
+
+## Rule 3 — Capital is not guaranteed (Claim B)
+
+The underwriter-facing claim is the mirror image of Claim A, and it must never be softened.
+The SDK stamps `capitalNotGuaranteed: true` on **every** `VaultState` and
+`DepositorPosition` result and exports the full sentence as `DEPOSITOR_CLAIM_B`. It is
+structurally impossible to read vault state from the SDK without the flag attached.
+
+<ClaimB />
+
+### Both tranches carry risk — differently
+
+The protocol underwrites with a two-tranche waterfall. Neither tranche is risk-free:
+
+<Tabs>
+  <Tab title="Junior — first-loss">
+    Junior is the **first-loss buffer**: it captures most of the premium and absorbs
+    underwriting losses first. The on-chain `withdraw` enforces the `JuniorBelowLocked`
+    gate so junior cannot drain below the locked amount and break senior protection. A
+    junior withdrawal that would cross the locked floor reverts and surfaces as
+    `WriteResult { status: 'error' }`, not a silent partial.
+  </Tab>
+  <Tab title="Senior — protected, not risk-free">
+    Senior is structurally protected from **underwriting** loss only — the
+    `totalLocked ≤ juniorAssets` junior-first waterfall (invariant I5). It is **not**
+    protected from a *systemic tail*: a USDC depeg,
+    an oracle/settlement failure, or a contract bug can still impair senior capital. "Protected"
+    is a relative, structural statement — never "safe" or "guaranteed".
+  </Tab>
+</Tabs>
+
+The structural fact, as an invariant:
+
+$$
+\text{totalLocked} \;\le\; \text{juniorAssets}
+\qquad\text{(junior absorbs underwriting loss before senior)}
+$$
+
+<Warning>
+**Never imply either tranche is risk-free.** Junior is first-loss; senior is protected
+from *underwriting* loss while junior buffers, but takes the systemic tail. Render the
+`<ClaimB />` disclosure on every depositor-facing surface, and do not borrow Claim A's
+"no bad debt" language to describe depositor capital — that conflates two distinct claims.
+</Warning>
+
+See [tranches](/concepts/tranches), [the vaults](/protocol/vaults), and
+[the risk disclosure](/risk-disclosure).
+
+---
+
+## Rule 4 — An MM quote is per-MARKET, never per-NFT
+
+This is the rule integrators most often get wrong, because intuition says "I'm pricing
+*this* position." You are not. MaxIL is **both** the load-bearing payout cap **and** the
+unit of risk:
+
+- MaxIL is **pure geometry** — a function of $(P_a, P_b, P_0)$, frozen at creation.
+- It is **L-independent in the fair-rate sense**: the liquidity $L$ scales the dollar
+  amount but not the fair *rate*.
+
+Because the unit of risk is geometry, not the specific NFT, **positions are fungible to an
+underwriter within a market**. So a market-maker quotes a *market*, not a token:
+
+$$
+\text{MM quote} \;=\;
+\underbrace{\text{loadBps}}_{\text{a load over on-chain FairPremium}}
+\;+\;
+\underbrace{[\,\text{minMaxILRatioBps},\, \text{maxMaxILRatioBps}\,]}_{\text{a MaxIL-ratio band}}
+\;+\;
+\underbrace{\text{maxNotionalV0}}_{\text{capacity}}
+$$
+
+The proof that this is per-market and not per-NFT is in the wire format: the
+`SignedQuote` struct carries **no `tokenId`**. Its fields are
+`mm`, `marketId`, `loadBps`, `minMaxILRatioBps`, `maxMaxILRatioBps`, `quotePrice`,
+`priceBandBps`, `model`, `partialRatioBps`, `maxNotionalV0`, `validUntil`, `quoteId`,
+`nonce` — geometry-independent, every one.
+
+The SDK leans into this: the first-class streamable signal is `getPoolLoadToBeat` /
+`streamPoolLoadToBeat` — the pure pool load an MM must undercut, computed **without any
+position geometry**:
+
+```ts filename="mm-quote-per-market.ts"
+import { createInflexionSdk, encodeNonce } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ rpcUrl, privateKey: MM_KEY })
+const mm = sdk.mm
+
+// The "load to beat" is geometry-free — it needs no tokenId.
+const tick = await mm.getPoolLoadToBeat(marketId)          // PoolLoadTick
+
+const quote = {
+  mm: MM_ADDRESS,
+  marketId,                                                 // ← the market, not a position
+  loadBps: Number(tick.totalLoadBps) - 50,                  // undercut the pool floor
+  minMaxILRatioBps: 0,
+  maxMaxILRatioBps: 10_000,                                 // a MaxIL-ratio BAND, not one position's MaxIL
+  quotePrice: liveOraclePrice,                              // Fork-2 band anchor
+  priceBandBps: 50,
+  model: 0,                                                 // FULL (the only v1 mode)
+  partialRatioBps: 0,
+  maxNotionalV0: 1_000_000_000_000n,                        // capacity (numéraire raw, 6-dec)
+  validUntil: BigInt(Math.floor(Date.now() / 1000) + 30),
+  quoteId: ('0x' + 'ab'.repeat(32)) as `0x${string}`,
+  nonce: encodeNonce(0n, 0),
+  // NOTE: there is deliberately no `tokenId` field. A quote prices a MARKET.
+}
+const signed = await mm.signQuote(MM_KEY, quote)            // enforces I10 + below-pool
+```
+
+<Tip>
+A quote's `[minMaxILRatioBps, maxMaxILRatioBps]` band says "I will underwrite any
+position in this market whose MaxIL ratio falls in this band, up to `maxNotionalV0` of
+notional." One signed quote can fill many different NFTs. This is the fungibility that
+makes a competitive MM market possible at all.
+</Tip>
+
+<Warning>
+**Do not describe an MM quote as pricing a specific position.** It prices a market: a
+load, a MaxIL-ratio band, and a capacity. If your UI shows "MM quote for token #3218",
+that is wrong framing — show "MM quote for market `<marketId>`, valid for any position in
+the MaxIL band." The absence of `tokenId` in `SignedQuote` is the proof.
+</Warning>
+
+See [MaxIL](/concepts/maxil), [the MaxIL derivation](/math/maxil-derivation),
+[Path B](/protocol/path-b-mm), and [quote signing](/integrate/quote-signing).
+
+---
+
+## Rule 5 — The Phi-sum is read on-chain, never reimplemented
+
+FairValue is an **exact closed-form $\Phi$-sum** — the Stylus `FairValueOracle`
+(`fairPremium` / `fairRate`). It is the protocol's single source of pricing truth, and the
+SDK **reads** it; it never recomputes it off-chain.
+
+The on-chain read, in the SDK's hot path:
+
+```ts
+// Path A — the load-bearing on-chain read. The Φ-sum is NEVER reimplemented off-chain.
+const [premium, fairRateWad, sigmaRefWad] =
+  await fairValueOracle.read.fairPremium([token, aWad, bWad, durationSeconds, maxIL])
+```
+
+### The one permitted duplication — and why it is permitted
+
+There is exactly **one** piece of pricing math the SDK mirrors off-chain: the
+deterministic, `pure` **load stack** (`baseLoad` + `utilSkew` + `dispSkew`, clamped to
+`maxLoadBps`). It lives in the `cvamm` namespace and is **parity-locked byte-equal** to the
+deployed `CvammPricing` Solidity by a dedicated parity test.
+
+Why mirror it at all? Because the deployed `CvammPricing` library is **delegatecall-only**:
+a direct `eth_call` to `libs.cvammPricing` reverts (Solidity guards deployed libraries —
+confirmed on the 2026-06-05 deploy). The library runs on-chain only via the core's
+delegatecall during pricing, so there is no callable on-chain entrypoint to read the load
+from. The parity-locked TS port is the only way to preview the load without sending a
+transaction.
+
+The split is precise:
+
+$$
+\underbrace{\text{premium}}_{\text{Path A}}
+\;=\;
+\underbrace{\text{fairPremium}}_{\text{read on-chain (Φ-sum)}}
+\times
+\bigl(1 + \underbrace{\text{totalLoad}}_{\text{mirrored off-chain (load stack)}}\bigr),
+\quad
+\text{capped at MaxIL}
+$$
+
+```ts filename="premium-the-split.ts"
+import { cvamm } from '@inflexion/sdk'
+
+// 1. fairPremium + fairRate + sigmaRef come from the on-chain Φ-sum (read, never recomputed).
+const [fairPremium, fairRateWad, sigmaRefWad] =
+  await fairValueOracle.read.fairPremium([token, aWad, bWad, durationSeconds, maxIL])
+
+// 2. ONLY the deterministic load stack is evaluated client-side via the parity-locked port.
+const totalLoad = cvamm.totalLoadWad(sigmaRefWad, util, conc, params)
+const premiumA  = cvamm.premiumFromLoad(fairPremium, totalLoad)   // ceil(fairPremium·(1+totalLoad)), capped at MaxIL
+//                = exactly `_pricePathAFromFair` on-chain
+```
+
+<Warning>
+**Never reimplement the $\Phi$-sum off-chain.** Do not "approximate fair value" in JS,
+cache a stale `fairRate`, or invert it to back out an implied vol for pricing. The
+`FairValueOracle` is the only authority; the SDK reads it fresh every preview. The only
+math you may evaluate off-chain is the deterministic load stack — and only via the
+parity-locked `cvamm` port, never a hand-rolled copy. If `cvamm` and the deployed library
+ever disagree, the parity test fails the build.
+</Warning>
+
+<Note>
+Inverting `fairRate` to infer implied volatility is also a **circular** signal — it would
+just recover the σ_ref the oracle was fed. It is deliberately excluded from the data-moat
+signals for exactly that reason. See
+[circular vs behavioral](/moat/circular-vs-behavioral).
+</Note>
+
+See [the three pillars](/concepts/three-pillars),
+[the Phi-sum](/math/fair-value-phi-sum), [the pricing stack](/protocol/pricing-stack),
+and [the cvAMM port](/sdk/cvamm-port).
+
+---
+
+## One more guardrail: the hedge caveat
+
+If you surface the SDK's read-only analytics (`GreeksEngine` / `HedgeSuggester`), there is
+a sixth framing rule you must carry verbatim. Every `HedgeSuggestion` attaches
+`HEDGE_CAVEAT`:
+
+- The hedge is **approximate** relative to the fixed-maturity IL claim (mismatched expiry,
+  funding, discretization).
+- It is the **MM's own residual-risk choice**, not a protocol requirement.
+- It is **not relied upon for pool solvency** — invariant **I1** (no bad debt, FULL) is
+  structural and oracle-independent, fully collateralized at MaxIL **regardless of whether
+  the MM hedges at all**.
+
+`executeOnPanoptic` always returns `executed: false` — the SDK never submits a hedge tx.
+It is analytics, not execution.
+
+<Warning>
+Do not imply the hedge is what keeps the pool solvent. Solvency comes from full
+collateralization at MaxIL (I1), which holds whether or not any MM hedges. The hedge is the
+MM's private business decision about its own residual risk. Attach `HEDGE_CAVEAT`
+verbatim to any suggestion you display.
+</Warning>
+
+See [greeks & hedge](/sdk/greeks-hedge) and [the trust model](/security/trust-model).
+
+---
+
+## Quick checklist for integrators
+
+<AccordionGroup>
+  <Accordion title="Copy that mentions LP protection">
+    Say "in-range convexity hedge", not "IL insurance". State the payout as
+    $\min(\text{realized\_IL}, \text{MaxIL})$ and note the cap. Mention the entry gate
+    $P_a \le P_0 \le P_b$ if there is room.
+  </Accordion>
+  <Accordion title="Copy that mentions no-bad-debt">
+    Always attach the full clause via `<ClaimA />` (FULL + capped payoff + solvent USDC +
+    oracle/settlement liveness + no rehypothecation breach). Never the bare phrase. This is
+    the LP claim — keep it off depositor surfaces.
+  </Accordion>
+  <Accordion title="Copy that mentions depositors or MMs">
+    Render `<ClaimB />`. Both tranches carry risk: junior first-loss, senior protected from
+    underwriting loss only and exposed to the systemic tail. Never "risk-free" or
+    "guaranteed". Do not reuse Claim A's no-bad-debt language here.
+  </Accordion>
+  <Accordion title="Copy that mentions MM quotes">
+    A quote is per-market: load + MaxIL-ratio band + capacity. The `SignedQuote` has no
+    `tokenId`. Never present a quote as pricing one specific NFT.
+  </Accordion>
+  <Accordion title="Anything that computes or displays a premium">
+    Read `fairPremium` / `fairRate` from the on-chain `FairValueOracle` fresh. Only the
+    load stack may be evaluated off-chain, and only via the parity-locked `cvamm` port.
+    Never reimplement or invert the $\Phi$-sum.
+  </Accordion>
+  <Accordion title="Anything that shows history or aggregates">
+    History surfaces (load-surface history, quote competition, NAV, net gamma) are
+    subgraph-pending. The SDK returns a typed `ApiPending` envelope naming the future
+    route — render the pending state, never an error, never fabricated numbers.
+
+    <Maturity />
+  </Accordion>
+</AccordionGroup>
+
+For the canonical sentences in code, import them rather than retyping: `LP_CLAIM_A`,
+`DEPOSITOR_CLAIM_B`, and `HEDGE_CAVEAT` are all exported from `@inflexion/sdk`.

@@ -1,0 +1,154 @@
+---
+title: "Theory anchors — LVR & static replication"
+description: "The two academic results that make IL priceable and hedgeable — Lipton-Lucic-Sepp replication and Milionis-Moallemi-Roughgarden LVR — and why they validate the approach but are NOT the pricer."
+---
+
+Inflexion does not invent a pricing theory. It *applies* two established results to a v3 LP position and then prices the exact, capped payoff with a closed-form Φ-sum. This page covers the two anchors, the short-gamma chain that ties them to the IL claim, and — emphatically — why they validate the approach but are **not** the on-chain pricer.
+
+<Note>
+**One-line takeaway.** The literature tells us an LP is short gamma and that its loss is the realization of that short-gamma cost. That is *why* the claim is priceable and hedgeable. The *price itself* comes from [the exact Φ-sum](/math/fair-value-phi-sum) — `E_Q[min(IL, MaxIL)]` evaluated live per quote — not from these papers. Anchors justify; the Φ-sum computes.
+</Note>
+
+## The chain in one diagram
+
+The whole intellectual argument is a five-link chain. Each link is either a property of the v3 value function (proven in [the IL formula](/math/il-formula) and [the MaxIL derivation](/math/maxil-derivation)) or one of the two academic anchors.
+
+<Steps>
+  <Step title="V_lp is concave in price">
+    Inside the range, the v3 LP value $V_{lp}(P) = L\,(2\sqrt{P} - \sqrt{P_a} - P/\sqrt{P_b})$ is **strictly concave**: $d^2 V_{lp}/dP^2 = -\tfrac14 L\,P^{-3/2} < 0$ for all $P>0$. Holding the entry basket, $V_{hold}(P)$, is affine. Concave value vs. an affine benchmark *is* the source of IL.
+  </Step>
+  <Step title="Concave value ⇒ the LP is short gamma">
+    Negative second derivative of value with respect to price is the definition of negative gamma. A v3 LP is **structurally short gamma** — they have sold optionality to the pool.
+  </Step>
+  <Step title="Short gamma ⇒ the LP pays LVR (MMR 2022)">
+    Milionis-Moallemi-Roughgarden show the AMM's adverse-selection cost — *loss-versus-rebalancing* (LVR) — has a closed form **proportional to instantaneous variance**, equivalently the *theta* (time-decay) of the replicating short-option position. Short gamma is paid for in continuous theta bleed; that bleed is LVR.
+  </Step>
+  <Step title="LVR realized over the position ⇒ IL owed">
+    Integrated over the life of the position, that short-gamma / LVR cost is what shows up at settlement as realized impermanent loss, $\text{realized\_IL} = \max(0,\,V_{hold} - V_{lp})$.
+  </Step>
+  <Step title="Inflexion sells the offsetting long-convexity leg (LLS 2025)">
+    Lipton-Lucic-Sepp show an IL-protection claim is **statically replicable by a strip of vanilla options** — so it has a model-light fair value and a concrete hedge. Inflexion sells the LP exactly that long-convexity leg, **capped at the in-range maximum** ([MaxIL](/concepts/maxil)), and prices it as the risk-neutral expectation of the capped payoff.
+  </Step>
+</Steps>
+
+The compressed form:
+
+> $V_{lp}$ concave ⇒ LP short gamma ⇒ pays LVR ⇒ owes IL; Inflexion sells the LP the *long-convexity* leg that offsets it, capped at the in-range maximum (MaxIL), and prices it with the exact risk-neutral expectation of that capped payoff (the Φ-sum).
+
+## Anchor 1 — Lipton, Lucic & Sepp (2025): static replication
+
+**Result.** An IL-protection claim on a concentrated-liquidity position is **statically replicable by a strip of vanilla options**.
+
+**Why it matters for Inflexion.** Static replication is a strong statement: it means the claim's payoff can be reproduced, at expiry, by a fixed portfolio of vanilla calls/puts chosen *once* — no dynamic rebalancing required. Two consequences fall straight out:
+
+<CardGroup cols={2}>
+  <Card title="Model-light fair value" icon="scale-balanced">
+    A statically replicable payoff inherits the option strip's price. Its fair value does not depend on a bespoke, calibrated model — it is the value of a known portfolio of vanillas. This is the licence to publish a *fair value* at all.
+  </Card>
+  <Card title="A concrete hedge exists" icon="shield-halved">
+    Replication is constructive: the same strip an underwriter could *buy* to neutralize the risk it has written. This is what makes the written risk a hedgeable book, not an actuarial bet — and it underpins the [pool hedge lever](/protocol/vaults) on the roadmap.
+  </Card>
+</CardGroup>
+
+The v3 LP value function makes the replication tangible. Recall the three regimes (see the [IL formula](/math/il-formula)):
+
+$$
+V_{lp}(P) =
+\begin{cases}
+L\,(1/\sqrt{P_a} - 1/\sqrt{P_b})\cdot P & P < P_a \quad(\text{linear}) \\[4pt]
+L\,(2\sqrt{P} - P/\sqrt{P_b} - \sqrt{P_a}) & P_a \le P \le P_b \quad(\text{concave}) \\[4pt]
+L\,(\sqrt{P_b} - \sqrt{P_a}) & P > P_b \quad(\text{constant})
+\end{cases}
+$$
+
+The concave middle arm is precisely a short-option payoff profile (capped on the upside, sloping into both tails), and the kinks at $P_a$ and $P_b$ are where the replicating strip's strikes sit. That this concave value can be written as a portfolio of vanillas is the LLS statement applied to v3.
+
+## Anchor 2 — Milionis, Moallemi & Roughgarden (2022): LVR
+
+**Result.** In *Automated Market Making and Loss-Versus-Rebalancing*, the AMM's adverse-selection cost — **LVR** — has a **closed form proportional to instantaneous variance**, equivalently the *theta* of the replicating short-option position.
+
+**Why it matters for Inflexion.** LVR is the closed-form anchor for the *cost of short-gamma exposure*. Schematically, the instantaneous LVR rate scales with $\sigma^2$ and the position's curvature:
+
+$$
+\text{LVR rate} \;\propto\; \tfrac12\,\sigma^2\,P^2\,\big|\,\partial^2 V_{lp}/\partial P^2\,\big|
+\;=\; \Theta_{\text{short option}}
+$$
+
+This is the precise sense in which a v3 LP "bleeds": holding a concave position through volatility costs theta continuously, and that theta is the LVR. Realized IL is the cumulative realization of this cost over the position's life. The variance-proportionality is also the bridge to the protocol's only stochastic input — the same $\sigma$ that drives LVR is the $\sigma_{ref}$ the [σ_ref oracle](/math/sigma-ref) feeds into the price.
+
+<Tip>
+**The two anchors are complementary, not redundant.** MMR gives the *cost* of being short gamma (the theta you bleed). LLS gives the *cure* — a static strip that buys the offsetting long-convexity. Inflexion sells the LP that cure. One paper tells you the disease is priceable; the other tells you it is hedgeable.
+</Tip>
+
+## Why "capped" is where Inflexion departs from the textbook
+
+The anchors describe the *uncapped* IL claim. Inflexion does not sell that. It sells $\min(\text{realized\_IL}, \text{MaxIL})$ — the in-range maximum, frozen at creation. The reason is structural, not cosmetic: beyond the range the LP has fully rotated into one asset, so $V_{lp}$ is *constant* while $V_{hold}$ keeps growing linearly, making absolute IL **unbounded** above $P_b$.
+
+$$
+\text{covered\_payoff} = \min(\text{realized\_IL},\, \text{MaxIL}), \qquad \text{MaxIL} = \max\big(IL(P_a),\, IL(P_b)\big)
+$$
+
+The cap truncates the replicating strip at the range boundaries. Everything *inside* the range is the convexity hedge the anchors describe; everything beyond it is **directional** loss (foregone spot upside), not the *impermanent* loss the LP set out to hedge. The cap is what makes the product fully collateralized and trustless — it *is* the [no-bad-debt guarantee](/concepts/no-bad-debt), not a defect. This is why Inflexion is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), **not "IL insurance."**
+
+## The anchors validate the approach — they are NOT the pricer
+
+This is the load-bearing distinction on this page. State it cleanly.
+
+<Warning>
+**The papers justify *that* the claim is priceable. They do not *set the price*.** The on-chain price is computed by the exact closed-form Φ-sum — `FairPremium = E_Q[min(IL, MaxIL)]` — evaluated live per quote in the Stylus [FairValueOracle](/protocol/oracles). No coefficient in that formula is fitted to LLS or MMR; the anchors are *intellectual provenance*, not calibration inputs.
+
+- **Limit:** the anchors are continuous-time, asymptotic, *uncapped* results — they describe the family of the claim, not the discrete capped payoff Inflexion actually settles.
+- **Why:** Inflexion settles $\min(\text{realized\_IL}, \text{MaxIL})$ in integer Q64.96 math at a single expiry, against a price the [oracle](/protocol/oracles) reports — not a continuous-time integral of an uncapped claim.
+- **Mitigation:** the protocol prices the *exact* capped payoff directly. The capped v3 payoff is piecewise-linear/convex in the terminal price, so under risk-neutral GBM each arm integrates to a standard lognormal interval moment in the normal CDF $\Phi$. The result is a finite Φ-sum (≈6–10 terms, Black–Scholes class), verified ≡ the reference IL implementation to `max_abs_err ≈ 5.1e-11` — **no Monte Carlo, no lookup table, no fitted coefficients.** See [the Φ-sum](/math/fair-value-phi-sum).
+</Warning>
+
+The cleanest way to hold the two roles apart:
+
+| Role | What it is | Where it lives |
+| ---- | ---------- | -------------- |
+| **Anchor** (justifies) | LLS static replication + MMR LVR-as-theta — the claim is priceable & hedgeable | Academic literature |
+| **Pricer** (computes) | Exact closed-form Φ-sum, `E_Q[min(IL, MaxIL)]`, evaluated live per quote | Stylus `FairValueOracle` |
+
+### The only residual modeling assumption
+
+The Φ-sum is *exact given the model*. The single modeling assumption is risk-neutral **GBM with $\mu = 0,\ r = 0$** (`measure: risk_neutral_gbm_mu0_r0`). The anchors do not remove this; nothing on-chain does. It is covered two ways:
+
+<AccordionGroup>
+  <Accordion title="1. The conservative σ_ref">
+    The vol oracle publishes $\sigma_{ref} = \max(\sigma_{short}, \sigma_{long}, \text{floor})$ with a floor of `0.50` sitting *above* observed calm ETH vol (`~0.45`), so the pool is net-conservative to depositors. A wrong/too-low $\sigma$ can compress NAV but **can never create LP bad debt in FULL** — see [σ_ref](/math/sigma-ref) and [no-bad-debt math](/math/no-bad-debt-math).
+  </Accordion>
+  <Accordion title="2. Forward-vol premium is left as MM alpha">
+    The residual forward-looking-vol premium — the gap between backward-looking realized vol and implied — is deliberately left as **market-maker alpha**. Forward-vol MMs price off implied vol and correct the pool's structural backward-looking bias. See [Path B — MM](/protocol/path-b-mm).
+  </Accordion>
+</AccordionGroup>
+
+## What this buys the protocol
+
+<CardGroup cols={3}>
+  <Card title="Provenance, not hand-waving" icon="book">
+    "IL is priceable" is not an Inflexion claim — it is the LLS + MMR result applied to v3. The protocol stands on published 2022/2025 results.
+  </Card>
+  <Card title="A real hedge target" icon="crosshairs">
+    Static replication names the offsetting option strip, which is the [pool-hedge lever](/protocol/vaults) on the roadmap (h≈0.60 tightens the depositor tail).
+  </Card>
+  <Card title="An honest boundary" icon="ruler">
+    The anchors are uncapped & asymptotic; the pricer is exact & capped. Keeping the two roles separate is the rigor — the price is never "an approximation of a paper."
+  </Card>
+</CardGroup>
+
+## Related reading
+
+<CardGroup cols={2}>
+  <Card title="The Φ-sum (the actual pricer)" icon="function" href="/math/fair-value-phi-sum">
+    The exact closed-form fair value the anchors point toward but do not compute.
+  </Card>
+  <Card title="IL formula" icon="chart-line" href="/math/il-formula">
+    Where $V_{lp}$ concavity (short gamma) and $V_{hold}$ affinity come from.
+  </Card>
+  <Card title="MaxIL — the cap & unit of risk" icon="lock" href="/concepts/maxil">
+    Why the in-range maximum is load-bearing and where the strip is truncated.
+  </Card>
+  <Card title="In-range convexity hedge" icon="wave-square" href="/concepts/in-range-convexity-hedge">
+    The product framing the anchors validate — convexity hedge, not IL insurance.
+  </Card>
+</CardGroup>

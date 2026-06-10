@@ -1,0 +1,347 @@
+---
+title: "Senior & Junior tranches — the depositor product"
+description: "The dual-tranche ConvexityVault: how the premium waterfall in and the loss waterfall out create a first-loss junior buffer and a structurally protected senior tranche — with the quant's risk/return figures and the load-bearing senior-protection invariant."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The cvAMM ([Path A](/concepts/two-rails)) is more than an always-on underwriter — it
+is a **depositor product**. When you deposit USDC into the `ConvexityVault` you become
+the counterparty to LPs hedging their impermanent loss: you **sell convexity** and earn
+the volatility-risk premium for taking the in-range IL risk LPs want to shed.
+
+But selling volatility is not a savings account. A volatility seller earns a steady
+premium in calm markets and pays out in crashes. So a single undifferentiated pool
+forces every depositor onto the same risk/return point — and that point is too risky
+for a conservative depositor and too tame for a vol specialist. Inflexion's answer is a
+**dual-tranche vault from launch**: one pool, two claims on it.
+
+<CardGroup cols={2}>
+  <Card title="Junior — the first-loss vol tranche" icon="fire">
+    Absorbs underwriting losses **first**, buffers senior, and earns the **larger share
+    of premium**. High-APY, high-variance. The "vol-seller" tranche.
+  </Card>
+  <Card title="Senior — the convexity savings account" icon="shield-halved">
+    Structurally **protected from underwriting loss** while the junior buffer holds.
+    Earns a **smaller, smoother** premium share. Exposed only to the systemic tail.
+  </Card>
+</CardGroup>
+
+<ClaimB />
+
+## One vault, two tranches
+
+There is **one** `ConvexityVault` per pair, with fungible USDC backing all nine
+[marketIds](/protocol/markets) for that pair (3 fee tiers × 3 durations). It is
+**dual-tranche SENIOR / JUNIOR from launch** — not a roadmap upgrade, live at the
+[deployed address](/reference/deployments).
+
+The vault keeps the two tranches accounted separately end to end:
+
+| Per-tranche state | Shared pool state |
+|---|---|
+| `seniorAssets` / `juniorAssets` | `totalLocked` (collateral locked across all open swaps) |
+| `seniorShares` / `juniorShares` | `lockedByMarket[marketId]` (per-market lock) |
+| `seniorBalanceOf` / `juniorBalanceOf` | `sumLockedSq` (O(1) Herfindahl accumulator for the [dispersion skew](/math/load-stack)) |
+
+Two derived quantities drive everything downstream:
+
+$$
+\text{totalAssets} = \text{seniorAssets} + \text{juniorAssets},
+\qquad
+\text{freeAssets} = \text{totalAssets} - \text{totalLocked}
+$$
+
+`freeAssets` is what is available to underwrite the next swap; `totalLocked` is the sum
+of collateral (each equal to a swap's [MaxIL](/concepts/maxil)) locked against open
+positions.
+
+## The premium waterfall — money in
+
+Every premium paid on Path A is split before it ever touches a depositor. First the
+protocol takes its cut, then the remainder is divided across the two tranches.
+
+<Steps>
+  <Step title="99% to the pool, 1% to the treasury">
+    On `_executePathA` the premium is split **99% accrued into the vault**
+    (`accruePremium`) and **1% to the treasury**. There is
+    no per-tranche split at this layer — that happens inside the vault.
+  </Step>
+  <Step title="The senior/junior split (accruePremium)">
+    Inside `accruePremium` the pool's share is divided by
+    a single immutable parameter, `seniorPremiumShareBps`:
+
+    $$
+    \text{toSenior} = \text{amount}\cdot\frac{\text{seniorPremiumShareBps}}{10^4},
+    \qquad
+    \text{toJunior} = \text{amount} - \text{toSenior}
+    $$
+
+    `seniorPremiumShareBps` is **immutable** and read from the
+    [calibrated risk-parameter set](/reference/constants), never hardcoded.
+  </Step>
+</Steps>
+
+Because senior is **protected** from underwriting loss (next section), it accepts a
+**smaller slice of premium** — that is the price of safety. Junior takes the **larger
+slice** as compensation for standing in front of every loss. This is the structural
+reason the two tranches have genuinely different risk/return, not a cosmetic label:
+senior is a low-yield "convexity savings account," junior is the high-APY vol-seller.
+
+<Note>
+The premium split is purely a **distribution** of income. It does **not** touch the
+no-bad-debt math, the [I10 price cap](/security/invariants), or `settle` semantics —
+those are orthogonal. The tranche structure changes who earns and
+who loses inside the pool; it never changes what the **LP** is paid.
+</Note>
+
+## The loss waterfall — money out
+
+When a swap settles with a positive payout, the LP is paid from locked collateral and
+the loss is applied to depositors **junior-first**. The waterfall lives in
+`releaseAndDistribute`:
+
+$$
+\text{juniorLoss} = \min(\text{payout},\ \text{juniorAssets}),
+\qquad
+\text{seniorLoss} = \text{payout} - \text{juniorLoss}
+$$
+
+Junior assets absorb the loss up to their full balance; only what spills over — if
+anything — reaches senior. The waterfall first requires `payout ≤ lockedAmount`
+(`PayoutExceedsCollateral`) and `lockedAmount ≤ lockedByMarket[marketId]`, then unlocks
+the collateral, applies the junior-first split, transfers `payout` to the LP, and emits
+`JuniorLoss`.
+
+<Tip>
+The `seniorLoss` arm is **defense-in-depth**. By the senior-protection invariant below,
+`seniorLoss` is provably always **0** — the `min` can never bind against senior. The arm
+exists so that even a future change that weakened the invariant would still fail
+*closed* (junior-first) rather than silently socializing losses onto senior.
+</Tip>
+
+## The senior-protection invariant — why senior is structurally shielded
+
+The reason `seniorLoss` is always 0 is a single structural invariant, enforced at
+**every** `lockCollateral` via the `SeniorProtectionBreached` revert:
+
+$$
+\boxed{\ \text{totalLocked} \le \text{juniorAssets}\ }
+$$
+
+The proof that this protects senior is two lines. Every payout is capped at its swap's
+MaxIL, and that swap's MaxIL is exactly the collateral locked for it. So:
+
+$$
+\sum \text{payouts} \ \le\ \text{totalLocked} \ \le\ \text{juniorAssets}
+\quad\Longrightarrow\quad
+\text{payout} \le \text{locked} \le \text{junior}
+$$
+
+Total underwriting loss can never exceed total locked collateral, and total locked
+collateral can never exceed the junior buffer — so **junior absorbs all underwriting
+loss before senior is ever touched** (see [the no-bad-debt math](/math/no-bad-debt-math)).
+
+This is the **adaptive code form** of the roadmap's `u ≤ 1−sf` rule, keyed to the
+*actual* junior buffer rather than a fixed ratio — which is strictly safer, because the
+guard tracks reality (if junior shrinks, lock capacity shrinks with it). With the
+calibrated target ratio `sf = 0.60`, the junior fraction is `1 − sf = 0.40`, so
+`totalLocked ≤ juniorAssets` is exactly the utilization bound `u ≤ 0.40 = 1 − sf`
+under which the depositor calibration holds.
+
+<Warning>
+**Senior protection is *calibrated*, not unconditional — and never covers the systemic tail.**
+
+- **Limit:** "senior `P(loss) = 0`" is a calibration result, not a structural
+  guarantee. It holds only while utilization stays `u ≤ 1 − sf` (the regime the
+  invariant enforces) and only against **underwriting** loss. It does **not** shield
+  senior from systemic failure — a USDC depeg, an oracle/settlement fault, or a contract
+  bug.
+- **Why:** `sf = 0.60` is a *target* tranche ratio for UX and incentives, not the hard
+  cap. The hard cap is the adaptive `totalLocked ≤ juniorAssets` invariant. Senior
+  protection from underwriting loss follows from that invariant; tail risk from a broken
+  *assumption* (peg, oracle, code) is outside any in-protocol waterfall.
+- **Mitigation:** the invariant is checked on **every** lock and is the same accounting
+  that powers the [run defense](#the-run-defense) and prices the
+  [utilization skew](/math/load-stack) up before over-commitment. Capital-not-guaranteed
+  remains the umbrella for **both** tranches — see [ClaimB](#two-claims-never-merged)
+  above and the [risk disclosure](/risk-disclosure).
+</Warning>
+
+## The run defense
+
+Both tranches share a deposit/withdraw model designed so the pool **cannot be run**
+even though depositor capital is at risk:
+
+- **Deposits are instant.** Capital can always join.
+- **Withdrawals are cooldown-gated.** `requestWithdrawal` → `withdraw` only after
+  `withdrawalCooldown` elapses.
+- **Junior cannot be drawn below `totalLocked`.** The `JuniorBelowLocked` revert
+  forbids withdrawing junior capital that is currently buffering live coverage.
+
+The same locked/free accounting that prevents a run also prices the
+[`util_skew`](/math/load-stack) **up** as the pool nears full commitment — so marginal
+coverage gets more expensive *before* the pool over-commits, and the buffer that
+protects senior is never quietly withdrawn out from under open swaps.
+
+## The quant result — what each tranche actually earns and risks
+
+The headline output of the [quant](/math/overview) is the depositor risk/return
+profile. The figures below come from the **P1.13 heavy run** — a deliberately
+adversarial model that is *stronger than GBM*: Student-t fat tails (`t_df = 4`), a
+3-state Markov vol regime (calm 0.45 / normal 0.75 / stressed 1.30), tail-dependent
+crash correlation → 1 (a single-pair book settles against the same move), Poisson
+deep-crash months (~0.8/yr, mean −45%), and a **lagging `σ_ref`** so coverage written
+at a stress onset is underpriced exactly as it would be on-chain.
+
+The monthly P&L identity makes the volatility-seller nature explicit:
+
+$$
+\text{monthly\_return} = \text{utilization}\cdot\frac{\sum_i\bigl(\text{premium}_i - \text{payout}_i\bigr)}{\sum_i \text{MaxIL}_i}
+$$
+
+$$
+\text{premium}_i = \text{fairRate}(\sigma_{\text{ref}})\cdot(1+\text{baseLoad})\cdot\text{MaxIL}_i
+\quad\text{(income, risk-neutral at }\sigma_{\text{ref}}\text{)}
+$$
+
+$$
+\text{payout}_i = \min(\text{IL}_i,\ \text{MaxIL}_i)
+\quad\text{(claim, real measure)}
+$$
+
+Premium is collected under the **risk-neutral** measure at the conservative
+[`σ_ref`](/math/sigma-ref); payout is paid under the **real** measure. The edge is the
+gap between them — the volatility risk premium — earned in calm months and given back in
+crashes.
+
+### Bare-pool figures (unhedged, untranched)
+
+These are the **single-asset bare pool** numbers — before tranching, before the optional
+roadmap hedge — at base loads (calm/normal/stressed = 20/30/50%), gross of
+demand/competition/fees. Lead with the **geometric 3y CAGR**, never the
+arithmetic mean.
+
+| Operating point | 3y CAGR (med / p10 / p90) | P(3y NAV&lt;1) | P(losing month) | 1-in-100 month | worst month | P(3y DD&gt;50%) | no bad debt |
+|---|---|---|---|---|---|---|---|
+| **Disciplined `u = 0.40`** | **122% / 50% / 247%** | 0.3% | **26.5%** | **−20.1%** | **−26.8%** | **2.7%** | ✓ |
+| Fully-deployed `u = 0.60` | 209% / 72% / 491% | 0.5% | 26.5% | −30.1% | −40.1% | 18.0% | ✓ |
+
+How to read these:
+
+- **3y CAGR** — the volatility risk premium compounds strongly in the median, with a
+  wide distribution. The p10 column (50% at `u = 0.40`) is the honest downside of the
+  *median run*, not the worst case.
+- **P(losing month) ≈ 26.5%** — roughly one month in four is red. This is **intrinsic to
+  volatility selling** (you lose whenever realized vol exceeds the implied vol you priced
+  at), not a flaw to be tuned away.
+- **1-in-100 month / worst month** — the tail of a single bad month. At `u = 0.40` a
+  1-in-100 month is −20.1% and the worst observed is −26.8%; both worsen materially at
+  `u = 0.60`.
+- **P(3y DD &gt; 50%)** — the probability of a peak-to-trough drawdown over 50% across three
+  years. **Utilization is the dominant drawdown lever:** `u = 0.40 → 2.7%` vs
+  `u = 0.60 → 18.0%`.
+- **no bad debt ✓** — across **every** simulated path, `min(IL, MaxIL)/MaxIL ≤ 1.0`
+  (`max_payout_frac = 1.000000`). The LP guarantee holds structurally and
+  oracle-independently even while the depositor P&L swings.
+
+<Warning>
+**The honest headline: an unhedged, untranched single-pair ETH pool CANNOT meet the spec safety targets at any *marketable* load.**
+
+- **Limit:** the binding targets — 1-in-100 monthly loss `≤ 10%` and P(losing month)
+  `≤ 15%` — are unreachable for a bare single-asset pool at any load with
+  `premium ≤ MaxIL`.
+- **Why:** these are **intrinsic to single-asset volatility selling** — you lose whenever
+  realized > implied, and a synchronized crash pays the whole correlated book at once. No
+  load setting changes that; raising load past `premium ≤ MaxIL` would mean charging more
+  than the maximum possible payout, which the [I10 cap](/security/invariants) forbids.
+- **Mitigation:** the targets were **not loosened**. The *structural levers* are the
+  honest answer — and tranching is the launch one (next section). The targets were met by
+  changing the structure, not the bar.
+</Warning>
+
+### What tranching does to the picture
+
+The dual-tranche structure is the **launch** lever that turns the bare-pool profile into
+two genuinely different products:
+
+| Tranche (`sf = 0.60`, `u = 0.40`, base loads) | Outcome |
+|---|---|
+| **Senior** | **`P(loss) = 0`, worst month `0%`**, gross CAGR ~197% — the "convexity savings account." Holds **jointly with `u ≤ 1 − sf`**, against underwriting loss only. |
+| **Junior** | **worst `−67%`** — the high-APY first-loss vol tranche that earns the larger premium share for buffering senior. |
+
+The senior tranche converts the bare pool's −26.8% worst month and 26.5% loss-month rate
+into a **smooth, protected** return *while the junior buffer holds and utilization stays
+disciplined*. The junior tranche concentrates the bare pool's downside (worst −67%) in
+exchange for the larger premium slice. **Neither is risk-free** — junior can lose most of
+its principal in a crash, and senior takes the systemic tail once the junior buffer is
+exhausted or an assumption (peg / oracle / code) breaks.
+
+<Note>
+There is a third, **roadmap** lever — a pool-side options hedge (`h ≈ 0.60`) that tightens
+the *tail* (1-in-100 → ~−9.6%, P(DD&gt;50%) → ~0%) without much CAGR change. It is
+**tail-tightening, not solvency** (it carries basis risk from approximating a fixed v3
+position with a perpetual options hedge), and it is **not** required for the no-bad-debt
+guarantee. Tranching is the launch structure; the hedge is a future enhancement.
+</Note>
+
+### The mandatory disclosure tone
+
+The quant fixes the exact language depositor surfaces must use:
+
+> "You earn the volatility risk premium in calm markets and absorb losses in crashes. In
+> FULL the pool cannot become insolvent and cannot be run, but YOUR CAPITAL IS NOT
+> GUARANTEED."
+
+Never call it "stable" or "modest APY." APY figures are gross of demand, competition, and
+fees and are model-illustrative — present the **risk panel** as the robust part and lead
+with the geometric 3y CAGR, never the arithmetic mean. The model is in fact
+**net-conservative** to depositors: the `σ_ref` floor of 0.50 sits *above* calm ETH vol
+(~0.45), so the pool overcharges the ~27% of months that are calm, and the heavy run's
+all-months realized payout/premium came in at **0.654**.
+
+<Maturity />
+
+## Two claims, never merged
+
+The tranche structure is where the two load-bearing disclosures sit side by side. They
+are **separate claims** and must never be combined.
+
+The LP-facing guarantee is structural and oracle-independent — it holds regardless of how
+the depositor P&L moves:
+
+<ClaimA />
+
+The depositor-facing reality is the opposite: capital is at risk for **both** tranches,
+junior first.
+
+<ClaimB />
+
+The crucial split: the LP's no-bad-debt guarantee ([Claim A](/concepts/no-bad-debt)) is
+*structural* — `collateral = MaxIL ≥ payout` by construction — and is **orthogonal to
+every pricing oracle and to the tranche split**. The depositor's capital-at-risk
+([Claim B](/concepts/tranches)) is the economic substance of being a volatility seller.
+Senior protection sits *inside* Claim B (it reduces, but does not eliminate, junior-then-
+systemic risk); it is not a separate guarantee and never reaches across to the LP side.
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Earn — the depositor app" icon="piggy-bank" href="/app/earn">
+    Deposit into senior or junior, see the live risk panel, and request a withdrawal.
+  </Card>
+  <Card title="Risk disclosure" icon="file-shield" href="/risk-disclosure">
+    The full statement of what each tranche risks and earns.
+  </Card>
+  <Card title="The cvAMM in depth" icon="layer-group" href="/protocol/path-a-cvamm">
+    Path A end to end: pricing, locking, accrual, and the waterfall.
+  </Card>
+  <Card title="No-bad-debt math" icon="scale-balanced" href="/math/no-bad-debt-math">
+    Why the LP guarantee is structural and orthogonal to the tranche split.
+  </Card>
+</CardGroup>

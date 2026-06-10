@@ -1,0 +1,189 @@
+---
+title: "Why it matters"
+description: "Uniswap v3 LPs are structurally short gamma — billions a year of recurring impermanent loss, and no trustless on-chain hedge. Why no clean hedge exists today, and where the surplus that pays for one actually comes from."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+
+Providing liquidity on Uniswap v3 looks like earning fees. Economically, it is something more specific: it is **selling volatility**. Every concentrated LP position is short an option, and the cost of being short that option — impermanent loss — is large, recurring, and to this day un-hedgeable on-chain without trusting someone.
+
+Inflexion exists to make that risk transferable, priceable, and collateralized. This page covers the structural problem, why no clean hedge has emerged, and the economics of who pays for the hedge and out of what surplus.
+
+<Note>
+New to the vocabulary? The fast path is [the three pillars](/concepts/three-pillars) and [MaxIL — the cap and the unit of risk](/concepts/maxil). This page is the motivation; those are the mechanics.
+</Note>
+
+## The problem: LPs are structurally short gamma
+
+A Uniswap v3 LP earns fees, but in exchange takes on a position whose value is a **concave function of price** — it underperforms simply holding the two assets, on moves both up and down. That underperformance is **impermanent loss (IL)**. In options language, the LP is **short gamma** / short volatility, and IL is the realization of that short-gamma exposure.
+
+This is not a corner case or a tail risk. It is the structural cost of the strategy, and at the level of the whole ecosystem it is enormous:
+
+<Card title="The scale of the problem" icon="chart-line-down">
+Uniswap v3 LPs carry a structural short-gamma exposure estimated at **over \$1B/year of realized impermanent loss across DeFi** — with **no trustless, non-inflationary way to hedge it.**
+</Card>
+
+### Why "short gamma" is the precise framing
+
+An LP's in-range position value $V_{lp}(P)$ is **strictly concave** in price. For a position with liquidity $L$ over a range $[P_a, P_b]$, in range:
+
+$$
+V_{lp}(P) = L\left(2\sqrt{P} - \sqrt{P_a} - \frac{P}{\sqrt{P_b}}\right), \qquad \frac{d^2 V_{lp}}{dP^2} = -\tfrac{1}{4}\,L\,P^{-3/2} < 0.
+$$
+
+A hold position $V_{hold}(P)$ is **affine** (linear) in $P$. Impermanent loss is the gap between them:
+
+$$
+\mathrm{IL}(P) = V_{hold}(P) - V_{lp}(P) = \text{(affine)} - \text{(concave)} = \text{convex} \;\ge\; 0.
+$$
+
+Because $V_{lp}$ is concave, the LP **loses relative to holding on every move away from entry** — that is the signature of a short-volatility, short-gamma position. The LP is paid fees as compensation for selling that volatility; whether the fees cover the IL is exactly the open question the LP cannot control.
+
+<Tip>
+This is why the academic anchor is the **LVR (loss-versus-rebalancing)** literature: the AMM's adverse-selection cost is the *theta* — the time-decay — of the replicating short-option position. Short gamma earns theta and bleeds on realized variance. See [the theory anchors](/math/theory-anchors).
+</Tip>
+
+### The IL is recurring and unbounded outside the range
+
+Two facts make the exposure especially uncomfortable for an LP:
+
+1. **It recurs.** Every period of realized volatility crystallizes more IL. There is no single event to insure against — it is a continuous bleed driven by variance.
+2. **Beyond the range, absolute IL is unbounded.** Above the upper tick the position is fully rotated into one asset and its value is flat, while a hold position keeps growing linearly with price. So *absolute* IL has no ceiling once price leaves the range.
+
+The second fact is the crux of why no fully-collateralized hedge has existed — covered next.
+
+## Why IL has no clean on-chain hedge today
+
+Three distinct obstacles have blocked a clean hedge. Each is a real limitation; each is stated here with **why** it blocks a hedge and **how** Inflexion resolves or accepts it.
+
+<AccordionGroup>
+
+<Accordion title="Obstacle 1 — Existing 'IL protection' relied on token inflation (not collateral)" icon="fire">
+**The limit.** The canonical prior attempt, Bancor v2.1, covered LP losses by **minting new tokens** — paying claims with inflation rather than pre-committed collateral.
+
+**Why it fails.** Inflation-funded coverage is reflexive: claims dilute holders, which weakens the token, which raises the cost of the next claim — a death-spiral mechanism, not a hedge. It is not collateralized, so it is not trustless.
+
+**The mitigation.** Inflexion is **explicitly not Bancor**. The pooled underwriter pays claims in **pre-locked USDC and mints nothing**. In FULL mode the pool cannot become insolvent on a covered claim (collateral $= \mathrm{MaxIL} \ge$ payout) and cannot be run (withdrawal delay + locked/free accounting). See [What this is *not*](/what-this-is-not).
+</Accordion>
+
+<Accordion title="Obstacle 2 — Unbounded beyond-range IL can't be fully collateralized" icon="infinity">
+**The limit.** As shown above, *absolute* IL is unbounded once price leaves the position's range. Anything promising to cover unbounded IL **cannot** post collateral equal to its worst case — so it cannot be fully collateralized, so it cannot be trustless.
+
+**Why it's the binding obstacle.** Trustlessness requires `payout ≤ collateral` to hold by construction, for every price path. An unbounded payoff makes that impossible.
+
+**The mitigation.** Inflexion hedges **in-range IL** and pays $\min(\mathrm{IL}, \mathrm{MaxIL})$. In range, IL is convex on a compact interval, so its maximum is attained at a boundary — an exact, finite number, **MaxIL**, known at creation. Capping at MaxIL is what makes the payoff fully collateralizable. This is the honest scope: beyond the range, IL is *directional* loss (foregone spot upside), not the *impermanent* loss the product set out to hedge. See [the in-range convexity hedge](/concepts/in-range-convexity-hedge) and [MaxIL](/concepts/maxil).
+
+<Warning>
+This is the load-bearing trade-off, stated plainly. **Limit:** the product does not cover beyond-range IL. **Why:** unbounded payoff cannot be fully collateralized, and full collateralization is the basis of the no-bad-debt guarantee. **Mitigation:** the cap keeps the hedge trustless; LPs who want continued protection re-cover after re-ranging.
+</Warning>
+</Accordion>
+
+<Accordion title="Obstacle 3 — A purely bilateral market has a cold-start problem" icon="snowflake">
+**The limit.** A market that is only LP-versus-market-maker has **no price until a market maker shows up** — a classic two-sided chicken-and-egg.
+
+**Why it matters.** An LP cannot get a quote if the order book is empty, and a market maker will not staff an empty book — so a naive bilateral design never bootstraps.
+
+**The mitigation.** Inflexion ships a **pooled cvAMM (Path A)** that is **always quoting** a code-capped fair price, with no market maker present. It is the *floor of liquidity*; competing market makers (Path B) are the *ceiling of price*, winning only by beating it. The router gives the LP the cheaper rail and never depends on a market maker being online. See [the two rails](/concepts/two-rails) and [routing](/protocol/routing).
+</Accordion>
+
+</AccordionGroup>
+
+## The economic binding constraint, stated honestly
+
+A hedge market only exists if there is **real surplus** to split — otherwise it is a zero-sum transfer that nobody rationally enters. The constraint is sharp:
+
+> The underwriter will only write the risk if the **premium exceeds their expected loss** $\mathbb{E}[\text{loss}]$. The LP will only pay up to **their expected loss plus their own risk aversion**. So the market exists only in the band where
+
+$$
+\mathbb{E}_{\text{LP}}[\text{loss}] + \text{(LP risk aversion)} \;\;>\;\; \text{premium} \;\;>\;\; \mathbb{E}_{\text{seller}}[\text{loss}].
+$$
+
+That band is non-empty only when **the buyer is more risk-averse than the seller, or the seller bears the risk more cheaply**. If neither holds, there is no trade — and pretending otherwise is how hedge markets quietly fail. So the honest question is not "can we build it" but "**where does the surplus come from?**"
+
+## Where the surplus actually comes from
+
+There are four genuine sources of surplus that fund the hedge. They are stated in order of how load-bearing they are for Inflexion.
+
+<CardGroup cols={2}>
+
+<Card title="1 · Risk-aversion gradient" icon="scale-unbalanced">
+**Real, and the primary source.** Retail and treasury LPs *hate* IL — it is a salient, regret-laden loss they did not sign up for. Underwriters are diversified and approximately risk-neutral. The LP is buying **certainty**, and the gap between "what certainty is worth to a risk-averse LP" and "the risk-neutral expected loss" is genuine surplus.
+</Card>
+
+<Card title="2 · Diversification" icon="layer-group">
+**Real, and structural to the pool.** A single LP's IL is high-variance; a *basket* of positions whose exits do not all cluster at the same price is far lower-variance — until correlation hits. The pooled cvAMM can therefore price closer to $\mathbb{E}[\mathrm{IL}]$ than any single LP can self-insure to.
+</Card>
+
+<Card title="3 · Hedging" icon="shield-halved">
+**Decides liquidity depth.** If market makers can cheaply hedge their short gamma (perps, Deribit, Panoptic), they charge *hedging cost + a thin spread* instead of a fat uncertainty premium. Better MM hedging tooling → tighter quotes → more LP demand. This is what turns the market on at scale.
+</Card>
+
+<Card title="4 · Basis harvesting" icon="rotate">
+**The flywheel.** If LP convexity trades *rich* to Deribit implied vol, vol-arbitrage desks actively *want* to sell coverage to capture the basis — bringing sophisticated supply that prices tight and deepens the book further.
+</Card>
+
+</CardGroup>
+
+<Note>
+Sources 1 and 2 mean the market is viable from day one with the pool alone (the risk-aversion gradient is real and diversification is structural). Sources 3 and 4 are why it gets *better* as market makers arrive — they are the demand- and supply-side flywheels, not preconditions. This is why the pool is the floor and MMs are the ceiling.
+</Note>
+
+### Why the surplus must not be over-claimed
+
+The surplus exists, but it is **bounded and contaminated**, and the docs say so:
+
+- The clearing premium an LP pays bundles several things — the pure vol-risk premium **plus** a liquidity premium, smart-contract-risk premium, capital-lock premium, and inventory skew. The clean vol-risk-premium signal is the *spread* between rails, not the *level* of either.
+- Backward-looking $\sigma_{ref}$ means the pool cannot see forward vol; that residual blindness is deliberately left as **MM alpha**, which is precisely the incentive that keeps a two-sided market alive.
+
+A hedge market that claims costless, unbounded surplus is selling a fantasy. Inflexion claims a **real but bounded** surplus, sourced from a genuine risk-aversion gradient and diversification, amplified by MM hedging and basis arbitrage.
+
+## What this changes
+
+Put the three obstacles next to their resolutions and the picture is concrete:
+
+| Obstacle (why no hedge today) | Inflexion's resolution |
+| --- | --- |
+| Prior schemes paid claims with **token inflation** (death spiral, not collateral) | Pre-locked USDC, mints nothing — **not Bancor** |
+| **Unbounded** beyond-range IL can't be fully collateralized | Hedge in-range IL; pay $\min(\mathrm{IL},\mathrm{MaxIL})$, fully collateralized at MaxIL |
+| Bilateral markets have a **cold-start** problem | Always-on pooled cvAMM quotes a code-capped fair price |
+| The risk was **un-priceable** on-chain (actuarial guesswork) | Exact closed-form $\Phi$-sum fair value, published on-chain |
+
+The last row is the recent unlock — see [why now](/why-now) for the two 2025 results (Lipton–Lucic–Sepp; Milionis–Moallemi–Roughgarden) that made IL risk *priceable and hedgeable* rather than guesswork, and why Arbitrum + Stylus is the place to ship it.
+
+## The two claims this rests on — never merged
+
+Everything above is honest only if two claims are kept **separate**. Stating one as if it implied the other is the single most important framing error to avoid.
+
+**Claim A — LPs are always paid (no bad debt in FULL).** This is the LP-facing guarantee, and it is exact *only* under its full clause:
+
+<ClaimA />
+
+**Claim B — depositor and MM capital is NOT guaranteed.** The underwriting side is a volatility seller; the no-bad-debt guarantee to the LP is *not* a guarantee that the capital backing it is preserved:
+
+<ClaimB />
+
+Both are true. Neither implies the other. The whole design is built to keep Claim A structural and code-enforced while being completely honest that Claim B is the hard part — see [tranches](/concepts/tranches) and the [depositor disclosure](/risk-disclosure).
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="Why now" icon="clock" href="/why-now">
+    The 2025 theory + Arbitrum/Stylus timing that make IL risk priceable on-chain.
+  </Card>
+  <Card title="The three pillars" icon="building-columns" href="/concepts/three-pillars">
+    On-chain fair value, the always-on cvAMM, and competing market makers.
+  </Card>
+  <Card title="MaxIL" icon="ruler-combined" href="/concepts/maxil">
+    The load-bearing cap and the unit of risk that makes positions fungible.
+  </Card>
+  <Card title="What this is not" icon="ban" href="/what-this-is-not">
+    Not insurance, not Bancor, not GammaSwap — and why the cap is the right product.
+  </Card>
+  <Card title="No bad debt" icon="lock" href="/concepts/no-bad-debt">
+    The full qualifying clause behind Claim A, and why it is a construction.
+  </Card>
+  <Card title="The data moat" icon="database" href="/concepts/data-moat">
+    The first on-chain view into the DeFi LP volatility-risk premium.
+  </Card>
+</CardGroup>

@@ -1,0 +1,349 @@
+---
+title: "DataClient — the data moat surface"
+description: "The typed SDK surface over the microstructure of the DeFi LP volatility-risk premium: one live RPC surface (getCurrentLoadSurface + getSurfaceSigmaRef), the subgraph-pending history methods returning a typed ApiPending envelope, and the five-signals access map — what is live vs pending, with why and mitigation."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+`DataClient` is the typed access layer over the
+[data moat](/concepts/data-moat) — the first structured view into the
+**microstructure of the DeFi LP volatility-risk premium**. It is **read-only**: it
+holds no signer, sends no transaction, and carries no [claim](/concepts/no-bad-debt).
+Its job is to expose the [five non-circular behavioral
+signals](/moat/five-signals) through one consistent rule: **anything that needs the
+not-yet-deployed subgraph degrades to a typed pending state — never an error**.
+
+The surface splits cleanly into two classes:
+
+<CardGroup cols={2}>
+  <Card title="LIVE — live RPC" icon="bolt">
+    `getCurrentLoadSurface` and `getSurfaceSigmaRef` hit the chain directly and return
+    real numbers today. The **current** load surface is the one live half of
+    [Signal 1](/moat/five-signals) — the "price-to-beat".
+  </Card>
+  <Card title="PENDING — subgraph/API-backed" icon="hourglass-half">
+    The five history/aggregate methods return a typed `ApiPending` envelope naming the
+    **future** API route and the query that *would* be sent — so the UI renders the
+    state and the API wires in later with zero re-derivation.
+  </Card>
+</CardGroup>
+
+<Note>
+**Why this split exists.** The on-chain moat events (`SwapPriced`, `QuoteFilled`) and
+the off-chain telemetry sinks are **live now**; only the subgraph that indexes them
+into bucketed history is pending. So the *current* surface is queryable today, while
+*history* and *aggregates* degrade gracefully rather than throw — a build gap, not a
+contract gap. See [State of the dataset](#state-of-the-dataset).
+</Note>
+
+## Method reference
+
+Construct via the [one-call factory](/sdk/getting-started); `sdk.data` needs only a
+read client.
+
+| Method | Args | Returns | Status | Backed by |
+| --- | --- | --- | --- | --- |
+| `getCurrentLoadSurface` | `{ markets: { marketId, geometry? }[] }` | `LoadSurface` | **LIVE** | RPC multicall: Core `loadParams`/`markets`, ConvexityVault `inventory`, FVO `fairPremium`; load via TS port |
+| `getSurfaceSigmaRef` | `token` | `Degraded<{ sigmaRefWad, regime }>` | **LIVE** | VolOracle `sigmaRef` + Core `loadParams` |
+| `getLoadSurfaceHistory` | `{ marketId, from?, to?, bucket? }` | `ApiPending` | pending | subgraph `GET /data/load-surface` |
+| `getQuoteCompetition` | `{ marketId?, from?, to? }` | `ApiPending` | pending | subgraph + engine `COMPETITION_LOG` `GET /data/quote-competition` |
+| `getDemandRequests` | `{ marketId?, from?, to? }` | `ApiPending` | pending **by design** | engine `DEMAND_LOG` (off-chain only) `GET /data/demand-requests` |
+| `getNavHistory` | `{ from?, to?, bucket? }` | `ApiPending` | pending | subgraph `GET /pool/nav-history` (carries [claim B](/concepts/tranches)) |
+| `getNetGamma` | `{ marketId? }` | `ApiPending` | pending | off-chain compute `GET /data/net-gamma` |
+
+<Info>
+**The data moat is free public infrastructure, not a paywall.** Revenue is protocol
+fees; the data is the competitive moat. `DataClient` is the
+**SDK** rung of the three-layer access rule — *needs the exact surface right now* → SDK;
+*needs history or an aggregate* → subgraph (consumed via the API); *needs frictionless
+public access with no wallet* → API.
+</Info>
+
+## The one live surface — `getCurrentLoadSurface`
+
+`getCurrentLoadSurface` is the **only** `DataClient` method that hits live RPC instead
+of the API. It answers the question an MM or an LP needs right
+now: *what mechanical load is the [cvAMM pool](/protocol/path-a-cvamm) charging — the
+"price-to-beat"?* It fans the exact read set that MM `getMarketPricing` runs, across a
+set of markets at once.
+
+### What it reads (per market, one multicall)
+
+<Steps>
+  <Step title="Read loadParams + inventory once (pool-wide)">
+    `InflexionCore.loadParams()` (the [load-stack](/math/load-stack) curve params) and
+    `ConvexityVault.inventory()` → `(total, locked, free, util, conc)` are pool-wide, so
+    they are read a single time and shared across all markets.
+  </Step>
+  <Step title="Per-market markets() multicall">
+    `InflexionCore.markets(marketId)` → the market config (token0/token1/fee/duration).
+    An unknown or inactive market yields an inlined degraded row, never a thrown call.
+  </Step>
+  <Step title="Per-market fairPremium() multicall">
+    `FairValueOracle.fairPremium(token, aWad, bWad, durationSeconds, maxIL)` →
+    `(premium, fairRateWad, sigmaRefWad)`. This is the on-chain
+    [Phi-sum](/math/fair-value-phi-sum) — **never reimplemented off-chain**.
+  </Step>
+  <Step title="Finish the load stack client-side (parity-locked TS port)">
+    The deterministic, `pure` [load stack](/math/load-stack) is evaluated in TypeScript
+    via the parity-locked `cvamm` port, then `poolPremium = ceil(fairPremium·(1+totalLoad))`
+    capped at MaxIL — exactly `_pricePathAFromFair` on-chain.
+  </Step>
+</Steps>
+
+<Warning>
+**Why the load is finished client-side — the deployed `CvammPricing` library is delegatecall-only.**
+
+- **Limit:** a direct `eth_call` to `libs.cvammPricing` reverts, so the SDK cannot read
+  the on-chain `loadComponents` decomposition directly.
+- **Why:** Solidity guards deployed public-library functions; the lib runs on-chain only
+  via the core's delegatecall during pricing (confirmed on the 2026-06-05 deploy).
+- **Mitigation:** the SDK **permanently** mirrors only the deterministic load stack in a
+  parity-locked TypeScript port, asserted byte-equal to the deployed Solidity by a
+  dedicated parity test. This is the *only* permitted duplication — the SDK **never**
+  reimplements the `fairRate` Φ-sum, which is always read on-chain
+  (see [the cvAMM port](/sdk/cvamm-port)).
+</Warning>
+
+### Geometry is optional — the load % is geometry-independent
+
+If a market entry supplies no `geometry`, the SDK substitutes a **neutral reference
+geometry**. This is sound because the **load percentage is
+geometry-independent** — only the *dollar* `fairPremium` / `poolPremium` scale with the
+position's `aWad`/`bWad`/`maxIL`. So you can read the per-market
+load surface without bringing any LP position. This is the same property that makes
+[MaxIL the unit of risk](/concepts/maxil) and an MM quote
+[per-market, never per-NFT](/protocol/path-b-mm).
+
+### Per-market graceful degradation
+
+Each `SurfaceRow` is independently a discriminated union. A degraded market never
+breaks the others:
+
+```ts
+type SurfaceRow =
+  | { available: true;  marketId: `0x${string}`; fairPremium: bigint; poolPremium: bigint
+      load: LoadBreakdown; /* baseLoadWad, utilSkewWad, dispSkewWad, totalLoadWad */
+      util: bigint; conc: bigint; regime: Regime }
+  | { available: false; marketId: `0x${string}`; reason: 'oracle-degraded' | 'market-unknown' }
+```
+
+- `oracle-degraded` — `OracleManager.getPrice` reverted (stale feed / L2 sequencer
+  down). The [oracle is designed to revert rather than serve a bad price](/protocol/oracles).
+- `market-unknown` — the marketId is not an active market (config `token0 == 0`).
+
+### Worked example — read the live load surface
+
+```ts data-client-surface.ts
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })   // read-only is enough
+
+const surface = await sdk.data.getCurrentLoadSurface({
+  markets: [{ marketId: demo.marketId_fee500_7d }], // geometry optional → neutral ref geom
+})
+
+for (const row of surface.rows) {
+  if (row.available) {
+    // The mechanical "price-to-beat": pool load over the on-chain fair value.
+    console.log(
+      row.marketId,
+      row.fairPremium,          // WAD baseline the load multiplies
+      row.poolPremium,          // ceil(fairPremium·(1+totalLoad)) capped at MaxIL
+      row.load.totalLoadWad,    // the clamped pool load (≤ maxLoadBps — invariant I10)
+      row.regime,               // 'calm' | 'normal' | 'stressed'
+    )
+  } else {
+    console.log(row.marketId, 'degraded:', row.reason) // 'oracle-degraded' | 'market-unknown'
+  }
+}
+```
+
+This row is the **live half of [Signal 1](/moat/five-signals)** — the realized
+clearing-load baseline. It is the *mechanical* leg (the protocol's transparent
+yardstick), never sold as a behavioral signal; the behavioral leg (an MM's freely
+chosen `loadBps`) is the [`QuoteFilled` event](/moat/primitives), which arrives through
+the subgraph-pending history methods below.
+
+## `getSurfaceSigmaRef` — the transparent vol reference
+
+The second live method reads the realized-vol oracle the entire load stack is measured
+*against*:
+
+```ts
+const sig = await sdk.data.getSurfaceSigmaRef(tokens.demoWeth) // Degraded<{ sigmaRefWad, regime }>
+if (sig.available) {
+  console.log(sig.sigmaRefWad, sig.regime)   // e.g. 8.2e17 (WAD), 'normal'
+}
+```
+
+`σ_ref` is a poke-based, time-aware EWMA of Chainlink-tick log-returns — **never** raw
+realized σ ([σ_ref derivation](/math/sigma-ref)). Because it is transparent and
+on-chain, the load charged *above* it is a well-defined, identifiable quantity — which
+is precisely the property that converts the moat from circular to legible. It degrades to `{ available: false, reason:
+'vol-uninitialized' }` if the oracle has not yet been poked for that token.
+
+## The pending history methods + the `ApiPending` envelope
+
+The remaining five methods need **history** or **aggregates**, which come from the
+subgraph (consumed via the API). Until the subgraph is deployed, each returns a typed
+`ApiPending` body:
+
+```ts
+type ApiPending = {
+  available: false
+  reason: 'no-history-source'
+  endpoint: string  // the FUTURE API route, e.g. '/data/load-surface'
+  query: unknown    // the exact query that WOULD be sent
+  detail?: string
+}
+```
+
+<Note>
+**`ApiPending` names the future route and the would-be query.** This is the
+graceful-degradation contract: the UI can show *"coming from `<route>`"*, and when the
+API is wired the SDK swaps a one-line body — **zero re-derivation**. The SDK **never
+fabricates history**.
+</Note>
+
+Handling it is uniform — discriminate on `available` and render the pending state:
+
+```ts pending-history.ts
+const hist = await sdk.data.getLoadSurfaceHistory({ marketId: demo.marketId_fee500_7d })
+
+if (!hist.available) {
+  // hist.reason === 'no-history-source'
+  // Render the typed pending state — NOT an error.
+  showPending({ comingFrom: hist.endpoint, willSend: hist.query })
+} else {
+  renderSurfaceHistory(hist)   // once the subgraph is deployed
+}
+```
+
+<Warning>
+**The subgraph is built but not yet deployed — so every history/aggregate method
+degrades to a typed `pending` state.**
+
+- **Limit:** until `SUBGRAPH_URL` is set, `getLoadSurfaceHistory`, `getQuoteCompetition`,
+  `getDemandRequests`, `getNavHistory`, and `getNetGamma` all return `ApiPending` rather
+  than data.
+- **Why:** this is a **build gap, not a contract gap**. The contracts already emit every
+  event the moat needs (`SwapPriced`, `QuoteFilled`); the subgraph passes its full offline
+  build and test suite but is not yet pointed at a hosted endpoint.
+- **Mitigation / path-forward:** the **current** surface (`getCurrentLoadSurface`) is
+  served live now, the **off-chain telemetry halves** (`DEMAND_LOG`, `COMPETITION_LOG`)
+  are capturing now, and the pending body embeds the exact future query — so wiring the
+  API at the subgraph deploy is a one-line body swap. See [SDK degradation](/sdk/degradation).
+</Warning>
+
+### One method is pending by design — `getDemandRequests`
+
+`getDemandRequests` is not merely subgraph-pending; its *latent* half is **off-chain by
+design and can never be on-chain**. It surfaces
+[Signal 4](/moat/five-signals)'s demand that includes **unfilled** interest — an LP who
+priced but did not buy, and an MM quote that lost or was withdrawn, leave **no on-chain
+trace** because invariant [I7](/security/invariants) guarantees an *unchosen* quote
+touches no nonce and no capacity. Putting unfilled interest
+on-chain would both cost gas and break I7. So the latent half lives in the engine's
+`DEMAND_LOG` telemetry sink — which is **capturing now** and is unreconstructable
+retroactively. When the API is wired,
+`getDemandRequests` resolves from that already-accumulating log, not from a backfill.
+
+## The five-signals access map
+
+`DataClient` is the SDK rung of the per-signal access map. Each signal carries an
+explicit non-circularity verdict — the moat's credibility rests on **not being
+circular**: a signal is non-circular **iff** its informative degrees of freedom come
+from the MM's `loadBps` or the LP's geometry/duration choice, measured *against* the
+transparent mechanical baseline, not derived from it. The
+deliberately-dropped circular idea ("invert `fairRate` to read implied vol") is *not* a
+signal — see [circular vs behavioral](/moat/circular-vs-behavioral) for why.
+
+| Signal | `DataClient` method | Verdict | Live now? |
+| --- | --- | --- | --- |
+| **1 — Realized clearing LOAD** over a transparent σ_ref | `getCurrentLoadSurface` (current); `getLoadSurfaceHistory` (history) | **PARTIAL — Path B only** (MM `loadBps` behavioral; Path-A pool load is the mechanical baseline) | **current = live RPC NOW**; history = subgraph-pending |
+| **2 — Pool-vs-MM load SPREAD** + win-rate | `getQuoteCompetition` | **YES — as a spread** (the subtraction removes the circular component) | **dynamic half = `COMPETITION_LOG` telemetry NOW**; structural = subgraph-pending |
+| **3 — TERM STRUCTURE** of convexity | via `getLoadSurfaceHistory` / the API | **PARTIAL** (MM `loadBps` slope behavioral; Path-A load is duration-independent → flat) | subgraph-pending |
+| **4 — DEMAND SKEW** by geometry | `getDemandRequests` | **PARTIAL** (realized = LP choice; latent = off-chain by I7) | **latent half = `DEMAND_LOG` telemetry NOW**; realized = subgraph-pending |
+| **5 — NET GAMMA SUPPLY** (protocol-wide) | `getNetGamma` | **YES — as a supply/quantity gauge** (a sum over actor positions, not a price) | subgraph-pending (off-chain Greeks compute) |
+
+<Info>
+**The behavioral − mechanical shape.** Four of the five signals separate a
+**behavioral** leg (an actor's free choice) from a **mechanical** baseline (the
+protocol's transparent price-to-beat); the *subtraction* is what isolates the actor's
+view and removes the circular component:
+
+```
+        BEHAVIORAL (the signal)              MECHANICAL (the baseline / price-to-beat)
+        ───────────────────────              ─────────────────────────────────────────
+Load:   QuoteFilled.loadBps  (Path B)   vs   SwapPriced.totalLoadWad  (Path A)
+Vol:    the MM's forward view (implied)  vs   SwapPriced.sigmaRefWad   (backward EWMA)
+Demand: which tokenId/duration LP picks  vs   (no mechanical counterpart — pure choice)
+```
+
+`getCurrentLoadSurface` serves the **mechanical** leg live (Path-A `totalLoadWad`,
+`sigmaRefWad`); the behavioral legs arrive through the history methods once the subgraph
+indexes `QuoteFilled`.
+</Info>
+
+For exhaustive per-signal definitions, sourcing, and maturity, read
+[the five signals](/moat/five-signals); for the access routing in full, see
+[the access map](/moat/access-map) and the [subgraph integration](/integrate/subgraph).
+
+## State of the dataset
+
+This is the honest framing, and it is **mandatory** on every data-product surface.
+
+<Maturity />
+
+| Layer | What it is | When it is real |
+| --- | --- | --- |
+| **On-chain moat events** | `SwapPriced` + `QuoteFilled` + the `CvammPricing.loadComponents` breakdown | **LIVE on-chain since the 2026-06-05 redeploy** — the dataset begins at the redeploy `startBlock` |
+| **Off-chain telemetry** | `DEMAND_LOG` (Signal 4 latent half) + `COMPETITION_LOG` (Signal 2 dynamic half) | **CAPTURING NOW** — from the first interaction logged; unreconstructable retroactively, so capturing it now is the entire point |
+| **Live RPC surface** | `getCurrentLoadSurface` + `getSurfaceSigmaRef` | **LIVE NOW** — the current load surface and σ_ref over public getters |
+| **History / aggregate surfaces** | the subgraph that indexes the on-chain events into bucketed aggregates | **subgraph-pending** — `ApiPending` everywhere until `SUBGRAPH_URL` is set |
+
+So the leading-indicator and forward-vol *dynamics* (the dispersion of Signal 1, the
+competitive distribution of Signal 2) need **≥3 competing MMs** and ~30–50 fills per
+bucket — weeks-to-months at launch flow. The
+**structures** — the current load surface, the term-structure shape, the demand skew by
+geometry, the net-gamma surface — are queryable from launch. We ship the architecture
+and the first view, not a mature dataset.
+
+## Degradation cheat-sheet
+
+The envelopes `DataClient` returns:
+
+| Envelope | Used by | Shape |
+| --- | --- | --- |
+| `LoadSurface` (`{ rows: SurfaceRow[] }`) | `getCurrentLoadSurface` | per-row `available: true \| false` with `reason: 'oracle-degraded' \| 'market-unknown'` |
+| `Degraded<T>` | `getSurfaceSigmaRef` | `({ available: true } & T) \| { available: false, reason: 'no-rpc' \| 'vol-uninitialized' }` |
+| `ApiPending` | all five history methods | `{ available: false, reason: 'no-history-source', endpoint, query, detail? }` |
+
+The contract everywhere: **reads are graceful** — `DataClient` never throws on a
+reverting oracle, an absent rich event, or the not-yet-deployed subgraph; it returns a
+typed degraded envelope. See [SDK degradation](/sdk/degradation) for
+the full taxonomy.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="The data moat (concept)" icon="bullseye" href="/concepts/data-moat">
+    Why the flow is the product, and the circular idea we deliberately dropped.
+  </Card>
+  <Card title="The five signals" icon="list-ol" href="/moat/five-signals">
+    Exhaustive per-signal definitions, sourcing, non-circularity verdicts, and maturity.
+  </Card>
+  <Card title="On-chain primitives" icon="cube" href="/moat/primitives">
+    The two moat events (`SwapPriced`, `QuoteFilled`) and the load-breakdown library.
+  </Card>
+  <Card title="The access map" icon="map" href="/moat/access-map">
+    The three-layer SDK / subgraph / API routing rule, per signal.
+  </Card>
+  <Card title="The cvAMM port" icon="code-branch" href="/sdk/cvamm-port">
+    The parity-locked TS load stack — the only permitted off-chain duplication.
+  </Card>
+  <Card title="SDK degradation" icon="signal" href="/sdk/degradation">
+    Every typed degraded envelope the SDK returns, and how to render each.
+  </Card>
+</CardGroup>

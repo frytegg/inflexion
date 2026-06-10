@@ -1,0 +1,263 @@
+---
+title: "Audit history"
+description: "The full review trail behind Inflexion — a multi-LLM spec audit (12 fixes + 2 resolved forks → spec v3.3), an adversarial quant audit (CVaR, 50k Monte Carlo runs), and two Slither passes — with what changed, a timeline, and exact reproduction steps."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion was audited in four distinct passes, each with a different lens: a **multi-LLM spec audit** (design correctness, pre-build), an **adversarial quant audit** (the Monte Carlo solvency model), and **two static-analysis passes** with Slither (the core contracts, then the cvAMM). This page is the honest, reproducible record of every one: what each pass found, what changed, and how to run it yourself.
+
+<Note>
+None of these passes is a substitute for a professional, paid third-party smart-contract audit. They are adversarial, multi-model, and source-cited — and every finding either landed as a code fix or is a named, justified residual. Where a limit remains, it is stated with its **why** and its **mitigation**, never naked. See [status & caveats](/reference/status-caveats) for the live-system version of that ledger.
+</Note>
+
+## At a glance
+
+<CardGroup cols={2}>
+<Card title="Spec audit (pre-build)" icon="file-shield">
+Multi-LLM (Claude Opus, GPT-5, Gemini 2.5). **12 fixes applied + 2 architectural forks resolved → spec v3.3.** Consensus: FULL/European core sound, no-bad-debt invariant genuine.
+</Card>
+<Card title="Quant audit (Phase 14.11)" icon="chart-line">
+Adversarial review of the Monte Carlo solvency model. **6 HIGH findings; 9 fixed in-band, 6 deferred as named mainnet-TODOs.** `n_runs` 1k → 50k; VaR → **CVaR**.
+</Card>
+<Card title="Slither — core pass" icon="magnifying-glass">
+27 findings → **1 fixed** (`reentrancy-no-eth` in `settle`) **+ 26 accepted false-positives** (idiomatic patterns).
+</Card>
+<Card title="Slither — cvAMM pass (P3.9)" icon="magnifying-glass-chart">
+74 results → **0 high, 0 confirmed vulnerabilities, 1 cleanup** (a stray template file deleted).
+</Card>
+</CardGroup>
+
+## Timeline
+
+The passes run in build order — design correctness first, then the economic model, then static analysis as the code lands.
+
+<Steps>
+<Step title="Spec audit → spec v3.1 (12 fixes)" icon="1">
+Pre-build, multi-LLM consensus review of the protocol design. Twelve concrete fixes applied, hardening the spec from its first draft to **v3.1**. The biggest structural changes: store `L` at creation (→ I6), reject out-of-range entries, and add on-chain authoritative quote capacity with Permit2 bitmap nonces (→ I7).
+</Step>
+<Step title="Fork-1 resolved → spec v3.2" icon="2">
+The oracle settlement-liveness deadlock surfaced by the GPT/Gemini audit — a permanent fund lockup if Chainlink and the pinned TWAP both froze and diverged at expiry. Resolved with **round-at-T pinning + lone-spike sanity check + a 24h liveness backstop** → invariant **I8**. See [the forks page](/security/forks#fork-1).
+</Step>
+<Step title="Fork-2 resolved → spec v3.3" icon="3">
+The no-last-look firm-quote pickoff flagged GPT High — leaked signed quotes (bearer instruments) picked off when vol gaps. Resolved with a **deterministic, oracle-anchored price band** that auto-voids the quote on-chain — *not* last-look → invariant **I9**. See [the forks page](/security/forks#fork-2).
+</Step>
+<Step title="Quant audit (Phase 14.11)" icon="4">
+Adversarial review of the Monte Carlo solvency model with GPT-5 + Code Interpreter and Gemini 2.5 Pro. Six HIGH findings; the model moved to 50k runs and a CVaR (tail-coherent) fund target. Gates the PARTIAL / cvAMM parameter set — **no PARTIAL constant is ever hardcoded.**
+</Step>
+<Step title="Slither — core pass" icon="5">
+Static analysis of the core contracts with Slither 0.11.5. One real medium fixed (the `settle` reentrancy), the rest triaged as idiomatic false-positives. This was the single Slither finding that produced a code change.
+</Step>
+<Step title="Slither — cvAMM pass (P3.9)" icon="6">
+Static analysis of the dual-tranche cvAMM contracts as they landed. Zero high, zero confirmed vulnerabilities; one cleanup (a stray foundry-template file). Manual review confirmed the junior-first-loss waterfall, the run defense, and the structural independence of I1 from the pricing oracles.
+</Step>
+</Steps>
+
+---
+
+## 1. Spec audit — multi-LLM (pre-build) → spec v3.3
+
+The first pass was a **design** audit, not a code audit: three frontier models (Claude Opus, GPT-5, Gemini 2.5) reviewed the protocol specification before the contracts existed. The point was to catch design-level mistakes while they were still cheap to fix.
+
+**Consensus across all three models:** the FULL / European-option core is sound, the no-bad-debt invariant is genuine (not a marketing claim), and the deferral of PARTIAL mode is correct. The one **meta-risk** all three converged on was **two-sided market clearing** — whether LP willingness-to-pay meets MM quote-widening — which is a strategic, empirical concern that can only be resolved post-deploy with real flow, not a code bug. (This is exactly what the [data moat](/concepts/data-moat) is built to measure.)
+
+### The 12 fixes (→ spec v3.1)
+
+Each fix maps to a concrete code or design change; several became numbered [invariants](/security/invariants).
+
+| # | Fix | Where it landed |
+| --- | --- | --- |
+| 1 | Store `L` at creation, use at settlement (kills `increaseLiquidity` inflation) | → **I6** — `InflexionCore` |
+| 2 | Reject out-of-range entries (`Pa ≤ P0 ≤ Pb`) | Creation-time gate — `InflexionCore` |
+| 3 | Ring-fence collateral rehypothecation (idle-only, never utilization-gated like Aave) | `IYieldAdapter.isInstantlyRedeemable()` |
+| 4 | On-chain authoritative quote capacity + replay protection + Permit2 bitmap-nonce selective cancel | → **I7** — `InflexionCore` |
+| 5 | Dust / precision floors (`MIN_POSITION_V0` / `MIN_PREMIUM`, round-up premium) | `InflexionCore` |
+| 6 | Reposition as an **in-range convexity hedge**, not "IL insurance" (payoff diagrams; qualified bad-debt claim) | [The hedge framing](/concepts/in-range-convexity-hedge) |
+| 7 | Surface 1 → **"convexity-premium index"**, not implied vol | [The data moat](/concepts/data-moat) |
+| 8 | Intra-band adverse-selection caveat | *Later retired in v4.0 — geometry is public* |
+| 9 | Direct-to-contract bypass + published quote log | [Trust model](/security/trust-model) |
+| 10 | Secondary-exit roadmap (novation / MM-side ERC721 / LP early-terminate) | Roadmap |
+| 11 | Gross-IL-not-net-P&L clarification | [IL formula](/math/il-formula) |
+| 12 | Convexity proof written out | [MaxIL derivation](/math/maxil-derivation) |
+
+<Tip>
+**Fix #12 also confirmed a non-issue.** Two auditors flagged the claim that `MaxIL = max(IL(Pa), IL(Pb))` — that the in-range maximum sits at a boundary. One re-derived it from scratch and confirmed it: `IL(P)` is convex on `[Pa, Pb]` because `V_hold` is affine and `V_lp` is strictly concave (`d²V_lp/dP² = −¼·L·P^{−3/2} < 0`), so its maximum *while in range* is at an endpoint. The convexity is load-bearing for the whole design — see [the MaxIL derivation](/math/maxil-derivation).
+</Tip>
+
+### The two forks (→ spec v3.2, then v3.3)
+
+The two issues the audit could *not* close in-band became the two architectural **forks** — each had a real fix that required a design decision, and each resolved to "Option B." Both are now in code and each is a numbered invariant. They get their own full treatment on [the forks page](/security/forks); the short version:
+
+<AccordionGroup>
+<Accordion title="Fork-1 — oracle settlement-liveness deadlock → I8 (spec v3.2)">
+**The problem (GPT/Gemini):** v3.1 pinned settlement to *both* the Chainlink round-at-T and a pinned Uniswap TWAP. If both froze at T and diverged by more than 2%, `settle` would revert **forever** — a permanent fund lockup.
+
+**The fix:** keep the Chainlink round-at-T pin (fairness), but **replace** the hard TWAP gate with a Chainlink **lone-spike sanity check** (the round-at-T is "lone" only if it differs from **both** neighbours by ≥ `LONE_SPIKE_BPS = 500` / 5% — real fast moves persist across rounds and pass), **plus** a `LIVENESS_WINDOW = 86,400s` (24h) backstop that accepts the round unconditionally after the window. TWAP demoted to a non-blocking advisory event. → **I8**, implemented in `OracleManager.getSettlementPrice`.
+</Accordion>
+<Accordion title="Fork-2 — no-last-look firm-quote pickoff → I9 (spec v3.3)">
+**The problem (GPT High):** firm quotes + any clock-based validity feed a one-sided stale-quote pickoff. **Signed payloads are bearer instruments** — they survive in any hand that copied them, beyond the off-chain engine's cancel. When vol gaps, the MM is short convexity and a searcher can submit the leaked bytes on-chain.
+
+**The fix:** each `SignedQuote` carries `quotePrice` (the oracle price the MM saw at signing) + `priceBandBps`. At `createSwap` the contract reads the live oracle — the *same* read that pins `P0`, zero extra oracle cost — and **auto-voids the quote on-chain, deterministically, if `absBps(P_live, quotePrice) > priceBandBps`.** No MM discretion at fill ⇒ **not last-look**. → **I9**, `InflexionCore`.
+</Accordion>
+</AccordionGroup>
+
+<Warning>
+**Why not just add "last look"?** A last-look path — letting the MM reject a fill at the moment of settlement — is the standard FX fix for stale quotes, and it is exactly the abuse pattern auditors flag (the MM fades when the trade goes against it). It also undercuts trustlessness.
+**Why we reject it:** firm quotes + a deterministic oracle band achieve the same protection *without* discretion. The band kills the dominant pickoff, the short `validUntil` bounds the leakage window, and on-chain selective nonce invalidation lets an MM cancel one quote.
+**The hard rule:** there is **no last-look path** in MM quoting. The residuals the band does *not* catch — pure vol-only moves with little spot drift, within-band drift the MM chose to bear, brief oracle lag — are acknowledged and small on crypto majors, not blockers. See [the forks page](/security/forks).
+</Warning>
+
+---
+
+## 2. Quant audit (Phase 14.11) — the Monte Carlo solvency model
+
+The quant audit was an **adversarial** review of the off-chain Monte Carlo model that sizes collateral and gates the PARTIAL / cvAMM parameter set. Reviewers: **GPT-5 + Code Interpreter** and **Gemini 2.5 Pro**, run against the model's actual code and outputs.
+
+**Result: 6 HIGH findings; 9 fixed in-band, 6 deferred as named mainnet-TODOs.** The deferrals are not silent — each is a named TODO with a justification, not a swept-under-the-rug gap.
+
+### What changed
+
+<AccordionGroup>
+<Accordion title="Sample size: 1,000 → 50,000 runs">
+A 1,000-run Monte Carlo is **meaningless for a 0.1%-tail estimate** — at that sample size the tail bucket holds ~1 path, so the estimate is pure noise. Bumped to **50,000 runs** so the tail is actually resolved.
+</Accordion>
+<Accordion title="Risk measure: VaR → CVaR">
+The `fund_target` was sized on Value-at-Risk, which is **not coherent** and ignores the shape of the tail beyond the quantile. Switched to **Conditional VaR (CVaR / expected shortfall)** — coherent and tail-aware — so the fund is sized against the *average* of the worst outcomes, not just the cutoff.
+</Accordion>
+<Accordion title="Fee criterion: median → mean PnL">
+The fee-sufficiency check used median PnL, which hides tail losses. Switched to **mean** PnL so a fat left tail actually shows up in the criterion.
+</Accordion>
+<Accordion title="Solver: fixed-point bisection for c_min ↔ fund_target">
+The collateral-minimum and fund-target are mutually dependent; the original solve could drift. Replaced with a **fixed-point bisection** that converges the two consistently.
+</Accordion>
+<Accordion title="Stress params re-anchored to real crises">
+Severe-stress parameters were re-anchored to **Terra, FTX, March-2020, and May-2021** — actual historical drawdowns rather than invented numbers.
+</Accordion>
+<Accordion title="Provenance, ruin budget, and IL fixtures">
+Added `parameter_provenance` per field; surfaced the **annualised ruin budget** (`0.1%/30d ≈ 1.21%/year`) so the risk is stated in human terms; and added **8 hand-calculated `il.py` fixtures** from the Uniswap v3 whitepaper to pin the IL math against an independent reference.
+</Accordion>
+</AccordionGroup>
+
+<Warning>
+**No PARTIAL constant is ever hardcoded.**
+**Why this is a rule and not a preference:** hardcoding a PARTIAL parameter (floor curve, fee curve, liquidation buffer, circuit-breaker thresholds, withdrawal delay, exposure caps, first-loss size) was the **exact failure the audit flagged** — a number baked into the contract can't track the model that justifies it.
+**Mitigation:** every PARTIAL / cvAMM primitive is read from the calibrated risk-parameter set produced by this Monte Carlo. The model *is* the source of truth for those constants.
+</Warning>
+
+<ClaimB />
+
+---
+
+## 3. Solidity static analysis — Slither 0.11.5 (two passes)
+
+Slither was run twice as the code landed: once over the core contracts, once over the dual-tranche cvAMM. The discipline in both passes was the same — triage every finding, fix the real ones, and **justify every accepted false-positive** rather than silencing the tool.
+
+### 3.1 Core pass — 27 findings → 1 fixed + 26 accepted
+
+The one real finding was a **`reentrancy-no-eth` medium in `settle`** — and it produced the single most security-relevant code change of the static-analysis work.
+
+**The fix: status-flip-first, strict CEI.** In `settle`, `s.status = Status.SETTLED` is hoisted to *immediately after* the validity checks, **before any external call**. So a malicious `oracle` or `ilMath` re-entering `settle` on the same `swapId` hits the `Status.ACTIVE` precondition and reverts — the re-entrant path is dead.
+
+```solidity
+// PHASE: checks (validity) ...
+s.status = Status.SETTLED;          // hoisted BEFORE any external call
+// ... compute IL from oracle-pinned P_T, cap at MaxIL, then release & distribute
+```
+
+For the full four-phase Checks-Effects-Interactions ordering on every create path, see [CEI / reentrancy](/security/cei-reentrancy).
+
+The remaining **26 findings were accepted false-positives**, each idiomatic:
+
+| Detector | Why it's a false-positive here |
+| --- | --- |
+| `unused-return` | Idiomatic tuple destructuring where the unused element is genuinely unused |
+| `reentrancy-benign` / `reentrancy-events` | Post-call `SwapRecord` writes and event emits that are benign by ordering |
+| `timestamp` | Protocol time checks (validity windows, settlement deadlines) that legitimately use `block.timestamp` |
+
+### 3.2 cvAMM pass (P3.9) — 74 results → 0 high, 0 confirmed, 1 cleanup
+
+The cvAMM pass produced **zero high findings and zero confirmed vulnerabilities.** The one action item was **cleanup**: a stray foundry-template `Counter.sol` was deleted (it was the only `^0.8.13` pragma usage in the tree).
+
+More valuable than the automated output was the **manual review** it triggered, which confirmed:
+
+- the **junior-first-loss waterfall** in `releaseAndDistribute` — `juniorLoss = min(payout, juniorAssets)` first, `seniorLoss` only after;
+- the **withdrawal-cooldown + locked/free run defense** — junior cannot be drawn below `totalLocked`;
+- the **`lockedAfter ≤ juniorAssets` senior-protection check** at every lock; and
+- that **the FULL no-bad-debt guarantee (I1) is structural and independent of the FairValue / Vol oracles** — `settle` caps payout at `MaxIL == collateral` regardless of any pricing oracle.
+
+<Info>
+That last point is the headline of the entire security model: [no-bad-debt](/concepts/no-bad-debt) is an algebraic property of a `min`, not a function of the pricing oracles. The FairValueOracle and VolOracle are load-bearing for the **I10 price cap** and **depositor solvency** — not for I1. See [the security overview](/security/overview).
+</Info>
+
+---
+
+## 4. Reproduce it yourself
+
+Every pass is reproducible from the repo. The exact commands:
+
+<CodeGroup>
+```bash Slither (both passes)
+# Core + cvAMM static analysis, filtering out tests/scripts/libs
+slither packages/contracts --filter-paths "test|script|lib"
+```
+
+```bash Foundry invariant fuzz (verifies I1–I10)
+# The invariants the audits hardened are enforced by Foundry fuzz tests
+cd packages/contracts
+forge test                              # full suite, incl. invariant tests
+forge test --match-path "*invariants*"  # just the I1–I10 invariant suite
+```
+
+```bash Quant Monte Carlo (CVaR / 50k runs)
+# Regenerates the calibrated risk-parameter set from the model
+cd quant
+uv run python il.py        # IL fixtures (Uniswap v3 whitepaper cross-check)
+uv run python solvency.py  # 50k-run Monte Carlo → CVaR fund_target
+```
+</CodeGroup>
+
+The invariants that the spec and quant audits hardened are not just documented — they are **machine-verified** every CI run:
+
+| Invariant | Origin | Verified by |
+| --- | --- | --- |
+| **I6** (stored `L`) | Spec fix #1 | `testFuzz_I6_settleUsesStoredLiquidity` + `testFuzz_F2_externalIncreaseLiquidity_arbitraryAmount` |
+| **I7** (capacity + nonce) | Spec fix #4 | `test_createSwap_consumedNotional_tracked`, `test_createSwap_rejectsUsedNonce` |
+| **I8** (settlement liveness) | Fork-1 | `OracleManager.invariant.t.sol` — 5 fuzz tests, ~1,280 runs |
+| **I9** (oracle band) | Fork-2 | `testFuzz_I9_priceBandViolationReverts` + `testFuzz_I9_priceBandWithinBandAccepts` |
+| **`settle` CEI** | Slither core pass | strict CEI, status-flip-first |
+
+See [the invariants page](/security/invariants) for each invariant's precise statement, why it holds, where it is enforced (`file:line`), and the test that verifies it.
+
+<Warning>
+**CI scope — stated plainly, with its why and mitigation.**
+**Limit:** GitHub Actions runs only `forge fmt + build + test`. `cargo stylus`, Node, and Python validation are run **manually** (WSL2 / Nitro).
+**Why:** the Stylus toolchain and a local Nitro fork don't run cleanly in the hosted CI runner.
+**Mitigation:** the Solidity `FairValueOracle` **is** exercised in CI — it's what `forge test` compiles — and it serves as the **revm-executable cross-check** of the shipped Stylus oracle. The Φ-sum is never reimplemented off-chain; the Solidity copy exists precisely to be CI-testable against the production Stylus pricer.
+</Warning>
+
+---
+
+## What the audits do — and don't — establish
+
+<ClaimA />
+
+The audits establish that the design is internally consistent, the no-bad-debt invariant is genuine and oracle-independent, the solvency model is sized with a coherent tail measure, and the contracts carry no high-severity static-analysis findings. They do **not** replace a paid professional audit, and they do not — and cannot — resolve the meta-risk all three spec auditors named: **two-sided market clearing**, which is empirical and only answerable with live flow.
+
+<Maturity />
+
+<CardGroup cols={2}>
+<Card title="The ten invariants" icon="list-check" href="/security/invariants">
+Precise statement, why it holds, `file:line` enforcement, and the Foundry fuzz test for each of I1–I10.
+</Card>
+<Card title="The two resolved forks" icon="code-branch" href="/security/forks">
+Fork-1 (I8, settlement liveness) and Fork-2 (I9, oracle-anchored band — not last-look) in full.
+</Card>
+<Card title="Attack-vector ledger" icon="table-list" href="/security/attack-vectors">
+Every audited vector mapped to its mitigation and the invariant / `file:line` that closes it.
+</Card>
+<Card title="Status & caveats" icon="circle-info" href="/reference/status-caveats">
+The live-system version of this ledger — every pending state with its why and path forward.
+</Card>
+</CardGroup>

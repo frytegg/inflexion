@@ -1,0 +1,734 @@
+---
+title: "MmClient — Path-B market making"
+description: "The SDK surface a market maker uses to compete on price: stream the pool load-to-beat, price a market, sign a per-market EIP-712 quote with the I10 + below-pool guards, and publish — plus the book, fills, capacity, and collateral flow. Full worked example end to end."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+`MmClient` is the SDK surface for the **Path-B
+market-maker rail** — the *ceiling of price*. An MM never has to win flow: the
+always-on [cvAMM pool](/protocol/path-a-cvamm) clears every position regardless.
+An MM wins flow **only by genuinely beating the pool**, and the router gives the
+LP the cheaper of `{pool, MM}` while never reverting on a bad MM quote
+([routing](/protocol/routing)). `MmClient` is the typed layer that makes
+competing on price mechanical: read the floor you must undercut, price a market,
+sign a firm quote that the contract will accept, and publish it.
+
+The whole MM workflow is **sign + read + cancel** — `MmClient` never sends a
+fill (the LP does that on-chain) and never holds collateral (a separate
+`UnderwriterVault` flow does — see [below](#mm-collateral-the-underwritervault-flow)).
+The one write it owns is `cancelNonces`.
+
+<CardGroup cols={2}>
+  <Card title="Path B in the protocol" icon="signature" href="/protocol/path-b-mm">
+    The on-chain `createSwap` gate, the 13-field quote, and the three no-last-look protections.
+  </Card>
+  <Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why MaxIL fungibility makes an MM quote per-market, never per-NFT.
+  </Card>
+  <Card title="Quote signing reference" icon="key" href="/integrate/quote-signing">
+    The canonical EIP-712 domain, types, and type-string.
+  </Card>
+  <Card title="Routing" icon="route" href="/protocol/routing">
+    `createSwapRouted` — cheaper of `{pool, MM}`, falling back to the pool on a bad quote.
+  </Card>
+</CardGroup>
+
+## Construction
+
+`MmClient` is wired by the [one-call factory](/sdk/getting-started). It is the
+only surface that receives the EIP-712 `chainId`, and it defaults
+`coreAddress = core.inflexionCore`, `npmAddress = npm`, `chainId = 421614`. It
+caches `loadParams` and per-market configs — both immutable after market freeze.
+
+<CodeGroup>
+
+```ts Server / key-based
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({
+  rpcUrl: process.env.ARBITRUM_SEPOLIA_RPC,
+  privateKey: process.env.MM_PRIVATE_KEY as `0x${string}`, // funded write client (only cancelNonces uses it)
+  chainId: 421614,                                          // EIP-712 domain chainId
+})
+const mm = sdk.mm
+```
+
+```ts Browser / wagmi
+'use client'
+import { useMemo } from 'react'
+import { usePublicClient, useWalletClient } from 'wagmi'
+import { createInflexionSdk } from '@inflexion/sdk'
+
+export function useMm() {
+  const publicClient = usePublicClient()
+  const { data: walletClient } = useWalletClient() // signs quotes + cancelNonces
+  return useMemo(
+    () =>
+      createInflexionSdk({
+        publicClient,
+        ...(walletClient ? { walletClient } : {}),
+        chainId: 421614,
+      }).mm,
+    [publicClient, walletClient],
+  )
+}
+```
+
+</CodeGroup>
+
+<Note>
+The raw-key path of `signQuote` builds a viem account from the private key and is
+**server-side only** — never put a private key in the browser. In a browser MM,
+sign with the connected wallet via `walletClient.signTypedData` and enforce the
+I10 + below-pool guards yourself — see
+[browser (wagmi) signing](#b-browser-wagmi-signing).
+</Note>
+
+## Why an MM quote is per-MARKET, not per-NFT
+
+This is the load-bearing idea behind the whole surface.
+[MaxIL](/concepts/maxil) is both (a) the load-bearing payout cap **and** (b) the
+**unit of risk**: pure geometry, frozen at creation, identical across durations,
+and L-independent in the fair-rate sense. That makes positions **fungible to an
+underwriter within a market**. So an MM expresses appetite once,
+per `marketId`, as a triple — never per position:
+
+$$
+\text{quote} \;=\; \bigl(\underbrace{\text{loadBps}}_{\text{price}},\;
+\underbrace{[\text{minMaxILRatioBps},\, \text{maxMaxILRatioBps}]}_{\text{appetite band}},\;
+\underbrace{\text{maxNotionalV0}}_{\text{capacity}}\bigr)
+$$
+
+The `SignedQuote` carries **no `tokenId`**. Any LP position in that market whose
+own ratio $\text{ratioBps} = \text{maxIL}\cdot 10^4 / V_0$ falls inside the band
+can fill the quote, up to the declared capacity. Because the price the MM sets is
+a **load over the on-chain `FairPremium`** (never a raw dollar premium), one
+geometry-independent number — the *load to beat* — is all the MM needs to
+compete. That number is the first-class streamable signal below.
+
+## Method reference
+
+| Method | Args | Returns | R/W | Backed by |
+| --- | --- | --- | --- | --- |
+| `getLoadParams` | — | `LoadParams` (cached) | R | Core `loadParams` |
+| `getMarketConfig` | `marketId` | `MarketConfig \| undefined` | R | Core `markets` (`undefined` if `token0 == 0`) |
+| `getMarketPricing` | `marketId, geometry: PricingGeometry` | `MarketPricingResult` | R | **ONE multicall**: FVO `fairPremium` + ConvexityVault `inventory` + VolOracle `sigmaRef`; load via TS port |
+| `getPoolLoadToBeat` | `marketId` | `PoolLoadTick` | R | multicall: `inventory` + `sigmaRef` (geometry-free); TS-port load |
+| `streamPoolLoadToBeat` | `marketIds, onTick, opts?{intervalMs?}` | `StreamHandle` | R (poll, 4s) | per-market `getPoolLoadToBeat` |
+| `getSigmaRef` | `token` | `bigint \| undefined` | R | VolOracle `sigmaRef` |
+| `getSigmaComponents` | `token` | `SigmaComponents \| undefined` | R | VolOracle `sigmaComponents` |
+| `getPositionGeometry` | `tokenId, durationSeconds` | `{priceable:true, geometry, marketId, config} \| {priceable:false, reason}` | R | NPM `positions`, TickMath, OracleManager `getPrice`, Core `oracleDerivedSqrtPriceX96`, ILMath |
+| `getBook` | `mm, opts?{fromSwapId?, swapIds?, withGreeks?}` | `BookResult` | R | Core `nextSwapId`/`swaps` scan; ILMath greeks if requested |
+| `greeksForSwap` | `swapId` | `Greeks \| undefined` | R | finite-diff ILMath `computeIL` over ±1% P0 |
+| `signQuote` | `privateKey, quote, opts?{requirePoolCheck?, verifyingContract?, chainId?}` | `SignQuoteResult` | **sign** (no tx) | EIP-712 + I10 + below-pool guards |
+| `quoteStream` | `QuoteStreamOptions` | `StreamHandle` | sign loop (5s) | reads pool load, builds/signs/publishes each tick |
+| `isQuoteFilled` | `mm, nonce` | `NonceStatus` (coarse) | R | Core `isNonceUsed` |
+| `watchFills` | `mm, onFill, opts?{intervalMs?, fromBlock?, onError?}` | `StreamHandle` | R (log poll, 6s) | `SwapCreated` logs filtered by `mm` (coarse) |
+| `cancelNonces` | `nonces: bigint[]` | `Hex` (txHash) | **W** | Core `cancelNonces` (throws `no-signer` w/o wallet) |
+| `buildCancelNoncesTx` | `nonces: bigint[]` | `{to,data,value}` | build | Core `cancelNonces` calldata |
+| `capacityRemaining` | `quoteId, maxNotionalV0` | `{available, remaining, consumed, max, exhausted} \| {available:false}` | R | Core `consumedNotional` (I7) |
+| `getMmCollateral` | `mm` | `{deposited, locked, available} \| undefined` | R | UnderwriterVault `deposited`/`locked`/`availableBalance` |
+
+**Exported nonce + bps utils:**
+
+```ts
+import { encodeNonce, decodeNonce, wadToBps } from '@inflexion/sdk'
+
+encodeNonce(word, bit)   // = (word << 8) | bit ;  bit ∈ [0, 255]
+decodeNonce(nonce)       // = { word: nonce >> 8, bit: nonce & 0xff }
+wadToBps(wad)            // = floor(wad · 10000 / 1e18)
+```
+
+## The pool load-to-beat — the first-class signal
+
+`getPoolLoadToBeat(marketId)` returns the **pure pool floor** an MM must
+undercut, with no position geometry at all — exactly because the *load* (a
+percentage spread over `FairPremium`) is geometry-independent. Only the dollar
+premium scales with `a/b/maxIL`; the load you compete on does not. The read is
+one multicall of `ConvexityVault.inventory()` + `VolOracle.sigmaRef`, finished by
+the [parity-locked TS port](/sdk/cvamm-port) of the load stack.
+
+The result `PoolLoadTick` carries the decomposed load so an MM can see *where*
+the pool floor comes from:
+
+$$
+\text{totalLoad} \;=\; \underbrace{\text{baseLoad}}_{\sigma_{\text{ref}}\text{ regime band}}
+\;+\; \underbrace{\text{utilSkew}}_{\text{utilisation, convex above the knee}}
+\;+\; \underbrace{\text{dispSkew}}_{\text{HHI dispersion}}
+\quad\text{(clamped to } \text{maxLoadBps} = \text{I10})
+$$
+
+```ts
+const tick = await mm.getPoolLoadToBeat(marketId) // PoolLoadTick
+if (tick.available) {
+  console.log(tick.totalLoadBps) // the bps floor to beat (e.g. 540)
+  console.log(tick.baseLoadWad, tick.utilSkewWad, tick.dispSkewWad) // WAD decomposition
+  console.log(tick.util, tick.conc, tick.regime) // util/conc + σ_ref regime band
+}
+```
+
+To watch many markets at once, `streamPoolLoadToBeat` polls each market's tick
+on a 4 s default interval and hands you a `StreamHandle` to stop:
+
+```ts
+const handle = mm.streamPoolLoadToBeat(
+  [marketIdA, marketIdB],
+  (marketId, tick) => {
+    if (tick.available) requoteIfFloorMoved(marketId, tick.totalLoadBps)
+  },
+  { intervalMs: 4_000 },
+)
+// later: handle.stop()
+```
+
+<Tip>
+The load-to-beat is geometry-free **by design** — it is the one number an MM
+needs to decide whether to compete in a market at all, before ever looking at a
+specific LP's NFT. That is the mechanical face of MaxIL fungibility: appetite,
+not position, is what the MM expresses.
+</Tip>
+
+## Pricing a market — `getMarketPricing`
+
+When you *do* want the dollar figures (e.g. to surface a \$ pool premium next to
+your \$ quote), `getMarketPricing(marketId, geometry)` resolves the full pricing
+row in **one multicall**: `FairValueOracle.fairPremium` + `ConvexityVault.inventory`
++ `VolOracle.sigmaRef`, then finishes the load stack with the TS port. The Φ-sum
+`fairPremium` is **read on-chain, never reimplemented** — only the deterministic
+load stack is mirrored off-chain (it is parity-locked because the deployed
+`CvammPricing` lib is delegatecall-only, [the cvamm port](/sdk/cvamm-port)).
+
+`PricingGeometry` input:
+
+<ParamField path="aWad" type="bigint">
+  $a = (P_a / P_0)^2$ in WAD — the lower range bound as a squared price ratio.
+</ParamField>
+<ParamField path="bWad" type="bigint">
+  $b = (P_b / P_0)^2$ in WAD — the upper range bound as a squared price ratio.
+</ParamField>
+<ParamField path="durationSeconds" type="number">
+  The market tenor; selects the duration the FairValueOracle prices.
+</ParamField>
+<ParamField path="maxIL" type="bigint">
+  The position MaxIL in numéraire raw (dUSDC, **6 decimals**) — scales the dollar premium.
+</ParamField>
+<ParamField path="oracleToken" type="Address (optional)">
+  The σ_ref token; defaults to the market's oracle token.
+</ParamField>
+
+`MmMarketPricing` result carries `fairPremium`, `fairRateWad`,
+`sigmaRefWad`, `poolPremium`, `maxIL`, the `LoadBreakdown` (`load`), `totalLoadBps`,
+the per-component `baseLoadWad`/`utilSkewWad`/`dispSkewWad`, `util`, `conc`, and
+`regime`. The pool premium is the same expression the on-chain `_pricePathA`
+uses:
+
+$$
+\text{poolPremium} \;=\; \min\!\Bigl(\, \bigl\lceil \text{fairPremium}\cdot(1 + \text{totalLoad}) \bigr\rceil,\; \text{MaxIL} \Bigr)
+$$
+
+```ts
+import { cvamm } from '@inflexion/sdk'
+
+// Build geometry from sqrt prices if you have them:
+const { aWad, bWad } = cvamm.abFromSqrt(sqrtP0X96, sqrtPaX96, sqrtPbX96)
+
+const pricing = await mm.getMarketPricing(marketId, {
+  aWad,
+  bWad,
+  durationSeconds: 7 * 86_400,
+  maxIL: 1_669_240_000n, // $1,669.24 in dUSDC 6-dec raw
+})
+console.log(pricing.fairPremium, pricing.poolPremium, pricing.totalLoadBps)
+```
+
+<Note>
+If you only have a `tokenId`, use `getPositionGeometry(tokenId, durationSeconds)`
+— it reads NPM `positions`, derives `Pa/Pb` from ticks, pins `P0` from the
+oracle, and returns a `{ priceable, geometry, marketId, config }` envelope (or a
+`{ priceable:false, reason }` degrade on an oracle revert).
+Geometry is **not** what you sign, though: you sign a per-market quote. Geometry
+only helps you display \$ figures.
+</Note>
+
+## Signing an EIP-712 `SignedQuote`
+
+The single source of truth for the wire format is re-exported via `@inflexion/sdk`
+and `@inflexion/sdk/quote`.
+The field order, types, and domain `("Inflexion", "1")` **must match
+`InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly**, or `createSwap` /
+`createSwapRouted` rejects the signature. The full canonical reference lives at
+[quote signing](/integrate/quote-signing); the essentials:
+
+**Domain:**
+
+```ts
+{ name: 'Inflexion', version: '1', chainId: 421614n, verifyingContract: core.inflexionCore }
+```
+
+**The 13 fields, in struct order:**
+
+```ts
+SignedQuote: [
+  { name: 'mm',               type: 'address' },
+  { name: 'marketId',         type: 'bytes32' },
+  { name: 'loadBps',          type: 'uint16'  },  // ≤ loadParams.maxLoadBps (I10)
+  { name: 'minMaxILRatioBps', type: 'uint16'  },
+  { name: 'maxMaxILRatioBps', type: 'uint16'  },
+  { name: 'quotePrice',       type: 'uint128' },  // oracle price signed against — Fork-2 band anchor
+  { name: 'priceBandBps',     type: 'uint16'  },  // bounded on-chain to [25, 500]
+  { name: 'model',            type: 'uint8'   },  // CollateralModel: FULL=0, PARTIAL=1
+  { name: 'partialRatioBps',  type: 'uint16'  },  // 0 in FULL
+  { name: 'maxNotionalV0',    type: 'uint128' },  // capacity ceiling (V0 units)
+  { name: 'validUntil',       type: 'uint64'  },  // absolute ts; on-chain bound to now + [5, 15]s
+  { name: 'quoteId',          type: 'bytes32' },
+  { name: 'nonce',            type: 'uint256' },  // bitmap (word << 8) | bit
+]
+```
+
+In TS, `quotePrice`, `maxNotionalV0`, `validUntil`, `nonce` are **bigint**;
+`loadBps`, the `*Bps` fields, and `model` are plain `number` (< 2⁵³, safe). On the
+wire (engine WS / JSONL logs) bigints become **decimal strings** via
+`encodeQuote`/`decodeQuote` — convert back to bigint before re-signing or verifying.
+
+<Warning>
+**`CollateralModel.FULL = 0` is the only supported mode in v1.** `PARTIAL = 1`
+exists in the enum but the contract reverts on it.
+
+- **Limit:** you cannot quote `model: 1` (PARTIAL).
+- **Why:** PARTIAL collateral parameters (first-loss size, floor curve, liquidation
+  buffer) are gated on the Monte-Carlo calibrated risk-parameter set and are
+  **never hardcoded** — the exact failure the audit flagged.
+- **Path forward:** always sign `model: 0`, `partialRatioBps: 0`. PARTIAL is
+  [roadmap, gated on the quant](/protocol/collateral-models).
+</Warning>
+
+### (a) Key-based signing via `mm.signQuote` (the I10 + below-pool guards)
+
+`mm.signQuote(privateKey, quote, opts?)` delegates the actual EIP-712 signing to
+the engine signer (never reimplemented) and **enforces two guards before
+returning** the envelope:
+
+<Steps>
+  <Step title="I10 — the price cap">
+    `loadBps ≤ loadParams.maxLoadBps`, else it throws `MmQuoteError('i10-exceeded')`.
+    This is [invariant I10](/security/invariants): the MM can never out-load the
+    protocol's price cap.
+  </Step>
+  <Step title="Below-pool — you only win by beating the floor">
+    `loadBps < live pool-load-bps` (read via `getPoolLoadToBeat`), else
+    `MmQuoteError('not-below-pool')`. If the pool load is unreadable, the check is
+    *skipped* and reported in the result — unless you pass `requirePoolCheck: true`,
+    in which case it throws `MmQuoteError('pool-load-unreadable')`.
+  </Step>
+</Steps>
+
+The guards encode the rail's economics: a quote that is not below the pool floor
+can never win the router (the router requires a **strict beat** —
+[routing](/protocol/routing)), so signing one is pointless; and a quote above the
+I10 cap would revert on-chain anyway. `signQuote` makes those failures *loud and
+early*, off-chain, instead of a silent on-chain fallback.
+
+`SignQuoteResult`:
+`{ envelope, belowPoolChecked, poolLoadBps?, i10Ok: true }`. The error codes are
+`MmQuoteError.code ∈ { i10-exceeded, not-below-pool, pool-load-unreadable,
+no-signer, bad-nonce }`.
+
+```ts
+import { encodeNonce } from '@inflexion/sdk'
+
+// Per-MARKET quote (NOT per-NFT). loadBps must beat the live pool floor.
+const tick = await mm.getPoolLoadToBeat(marketId) // PoolLoadTick
+if (!tick.available) throw new Error('pool floor unreadable; do not quote blind')
+
+const quote = {
+  mm: MM_ADDRESS,
+  marketId,
+  loadBps: Number(tick.totalLoadBps) - 50,          // undercut the pool by 50 bps
+  minMaxILRatioBps: 0,
+  maxMaxILRatioBps: 10_000,                          // accept any MaxIL/V0 ratio
+  quotePrice: liveOraclePrice,                        // bigint — the Fork-2 band anchor
+  priceBandBps: 50,                                   // ±0.5%, inside [25, 500]
+  model: 0,                                           // FULL
+  partialRatioBps: 0,
+  maxNotionalV0: 1_000_000_000_000n,                  // capacity in V0 units (numéraire raw)
+  validUntil: BigInt(Math.floor(Date.now() / 1000) + 30),
+  quoteId: ('0x' + 'ab'.repeat(32)) as `0x${string}`,
+  nonce: encodeNonce(0n, 0),                          // (word << 8) | bit
+}
+
+const signed = await mm.signQuote(MM_KEY, quote)      // throws on I10 / below-pool
+// signed.envelope = { quote, signature } → publish to the engine
+```
+
+### (b) Browser (wagmi) signing
+
+No private key in the browser. Sign with the connected wallet, then enforce the
+**same two guards yourself** — `signQuote`'s raw-key path is server-only:
+
+```ts
+import { SignedQuoteTypes, quoteDomain, core, CHAIN_ID } from '@inflexion/sdk'
+
+// 1. enforce I10 + below-pool BEFORE signing (mirror mm.signQuote's guards)
+const params = await mm.getLoadParams()
+if (quote.loadBps > params.maxLoadBps) throw new Error('i10-exceeded')
+
+const pool = await mm.getPoolLoadToBeat(quote.marketId)
+if (pool.available && quote.loadBps >= Number(pool.totalLoadBps)) {
+  throw new Error('not-below-pool')
+}
+
+// 2. sign via the wagmi walletClient (EIP-712 — uses the connected wallet)
+const signature = await walletClient.signTypedData({
+  account: walletClient.account,
+  domain: quoteDomain(CHAIN_ID, core.inflexionCore), // { 'Inflexion','1', 421614, core }
+  types: SignedQuoteTypes,
+  primaryType: 'SignedQuote',
+  message: quote,                                     // bigints for uint128/64/256
+})
+
+const envelope = { quote, signature } // → publish / hand to an LP buyProtection
+```
+
+<Info>
+**Same digest, different signer.** Both paths produce a signature over the
+identical EIP-712 digest the contract computes (`quoteDigest`). The browser path
+simply uses the wallet to sign and replicates the guards in app code, because there
+is no key for `signQuote` to load.
+EIP-1271 **contract** signers are verified on-chain only — the off-chain
+`verifyQuote` is the EOA path.
+</Info>
+
+## Publishing — `quoteStream` and the engine transport
+
+`MmClient` deliberately does **not** depend on `ws` — it never opens a socket.
+You inject the transport. `quoteStream(options)` runs the firm-quote /
+short-TTL loop the [engine](/integrate/engine) is built around: each tick reads
+`getPoolLoadToBeat`, calls your `build(poolLoad)` (return `undefined` to skip a
+tick), signs via `signQuote` (re-enforcing I10 + below-pool), then hands the
+envelope to your injected `publish` transport. It degrades silently per tick and
+returns a `StreamHandle`.
+
+```ts
+const handle = mm.quoteStream({
+  privateKey: MM_KEY,
+  marketId,
+  intervalMs: 5_000, // re-issue every 5s; each quote valid [5,15]s on-chain
+  build: (poolLoad) => {
+    if (!poolLoad.available) return undefined // skip this tick — never quote blind
+    return {
+      mm: MM_ADDRESS,
+      marketId,
+      loadBps: Number(poolLoad.totalLoadBps) - 50, // undercut the live floor
+      minMaxILRatioBps: 0,
+      maxMaxILRatioBps: 10_000,
+      quotePrice: liveOraclePrice,
+      priceBandBps: 50,
+      model: 0,
+      partialRatioBps: 0,
+      maxNotionalV0: 1_000_000_000_000n,
+      validUntil: BigInt(Math.floor(Date.now() / 1000) + 10),
+      quoteId: MY_QUOTE_ID,
+      nonce: nextNonce(),
+    }
+  },
+  publish: async (envelope) => {
+    // YOU own the transport. Either a persistent WS:
+    //   ws.send(JSON.stringify({ type: 'quote', quote: encodeQuote(envelope.quote), signature: envelope.signature }))
+    // or the browser-friendly HTTP publish:
+    await fetch(`${ENGINE_URL}/quote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ quote: encodeQuote(envelope.quote), signature: envelope.signature }),
+    })
+  },
+  onError: (err) => console.warn('requote skipped:', err),
+})
+// later: handle.stop()
+```
+
+The engine verifies the signature + a light freshness gate and stores the
+**cheapest currently-valid quote per market** (lowest `loadBps`, not expired).
+An LP's `previewPremium` then reads `GET /quote?marketId=…` for that cheapest
+load. The engine returns a **load, not a dollar premium** — the dollar premium is
+position-specific and derived on-chain at `createSwapRouted` as
+$\text{FairPremium}\cdot(1+\text{loadBps})$. Full protocol + endpoint detail:
+[the engine](/integrate/engine) and [API endpoints](/integrate/api-endpoints).
+
+<Warning>
+**A leaked signed quote is a bearer instrument — but it is not a pickoff risk.**
+
+- **Limit:** once you sign, the bytes can be replayed by anyone who copied them,
+  beyond the engine's cancel.
+- **Why it is safe:** three deterministic on-chain protections, *no last-look* — the
+  oracle-anchored price band (I9 / Fork 2) auto-voids the quote if spot drifts
+  past `priceBandBps`; the short `[5,15]s` validity window bounds the leakage
+  interval; and the bitmap nonce lets you kill exactly one quote on-chain.
+- **Mitigation:** keep TTL short (re-issue every 5 s as above) and
+  [`cancelNonces`](#selective-cancel-cancelnonces) the moment you withdraw a
+  quote. Detail: [the three protections](/protocol/path-b-mm#the-three-deterministic-protections).
+</Warning>
+
+## The book, fills, and capacity
+
+### `getBook` — your open positions, scanned on-chain
+
+`getBook(mm, opts?)` scans `Core.nextSwapId` → `swaps` and returns the MM's
+`BookResult` (the swaps it underwrites), optionally with per-swap greeks
+(`withGreeks: true`) computed by finite-differencing the deployed `ILMath.computeIL`.
+`greeksForSwap(swapId)` does the same for a single swap over
+±1% P0. This works **today**, with no subgraph — it is a direct
+on-chain scan.
+
+### Fill attribution is COARSE today {#fill-attribution}
+
+<Warning>
+**On-chain, fill attribution is coarse — `isQuoteFilled` cannot tell filled from cancelled.**
+
+- **Limit:** `isNonceUsed(mm, nonce)` is set on **both** a fill and a cancel, and
+  `SwapCreated` / `SwapRouted` carry no `quoteId` / `nonce`. So
+  `isQuoteFilled(mm, nonce)` returns `NonceStatus { spent, precision: 'coarse',
+  detail }` — never a precise filled-vs-cancelled distinction.
+- **Why:** the on-chain settlement core stays minimal; the precise attribution
+  belongs in the indexer, not the hot path.
+- **Path forward:** the **precise** path is the now-live `QuoteFilled` event
+  (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy.
+  It becomes queryable once the subgraph indexes it — until then `watchFills` polls
+  `SwapCreated` logs by `mm` (works now, coarse). History degrades to a typed
+  `pending` state, never an error.
+</Warning>
+
+```ts
+// Coarse today: spent = filled OR cancelled (cannot distinguish on-chain)
+const status = mm.isQuoteFilled(MM_ADDRESS, quote.nonce) // NonceStatus, precision:'coarse'
+
+// Poll new fills attributed to this MM (coarse — SwapCreated logs by mm):
+const fills = mm.watchFills(
+  MM_ADDRESS,
+  (fill) => console.log('fill:', fill.swapId),
+  { intervalMs: 6_000 },
+)
+// later: fills.stop()
+```
+
+<Maturity />
+
+### Capacity — `capacityRemaining` (I7)
+
+A signed quote can fill repeatedly only up to its declared `maxNotionalV0`. The
+on-chain ledger is the authority — [invariant I7](/security/invariants):
+
+$$
+\text{remaining} \;=\; \max\!\bigl(0,\; \text{maxNotionalV0} - \text{consumedNotional}[\text{quoteId}]\bigr)
+$$
+
+```ts
+const cap = await mm.capacityRemaining(quote.quoteId, quote.maxNotionalV0)
+if (cap.available) {
+  console.log(cap.remaining, cap.consumed, cap.max, cap.exhausted) // I7 ledger view
+}
+```
+
+`consumedNotional[quoteId]` is incremented atomically in the on-chain effects
+phase before any external call, so concurrent fills cannot over-consume a quote
+(protocol detail: [Path B capacity authority](/protocol/path-b-mm#capacity-authority-i7)).
+
+### Selective cancel — `cancelNonces` {#selective-cancel-cancelnonces}
+
+`cancelNonces(nonces)` is the one **write** `MmClient` owns — it flips exactly the
+bitmap bits you pass, never cancel-all, so you revoke precisely the quotes you
+want. It throws a clear `no-signer` error if no wallet is wired. For an external
+signer, `buildCancelNoncesTx(nonces)` returns the unsigned `{ to, data, value }`.
+
+```ts
+import { encodeNonce } from '@inflexion/sdk'
+
+// Withdraw two specific quotes — flip exactly their bits on-chain.
+const txHash = await mm.cancelNonces([encodeNonce(0n, 0), encodeNonce(0n, 1)])
+```
+
+A cancelled bit can never fill — it satisfies the second clause of I7. This is the
+on-chain backstop behind the engine's off-chain cancel: even if a quote is still
+in someone's hand, it is dead the instant you cancel its bit.
+
+## MM collateral — the UnderwriterVault flow {#mm-collateral-the-underwritervault-flow}
+
+**Collateral is not part of `signQuote`.** Before any of an MM's quotes can be
+filled, the MM posts collateral to its own per-MM
+[`UnderwriterVault`](/protocol/vaults) via a **separate** ERC-20 approve +
+deposit. On a Path-B fill, the
+contract requires `availableBalance(mm) ≥ maxIL` and **locks `maxIL` of the MM's
+own collateral**; at settlement the LP is paid `min(realized_IL, MaxIL)` from that
+locked collateral — never protocol funds. The standing invariant is
+[I5](/security/invariants): `locked[mm] ≤ deposited[mm]` by construction.
+
+`MmClient` reads the collateral state (it does not write the deposit):
+
+```ts
+const col = await mm.getMmCollateral(MM_ADDRESS) // { deposited, locked, available } | undefined
+if (col) console.log(col.deposited, col.locked, col.available) // all dUSDC 6-dec raw
+```
+
+| Action | Vault / spender | Flow | Decimals |
+| --- | --- | --- | --- |
+| MM collateral deposit | **UnderwriterVault** | separate ERC-20 approve + deposit (NOT in `signQuote`) | dUSDC 6-dec |
+| `cancelNonces` | **InflexionCore** | no approval | — |
+
+<Note>
+The 2026-06-05 redeploy ran a real routed fill that **chose the MM**: the router
+saw a cvAMM premium of \$13.80 vs the MM's \$8.93 (MM `loadBps` 1000), locked MaxIL
+\$3,215.65 from the **MM's own `UnderwriterVault`**, and at expiry paid the LP
+\$245.66 from that collateral — not protocol funds.
+</Note>
+
+## End-to-end worked example — stream the floor, sign, publish
+
+This is the canonical MM loop: read the geometry-free *price-to-beat*, sign a
+per-market quote that undercuts it (passing the I10 + below-pool guards), and
+publish it to the engine. The chain re-checks everything; an LP then fills the
+cheaper of `{pool, your quote}` via `createSwapRouted`.
+
+```ts
+import {
+  createInflexionSdk,
+  encodeNonce,
+  encodeQuote,
+  demo,
+  core,
+} from '@inflexion/sdk'
+
+// 0. Construct (server-side; the funded key is only used by cancelNonces).
+const sdk = createInflexionSdk({
+  rpcUrl: process.env.ARBITRUM_SEPOLIA_RPC,
+  privateKey: process.env.MM_PRIVATE_KEY as `0x${string}`,
+  chainId: 421614,
+})
+const mm = sdk.mm
+const MM_ADDRESS = '0xYourMmAddress' as `0x${string}`
+const MM_KEY = process.env.MM_PRIVATE_KEY as `0x${string}`
+const ENGINE_URL = process.env.ENGINE_URL!
+const marketId = demo.marketId_fee500_7d
+const MY_QUOTE_ID = ('0x' + 'cd'.repeat(32)) as `0x${string}`
+
+// 1. Confirm collateral is posted (read-only; deposit is a separate vault flow).
+const col = await mm.getMmCollateral(MM_ADDRESS)
+if (!col || col.available === 0n) throw new Error('post collateral to UnderwriterVault first')
+
+// 2. Stream the geometry-free pool floor and requote each tick.
+const handle = mm.quoteStream({
+  privateKey: MM_KEY,
+  marketId,
+  intervalMs: 5_000, // re-issue every 5s; each quote lives [5,15]s on-chain
+  build: (poolLoad) => {
+    // Never quote blind: skip this tick if the floor is unreadable.
+    if (!poolLoad.available) return undefined
+
+    const floorBps = Number(poolLoad.totalLoadBps)
+    const myLoadBps = floorBps - 50 // strictly below the floor → router can pick me
+    if (myLoadBps < 0) return undefined
+
+    return {
+      mm: MM_ADDRESS,
+      marketId,
+      loadBps: myLoadBps,
+      minMaxILRatioBps: 0,
+      maxMaxILRatioBps: 10_000,        // accept any MaxIL/V0 ratio in this market
+      quotePrice: liveOraclePrice(),    // bigint — the Fork-2 band anchor
+      priceBandBps: 50,                 // ±0.5%, inside [25, 500]
+      model: 0,                         // FULL (the only v1 mode)
+      partialRatioBps: 0,
+      maxNotionalV0: 1_000_000_000_000n, // capacity ceiling in V0 units
+      validUntil: BigInt(Math.floor(Date.now() / 1000) + 10),
+      quoteId: MY_QUOTE_ID,
+      nonce: nextNonce(),                // monotonic bitmap nonce
+    }
+  },
+  // signQuote re-enforces I10 + below-pool before publish; you only ship valid quotes.
+  publish: async (envelope) => {
+    await fetch(`${ENGINE_URL}/quote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        quote: encodeQuote(envelope.quote), // bigints → decimal strings on the wire
+        signature: envelope.signature,
+      }),
+    })
+  },
+  onError: (err) => console.warn('requote skipped this tick:', err),
+})
+
+// 3. Monitor capacity + fills (coarse on-chain until the subgraph indexes QuoteFilled).
+const fills = mm.watchFills(MM_ADDRESS, async (fill) => {
+  const cap = await mm.capacityRemaining(MY_QUOTE_ID, 1_000_000_000_000n)
+  if (cap.available && cap.exhausted) handle.stop() // quote fully consumed; stop requoting
+})
+
+// 4. Withdraw cleanly: cancel the live nonce on-chain, then stop the streams.
+async function shutdown() {
+  await mm.cancelNonces([currentNonce()]) // selective cancel — kills exactly this quote
+  handle.stop()
+  fills.stop()
+}
+```
+
+What each step buys you, restated as the rail's economics:
+
+<Steps>
+  <Step title="Geometry-free floor">
+    `quoteStream` reads `getPoolLoadToBeat` every tick — the one number that decides
+    whether to compete, no NFT needed (MaxIL fungibility in action).
+  </Step>
+  <Step title="Strict undercut + guards">
+    `loadBps` is set below the live floor; `signQuote` re-enforces I10 (≤ cap) and
+    below-pool (strict beat) before signing, so you never ship a quote that cannot win
+    or would revert on-chain.
+  </Step>
+  <Step title="Firm, short-TTL publish">
+    Each quote is GTD for `[5,15]s` and re-issued every 5 s — firm with no last-look,
+    protected by the I9 band + the bitmap nonce.
+  </Step>
+  <Step title="On-chain authority">
+    Capacity (I7) and collateral (I5) live on-chain; the engine's view is advisory. A
+    fill locks the MM's own collateral and pays the LP from it at settlement.
+  </Step>
+</Steps>
+
+## The two separate claims
+
+The MM rail changes neither guarantee. The settlement core enforces the LP-facing
+guarantee identically for both rails:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to the underwriter — on Path B, the
+market maker posting collateral in its own `UnderwriterVault`:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quote signing reference" icon="key" href="/integrate/quote-signing">
+    The canonical EIP-712 domain, type-string, and verify/recover helpers.
+  </Card>
+  <Card title="The engine" icon="server" href="/integrate/engine">
+    The Path-B relayer: WS protocol, `GET/POST /quote`, the freshness gate.
+  </Card>
+  <Card title="Path B in the protocol" icon="signature" href="/protocol/path-b-mm">
+    The on-chain `createSwap` gate, capacity (I7), and the no-last-look protections.
+  </Card>
+  <Card title="The cvamm port" icon="calculator" href="/sdk/cvamm-port">
+    Why the load stack is mirrored off-chain, parity-locked, while the Φ-sum is read on-chain.
+  </Card>
+  <Card title="MmClient API types" icon="code" href="/sdk-reference/mm">
+    The full typed signatures: PoolLoadTick, MmMarketPricing, SignQuoteResult, NonceStatus.
+  </Card>
+  <Card title="Quote helpers" icon="signature" href="/sdk-reference/quote-helpers">
+    encodeQuote / decodeQuote / quoteDigest / verifyQuote signatures.
+  </Card>
+</CardGroup>

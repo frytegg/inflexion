@@ -1,0 +1,599 @@
+---
+title: "The engine — the Path-B quote relayer"
+description: "@inflexion/engine is a thin, framework-free relayer that streams firm EIP-712 MM quotes, serves the cheapest live load per market, and captures the two day-one moat signals — it never settles, never matches custody, and never holds a wallet."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+`@inflexion/engine` is the off-chain service that powers the **optional**
+[Path-B (market-maker) rail](/protocol/path-b-mm). It is deliberately thin: a
+framework-free `node:http` process whose entire job is to relay firm, signed MM quotes
+to LPs and to capture the two off-chain halves of the [data moat](/concepts/data-moat).
+It is **pure upside** — if no MM is ever connected, the [cvAMM pool (Path A)](/protocol/path-a-cvamm)
+still clears every position with no relayer in the loop.
+
+<CardGroup cols={3}>
+  <Card title="Streams firm quotes" icon="signature">
+    MMs push EIP-712 signed quotes over WebSocket; the relayer verifies, freshness-gates,
+    and stores the latest per `(market, MM)`.
+  </Card>
+  <Card title="Serves the price-to-beat" icon="tags">
+    `GET /quote` returns the **cheapest currently-valid** quote (lowest `loadBps`) — a
+    load, never a dollar premium.
+  </Card>
+  <Card title="Captures day-one signals" icon="database">
+    Latent demand (Signal 4) and quote competition (Signal 2) are logged to append-only
+    JSONL — they are *unreconstructable retroactively*.
+  </Card>
+</CardGroup>
+
+## What it is — and what it deliberately is NOT
+
+The engine surrounds the on-chain core; it is never in the trust path. The chain is the
+authority for matching, pricing, and settlement.
+
+<Warning>
+**The relayer never settles, never matches custody, and never holds a wallet.**
+
+- **Limit:** the engine returns a *signed quote + its `loadBps`*, **not** a dollar
+  premium, and it has no signer, no key, and no settlement path.
+- **Why:** the final premium is **position-specific** and is derived **on-chain** at
+  `createSwapRouted` as `FairPremium · (1 + loadBps)`.
+  The relayer cannot compute the dollar premium without the LP's exact position geometry
+  plus an RPC read of `FairPremium`. Pushing matching or settlement
+  off-chain would reintroduce trust.
+- **Mitigation (by construction):** keeping match/settle on-chain is precisely what makes
+  the [no-bad-debt guarantee](/concepts/no-bad-debt) hold. The engine is a convenience +
+  data surface only.
+</Warning>
+
+The three things it *does* do:
+
+<Steps>
+  <Step title="Accept and verify firm quotes">
+    Take EIP-712 signed quotes streamed by an MM over **WebSocket**, verify the signature
+    plus a light freshness gate, and store the latest per `(market, MM)`.
+  </Step>
+  <Step title="Serve the cheapest live quote">
+    Answer `GET /quote?marketId=…` with the lowest-`loadBps` quote that is not expired —
+    the *price-to-beat* the LP sees before going on-chain.
+  </Step>
+  <Step title="Capture the two day-one moat signals">
+    Append latent demand (Signal 4) and quote competition (Signal 2) to JSONL sinks that
+    are otherwise impossible to reconstruct after the fact.
+  </Step>
+</Steps>
+
+<Note>
+**Why Path A needs no engine at all.** Path A — the [cvAMM pool](/protocol/path-a-cvamm) —
+is always-on and signature-free; a pooled vault underwrites with no relayer involved.
+The engine exists **only** so a sophisticated MM can compete on
+price against the pool. [`createSwapRouted`](/protocol/routing) then gives the LP the
+cheaper of `{pool, MM quote}`, and falls back to the pool whenever no MM is connected.
+</Note>
+
+## Configuration — environment variables
+
+The process reads its config from env and starts the relayer:
+
+| Env var | Default | Meaning |
+| ------- | ------- | ------- |
+| `PORT` | `8787` | HTTP + WS listen port |
+| `CHAIN_ID` | `421614` (Arbitrum Sepolia) | EIP-712 domain `chainId` |
+| `VERIFYING_CONTRACT` | registry `core.inflexionCore` | EIP-712 `verifyingContract` = `InflexionCore` |
+| `QUOTE_LOG` | unset | append-only JSONL of *accepted* quotes |
+| `DEMAND_LOG` | unset | **day-one** Signal-4 latent-demand JSONL |
+| `COMPETITION_LOG` | unset | **day-one** Signal-2 quote-competition JSONL |
+
+`VERIFYING_CONTRACT` and `CHAIN_ID` default from the **deployment registry**, never
+hardcoded: the engine reads the on-chain address registry directly. The engine cannot import
+[`@inflexion/sdk`](/sdk/overview) — the SDK depends on the engine, which would be a cycle.
+
+<Warning>
+**`DEMAND_LOG` and `COMPETITION_LOG` must be set from the very first deploy.**
+
+- **Limit:** if either sink is unconfigured, that signal is silently *not* captured.
+- **Why:** these two signals are **unreconstructable retroactively** — unfilled or
+  previewed interest never reaches the chain ([invariant I7](/security/invariants): an
+  unchosen quote touches no nonce/capacity), so it leaves no on-chain trace by design.
+  If it is not logged now, it is gone forever.
+- **Mitigation:** configure both sinks on day one, long before any `/data` endpoint,
+  subgraph, or API exists to serve them. See [the telemetry sinks](#the-day-one-telemetry-sinks).
+</Warning>
+
+<Tip>
+A stale **hardcoded** core would sign quotes against a *dead EIP-712 domain*, and
+on-chain `createSwapRouted` would then reject **every** Path-B fill.
+Reading the live registry is what keeps the off-chain domain in lockstep with the
+deployed `InflexionCore`. The current default resolves through the
+[deployment registry](/reference/deployments) — never inline an address.
+</Tip>
+
+Startup logs the four surfaces; `SIGINT`/`SIGTERM` trigger a graceful
+`close()` that shuts the WS server, then the HTTP server.
+
+## The on-the-wire unit — `SignedQuote`
+
+The `SignedQuote` module is the **single source of truth** for how a Path-B MM
+signs a quote and how anyone verifies it off-chain. The field order, types, and the
+domain `("Inflexion", "1")` **must match `InflexionCore.SignedQuote` /
+`SIGNED_QUOTE_TYPEHASH` exactly**, or on-chain verification in
+`createSwap`/`createSwapRouted` rejects the signature. Both the SDK and
+the [MM bot](#the-example-mm-bot) import this module.
+
+The EIP-712 domain is `{ name: 'Inflexion', version: '1', chainId, verifyingContract }`.
+The 13 quote fields, in struct/field/signing order:
+
+| Field | Solidity type | TS type | Meaning |
+| ----- | ------------- | ------- | ------- |
+| `mm` | `address` | `Address` | MM signer; the recovered signer must equal this |
+| `marketId` | `bytes32` | `Hex` | the market this quote is for (**per-market, never per-NFT**) |
+| `loadBps` | `uint16` | `number` | spread over the on-chain `FairPremium`; capped at `loadParams.maxLoadBps` |
+| `minMaxILRatioBps` | `uint16` | `number` | lower bound of the accepted MaxIL-ratio band |
+| `maxMaxILRatioBps` | `uint16` | `number` | upper bound of the accepted MaxIL-ratio band |
+| `quotePrice` | `uint128` | `bigint` | oracle price the MM signed against — anchors the Fork-2 band check |
+| `priceBandBps` | `uint16` | `number` | ± band around `quotePrice` the MM tolerates |
+| `model` | `uint8` | `number` | `CollateralModel`: `FULL=0`, `PARTIAL=1` (FULL is the only v1 mode) |
+| `partialRatioBps` | `uint16` | `number` | PARTIAL only (0 in FULL) |
+| `maxNotionalV0` | `uint128` | `bigint` | capacity ceiling (notional `V0` the MM will fill against this quote) |
+| `validUntil` | `uint64` | `bigint` | absolute GTD expiry timestamp |
+| `quoteId` | `bytes32` | `Hex` | the MM's logical quote identifier |
+| `nonce` | `uint256` | `bigint` | bitmap nonce — a cancelled bit cannot fill (invariant I7) |
+
+The canonical type-string is mirrored in `SIGNED_QUOTE_TYPE_STRING`
+and is byte-identical to `InflexionCore.SIGNED_QUOTE_TYPEHASH`'s pre-image.
+
+<Info>
+**The quote is PER-MARKET, not per-NFT — and that is load-bearing.** [MaxIL](/concepts/maxil)
+is pure geometry, frozen at creation, and L-independent in the fair-rate sense, which
+makes positions **fungible** to an underwriter within a market. So an MM quote is a
+*load + a MaxIL-ratio band + capacity* — `loadBps` + `[minMaxILRatioBps, maxMaxILRatioBps]`
++ `maxNotionalV0` — never tied to one position. The `SignedQuote` carries **no `tokenId`**.
+</Info>
+
+### Signing and verifying
+
+The four helpers:
+
+<ParamField path="quoteDigest(quote, chainId, vc)" type="Hex">
+  The EIP-712 digest `_hashTypedDataV4(hashQuote(q))` that the contract computes.
+</ParamField>
+<ParamField path="signQuote(privateKey, quote, chainId, vc)" type="{ quote, signature }">
+  Produces the signed envelope.
+</ParamField>
+<ParamField path="recoverQuoteSigner(env, …)" type="Address">
+  Recovers the EOA signer from a `{ quote, signature }` envelope.
+</ParamField>
+<ParamField path="verifyQuote(env, …)" type="boolean">
+  **True iff** the signature recovers to `quote.mm`, case-insensitively.
+  This is the **EOA path**; EIP-1271 contract signers are verified **on-chain only**.
+</ParamField>
+
+<Note>
+**Wire codec.** `bigint` is not JSON-serializable, so the WS
+protocol and the JSONL logs encode every `uint128/uint64/uint256` field as a **decimal
+string**. `encodeQuote(q)` produces the `QuoteWire` (bigints → strings); `decodeQuote(w)`
+parses them back. The small `uint16/uint8` fields stay JS `number` (always `< 2^53`,
+safe).
+</Note>
+
+## On-chain bounds the off-chain quote must respect
+
+The relayer applies only a **light** freshness gate; the chain re-checks everything. The
+authoritative bounds (from `InflexionCore`) a quote must satisfy or
+[`createSwapRouted`](/protocol/routing) reverts / falls back to Path A:
+
+<AccordionGroup>
+  <Accordion title="Validity window — validUntil − now ∈ [5, 15] s" icon="clock">
+    `VALIDITY_MIN_S = 5`, `VALIDITY_MAX_S = 15`, with `validUntil` bounded on-chain to
+    now + [5, 15] s. The [MM bot](#the-example-mm-bot) uses `TTL = 10s` and re-issues
+    every 5s, comfortably inside the window.
+
+    **Why so short:** firm GTD quotes with a tiny TTL plus an oracle-anchored band are the
+    **no-last-look** design — the MM cannot pick off stale prices, and a stale quote
+    simply voids itself.
+  </Accordion>
+  <Accordion title="Price band — priceBandBps ∈ [25, 500] bps" icon="ruler-horizontal">
+    `PRICE_BAND_MIN_BPS = 25` (0.25%), `PRICE_BAND_MAX_BPS = 500` (5%).
+    At `createSwap` the contract reverts iff
+    $\lvert\text{absBps}(P_{\text{live}}, \text{quotePrice})\rvert > \text{priceBandBps}$
+    (invariant [I9](/security/invariants) / [Fork 2](/security/forks)). The band check
+    **reuses the same oracle read that pinned `P0`**, so it is [non-circular](/security/price-pinning).
+  </Accordion>
+  <Accordion title="Routing fallback — never revert on a bad quote" icon="code-branch">
+    During [routing](/protocol/routing), an expired / over-band / under-collateralised
+    quote causes `_tryQuote`-style logic to **fall back to Path A, never revert**.
+    Only the executed rail mutates nonce/capacity/lock (I7).
+  </Accordion>
+</AccordionGroup>
+
+## The WebSocket protocol (MM → relayer)
+
+The WS server is attached to the same HTTP server
+(`new WebSocketServer({ server: http })`). The MM streams messages; the relayer replies
+per message. Inbound shape:
+
+```json
+{ "type": "quote", "quote": "<QuoteWire>", "signature": "0x..." }
+```
+
+Handling runs a strict ladder:
+
+<Steps>
+  <Step title="Parse">
+    Non-JSON → `{ "type": "error", "error": "invalid json" }`.
+  </Step>
+  <Step title="Shape check">
+    Missing `type:'quote'` / `quote` / `signature` →
+    `{ "type": "error", "error": "expected {type:'quote', quote, signature}" }`.
+  </Step>
+  <Step title="Address check">
+    `quote.mm` not a valid address → `{ "type": "error", "error": "bad mm address" }`.
+  </Step>
+  <Step title="Freshness gate">
+    `freshnessOk` rejects if `validUntil ≤ now` (already expired)
+    **or** `validUntil > now + maxValiditySkewS` (dated too far out; default
+    `maxValiditySkewS = 60s`). On failure: logs the quote as a *loser*
+    and replies `{ "type": "rejected", "reason": "stale-or-far-validUntil" }`.
+  </Step>
+  <Step title="Signature verify">
+    `verifyQuote` (EIP-712 recover). On failure: logs as loser, replies
+    `{ "type": "rejected", "reason": "bad-signature" }`.
+  </Step>
+  <Step title="Accept">
+    Logs as *winner/candidate*, stores the latest per `(market, MM)`, replies
+    `{ "type": "ack", "marketId": "0x...", "loadBps": 500 }`.
+  </Step>
+</Steps>
+
+**Reply taxonomy:** `ack` (accepted), `rejected` (freshness or signature failure, with a
+`reason`), `error` (malformed message). Logging is **best-effort and never blocks the
+ack**.
+
+<Note>
+**The freshness gate is intentionally non-authoritative** — "the chain
+re-checks everything." The relayer's `maxValiditySkewS = 60s` is *looser* than the
+on-chain `[5, 15]s` window; that is deliberate. The relayer's job is only to drop obvious
+junk and keep the store clean, while the chain is the real gate (see
+[on-chain bounds](#on-chain-bounds-the-off-chain-quote-must-respect)).
+</Note>
+
+## HTTP endpoints (relayer)
+
+CORS is open on every route (`Access-Control-Allow-Origin: *`,
+`Allow-Methods: GET, POST, OPTIONS`, `Allow-Headers: content-type`); preflight `OPTIONS`
+returns `204`. **Why CORS-open:** the browser dApp is a different
+origin and must both *read* `GET /quote` (the SDK's `previewPremium`) and *publish*
+`POST /quote` (browser-side MM signing).
+
+### `GET /health`
+
+Sink + market status:
+
+```json
+{ "ok": true,
+  "markets": 3,
+  "telemetry": { "demand": true, "competition": true } }
+```
+
+`markets` = number of markets currently holding ≥1 quote (`store.marketCount()`);
+`telemetry.*` reflects whether each sink path is configured.
+
+### `GET /quote?marketId=0x…` — the cheapest live quote
+
+The taker-side read:
+
+- `marketId` **must** be a bytes32 hex (`/^0x[0-9a-fA-F]{64}$/`); else `400`
+  `{ "error": "marketId (bytes32 hex) required" }`.
+- **Logs the request as latent demand** *before* answering (Signal 4, best-effort, never
+  blocks).
+- Looks up `store.best(marketId, now)` = the **cheapest currently-valid** quote (lowest
+  `loadBps`, not expired).
+- No live quote → `404` `{ "error": "no live quote for market", "marketId": "0x…" }`.
+- Hit → `200`:
+
+```json
+{ "quote": "<QuoteWire>",
+  "signature": "0x...",
+  "loadBps": 500,
+  "note": "premium is FairPremium*(1+loadBps), derived on-chain at createSwapRouted" }
+```
+
+The `note` is the canonical reminder that the relayer returns a
+**load**, not a dollar premium.
+
+### `POST /quote` — browser-friendly publish
+
+Same verify + freshness + store as the WS path, for browser MMs that cannot hold a
+persistent socket. Body is read up to **8192 bytes**:
+
+```json
+{ "quote": "<QuoteWire>", "signature": "0x..." }
+```
+
+Outcomes:
+
+| Outcome | Status | Body |
+| ------- | ------ | ---- |
+| bad body | `400` | `{ "error": "<reason>" }` |
+| missing `quote`/`signature` | `400` | `{ "error": "expected { quote, signature }" }` |
+| bad `mm` | `400` | `{ "error": "bad mm address" }` |
+| stale/far `validUntil` | `422` | `{ "rejected": true, "reason": "stale-or-far-validUntil" }` (logs loser) |
+| bad signature | `422` | `{ "rejected": true, "reason": "bad-signature" }` (logs loser) |
+| accepted | `200` | `{ "ok": true, "marketId": "0x…", "loadBps": 500 }` (logs winner, stores) |
+
+<Note>
+The HTTP path uses `422` for verify/freshness rejections versus the WS path's
+`{ type:'rejected' }` message; **both record the same telemetry reason**.
+</Note>
+
+### `POST /telemetry/preview` — the Signal-4 demand ping
+
+The SDK's `previewPremium` best-effort POST. Body is read up to **4096 bytes**
+and carries **only bucketed geometry + marketId** — no PII:
+
+```json
+{ "marketId": "0x...",
+  "widthBucket": "tight",
+  "distanceBucket": "at-edge",
+  "durationBucket": "week",
+  "previewedPremium": "777" }
+```
+
+- valid marketId → `202 { "ok": true, "logged": true }` — `logged:false` when no sink is
+  configured.
+- missing/invalid marketId → `400 { "ok": false, "reason": "marketId (bytes32 hex) required" }`.
+
+It **always 202-acks fast and never blocks the preview** — a telemetry failure is
+reported as `logged:false`, never an exception.
+
+Unmatched routes → `404 { "error": "not found" }`.
+
+## The day-one telemetry sinks
+
+**The core WHY — the data moat.** On-chain we *only ever observe realized fills*.
+Everything an LP priced but did not buy (**[Signal 4](/moat/five-signals) — latent
+demand**) and every MM quote that lost or was withdrawn (**[Signal 2](/moat/five-signals)
+— the dynamic quote-competition half**) leaves *no on-chain trace by design* — invariant
+[I7](/security/invariants): an unchosen quote touches no nonce/capacity. If it is not
+logged now, it is gone forever. These two signals must be captured from the very first interaction, long
+before any `/data` endpoint, subgraph, or API exists to serve them.
+
+<Warning>
+**Telemetry writes are best-effort and never throw.**
+
+- **Limit:** a full disk, a bad path, or a missing sink means a write can silently fail.
+- **Why:** a telemetry write must never break a quote `ack`, a preview, or a `GET /quote`
+  request — graceful degradation is a first-class property.
+- **Mitigation:** the writer (`appendJsonl`) is wrapped so it
+  **never throws**; on failure the surface reports `logged:false` rather than erroring,
+  and the request completes normally. Storage is **append-only JSONL** (one JSON object
+  per line), mirroring the accepted-quote log in the quote store.
+</Warning>
+
+**Privacy-preserving geometry buckets** — the SDK computes these
+client-side and POSTs only the labels; the logs hold *no raw geometry, no tokenId, no
+addresses*:
+
+| Bucket | Values | Meaning |
+| ------ | ------ | ------- |
+| `WidthBucket` | `tight \| medium \| wide \| full \| unknown` | tick-span of the LP range |
+| `DistanceBucket` | `at-edge \| near \| mid \| deep \| unknown` | how near spot is to going out of range |
+| `DurationBucket` | `hour \| day \| week \| month \| longer \| unknown` | `expiry − createdAt` |
+
+Unknown/invalid input coerces to `'unknown'` (`asWidthBucket` etc.).
+
+### Demand log (Signal 4) — `DEMAND_LOG` → `DemandRecord`
+
+Written on **every `GET /quote` request** and **every `POST /telemetry/preview` ping**.
+`filled` is **always `false`** at write time — this log is
+exactly the demand the chain never sees. Realized fills are
+reconstructed later from on-chain `SwapCreated`/`SwapPriced`.
+
+```jsonc
+{ "ts": 1900000000,
+  "marketId": "0x…",            // bytes32, lowercased
+  "widthBucket": "tight",
+  "distanceBucket": "at-edge",
+  "durationBucket": "week",
+  "previewedPremium": "777",    // optional decimal string; absent for a bare /quote
+  "filled": false,              // ALWAYS false — the latent/unfilled half
+  "source": "preview" }         // "preview" | "quote-request"
+```
+
+- `logQuoteRequest(marketId, now)` — emitted by `GET /quote`; buckets are `'unknown'`
+  (a bare lookup carries no geometry), `source: 'quote-request'`.
+- `ingestPreview(input, now)` — emitted by `POST /telemetry/preview`; validates and
+  normalizes the loosely-typed body, `source: 'preview'`. `normalizeMarketId` requires
+  bytes32 hex; `normalizePremium` coerces a string/number/bigint into a
+  bigint-safe decimal string or drops it. Returns `{ ok, logged, reason? }`.
+
+### Competition log (Signal 2) — `COMPETITION_LOG` → `CompetitionRecord`
+
+Written for **every** inbound WS quote — **winners AND losers** (`logQuote`),
+called from both the WS handler and `POST /quote`.
+
+```jsonc
+{ "ts": 1900000000,
+  "marketId": "0x…",            // bytes32, lowercased
+  "mm": "0x…",                  // MM address, lowercased
+  "loadBps": 500,
+  "validUntil": "1900000010",   // uint64 as decimal string
+  "accepted": true,             // true iff stored as a live candidate (verify+freshness passed)
+  "reason": "bad-signature" }   // present only when accepted=false (mirrors the WS rejection)
+```
+
+<Info>
+**Why log losers too.** Only ever logging the *latest stored* quote (as the quote store does)
+loses the competition — who else quoted, how wide, who widened or withdrew under stress.
+The chain only sees the realized fill, so the full competing field
+is captured **only here**. `accepted` marks whether the relayer stored it as a candidate
+(signature + freshness valid); a *rejected* quote still competed and is still logged.
+</Info>
+
+`get demandEnabled` / `get competitionEnabled` report whether
+each sink path is configured, and are surfaced in `/health`.
+
+<Maturity />
+
+## The quote store
+
+An in-memory map `marketId(lc) → mm(lc) → { env, receivedAt }` — the
+**latest quote per `(market, MM)`**, with an optional append-only JSONL log (`QUOTE_LOG`):
+
+- `put(env, now)` — store/replace the latest for its `(market, MM)`; if `logPath` is set,
+  append `{ t, quote, signature }` as JSONL.
+- `best(marketId, nowSec)` — the **cheapest currently-valid** quote = lowest `loadBps`
+  among quotes whose `validUntil > now`. This is the *price-to-beat*
+  the LP sees; the on-chain router still re-derives everything.
+- `marketCount()` — number of markets with ≥1 quote.
+
+<Warning>
+**Engine scope — what is intentionally not built yet.**
+
+- **Limit:** no auth, no rate-limit, and no persistence beyond the JSONL log; the
+  definitive Stylus≡Solidity≡off-chain digest cross-check is a dedicated integration test.
+- **Why:** the engine is a *thin convenience surface*, not the trust path — the chain
+  re-verifies the signature, the validity window, and the price band on every fill, so
+  abuse of the relayer cannot produce an invalid on-chain swap.
+- **Mitigation:** the store keys per MM, so multi-MM already works; the JSONL log gives
+  durable telemetry; and the digest cross-check is scheduled as a dedicated integration
+  test rather than left implicit.
+</Warning>
+
+## The example MM bot
+
+The example MM bot is a reference bot that signs a fresh `SignedQuote` on a
+loop and streams it over WS, demonstrating the firm-quote / short-TTL model: each quote is
+GTD (`validUntil = now + ttl`) and simply re-issued; the MM "cancels" by *not refreshing*
+— and the on-chain oracle band voids any stale quote.
+
+- `TTL_S = 10`, `REISSUE_MS = 5000` — re-issue every 5s, each valid
+  10s, always inside the on-chain `[5, 15]s` window.
+- Env: `MM_PRIVATE_KEY` (required), `MARKET_ID` (required), `ENGINE_WS`
+  (default `ws://localhost:8787`), `CHAIN_ID` (`421614`), `VERIFYING_CONTRACT`,
+  `QUOTE_PRICE`, `LOAD_BPS` (default `500` = 5%).
+- Default quote: `minMaxILRatioBps=0`, `maxMaxILRatioBps=10000`
+  (accept any MaxIL ratio), `priceBandBps=100` (1%, inside `[25,500]`), `model=FULL`,
+  `maxNotionalV0 = 2^128−1` (unbounded capacity), monotonically incrementing `nonce`.
+
+<Tip>
+The bot is the canonical reference for how to wire an MM against the relayer. For the SDK
+client that wraps signing + streaming for you, see the [MM client](/sdk/mm-client) and
+[quote signing](/integrate/quote-signing).
+</Tip>
+
+## Worked examples — curl + wscat
+
+<CodeGroup>
+```bash GET /health
+# Sink status — which telemetry halves are configured
+curl -s http://localhost:8787/health
+# → {"ok":true,"markets":1,"telemetry":{"demand":true,"competition":true}}
+```
+
+```bash GET /quote
+# Cheapest live quote for a market (taker side)
+curl -s 'http://localhost:8787/quote?marketId=0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2'
+# → 200 {"quote":{...},"signature":"0x...","loadBps":500,"note":"premium is FairPremium*(1+loadBps)..."}
+# → 404 {"error":"no live quote for market","marketId":"0x..."} when nothing live
+```
+
+```bash POST /quote
+# Browser-style MM publish (same path as the WS ack)
+curl -s -X POST http://localhost:8787/quote \
+  -H 'content-type: application/json' \
+  -d '{"quote":{"mm":"0x...","marketId":"0x...","loadBps":500,"minMaxILRatioBps":0,"maxMaxILRatioBps":10000,"quotePrice":"0","priceBandBps":100,"model":0,"partialRatioBps":0,"maxNotionalV0":"340282366920938463463374607431768211455","validUntil":"1900000010","quoteId":"0x...","nonce":"0"},"signature":"0x..."}'
+# → 200 {"ok":true,"marketId":"0x...","loadBps":500}
+```
+
+```bash POST /telemetry/preview
+# Day-one demand ping (SDK previewPremium; buckets only, no PII)
+curl -s -X POST http://localhost:8787/telemetry/preview \
+  -H 'content-type: application/json' \
+  -d '{"marketId":"0x...","widthBucket":"tight","distanceBucket":"at-edge","durationBucket":"week","previewedPremium":"777"}'
+# → 202 {"ok":true,"logged":true}
+```
+
+```bash WS stream (wscat)
+# MM streams firm quotes over WebSocket
+wscat -c ws://localhost:8787
+# > {"type":"quote","quote":<QuoteWire>,"signature":"0x..."}
+# < {"type":"ack","marketId":"0x...","loadBps":500}
+#   or {"type":"rejected","reason":"stale-or-far-validUntil"|"bad-signature"}
+#   or {"type":"error","error":"invalid json"|"bad mm address"|...}
+```
+</CodeGroup>
+
+## How the engine fits the end-to-end flow
+
+The relayer is step 1 (and part of step 2) of the create→settle lifecycle:
+
+<Steps>
+  <Step title="MM streams a firm quote">
+    The MM pushes `{type:'quote', quote, signature}` over WS. The relayer verifies
+    EIP-712 + freshness, stores it as the cheapest-per-market candidate, and logs it to
+    `COMPETITION_LOG` as a winner.
+  </Step>
+  <Step title="LP previews">
+    The SDK's `previewPremium` reads the *live* pool-load surface (via RPC or the API
+    `/pool/load-surface`) and `GET /quote` (the cheapest MM load), then best-effort POSTs
+    `/telemetry/preview` (logged to `DEMAND_LOG`).
+  </Step>
+  <Step title="LP buys on-chain">
+    The LP calls [`createSwapRouted`](/protocol/routing) on `InflexionCore`. The chain
+    re-derives `FairPremium` ([the Φ-sum](/math/fair-value-phi-sum) from the Stylus
+    `FairValueOracle`), re-checks the validity window `[5,15]s`, the price band (I9), the
+    nonce (I7), and routes to the **cheaper of `{cvAMM pool, MM quote}`**; an invalid quote
+    falls back to Path A, never reverts.
+  </Step>
+  <Step title="Settlement">
+    The protocol pays the LP `min(realized_IL, MaxIL)` trustlessly from the chosen
+    underwriter's collateral. The relayer is never in this path.
+  </Step>
+</Steps>
+
+The 2026-06-05 lifecycle ran both rails: Path A (cvAMM, swap #1, premium \$9.70 =
+0.58% of MaxIL, payout \$148.64) and Path B (MM beat the pool, swap #2, MM load 1000 bps,
+payout \$245.66 from MM collateral).
+
+## The two separate claims
+
+The engine relays quotes and captures demand; the on-chain core enforces the guarantees.
+Routing through the engine changes *who underwrites and at what price*, never *whether the
+LP is paid*:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to whoever ends up on the other side — the
+[pool's depositors](/concepts/tranches) on Path A, or the market maker on Path B:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Path B — the MM rail" icon="signature" href="/protocol/path-b-mm">
+    Firm EIP-712 quotes, no last-look, and the three on-chain protections.
+  </Card>
+  <Card title="createSwapRouted" icon="code-branch" href="/protocol/routing">
+    How the chain prices both rails off one FairPremium and never reverts on a bad quote.
+  </Card>
+  <Card title="Quote signing" icon="pen-nib" href="/integrate/quote-signing">
+    The EIP-712 type-string, digest, and the Stylus≡Solidity≡off-chain parity check.
+  </Card>
+  <Card title="The MM client (SDK)" icon="robot" href="/sdk/mm-client">
+    The typed client that wraps quote signing + WS streaming for you.
+  </Card>
+  <Card title="The public REST API" icon="server" href="/integrate/api-overview">
+    The read-only facade that reads the engine's telemetry sinks for the moat surfaces.
+  </Card>
+  <Card title="The data moat — five signals" icon="database" href="/moat/five-signals">
+    Where latent demand (4) and quote competition (2) land in the full taxonomy.
+  </Card>
+</CardGroup>

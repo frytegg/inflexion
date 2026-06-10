@@ -1,0 +1,240 @@
+---
+title: "The moat thesis"
+description: "The order flow Inflexion generates is itself the product — the first structured view into the microstructure of the DeFi LP volatility-risk premium. Revenue is fees; the data is the moat. We sell the architecture and the first view, not yet a mature dataset."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+## The thesis in one paragraph
+
+The order flow Inflexion generates is a byproduct that is itself a product: **the
+first structured view into the microstructure of the DeFi LP volatility-risk
+premium**. No venue today
+prices the *in-range convexity of a specific Uniswap v3 range*. Inflexion does,
+on-chain — and every fill records **who paid what load, over a transparent
+realized-vol reference, for exactly which position geometry, at which maturity**. The
+aggregate of those choices is a dataset that **cannot exist anywhere else**, because
+no other system is the mechanism that creates it. The data is built passively from
+day one and exposed as **free public APIs** (The Graph subgraph + REST) — **data is
+the moat, not a paywall; revenue is protocol fees**.
+
+<Info>
+**Two sentences, both load-bearing, kept separate.** *Revenue is fees.* The protocol
+earns from the spread it intermediates, not from selling data. *Data is the moat.*
+The defensibility is not access control — the APIs are free and public — it is that
+Inflexion is the only place this market clears, so it is the only place the dataset
+accrues. A competitor cannot buy the dataset; they would have to build the mechanism
+that creates it.
+</Info>
+
+## The honest framing
+
+This block accompanies any data-product claim. A naked "we have the dataset" claim is a defect; the WHY and
+the path-forward travel with it.
+
+> Inflexion is the **first venue that prices the in-range IL convexity of a SPECIFIC
+> Uniswap v3 range**. The five signals below are the first structured view into the
+> **microstructure of the DeFi LP volatility-risk premium**. At launch (1 MM, a
+> handful of fills) we ship the **architecture and the static STRUCTURES** — the
+> term-structure shape, the demand skew by geometry, the net-gamma surface. The full
+> **DYNAMICS** (the pool-vs-MM spread as a forward-vol signal) require **multiple
+> competing MMs** and mature **as volume grows**. We sell the architecture and the
+> first view, not a mature dataset. Every signal surface carries this maturity
+> disclaimer.
+
+<Maturity />
+
+### Limit → Why → Mitigation
+
+The honest framing decomposes into one structural limit with a clear cause and a clear
+path forward:
+
+<Warning>
+**Limit.** At launch — one market maker, a handful of fills — the data is the
+**architecture and the first view**, not a mature dataset. The *dynamic* signals (the
+pool-vs-MM spread read as forward vol; bucketed load *dispersion* across MMs) are
+single-point, not distributions.
+
+**Why.** A spread needs two sides and a distribution needs many draws. With one MM you
+observe *one* undercut, which conflates "the market expects vol to fall" with "this MM
+has cheaper hedges" — two orthogonal drivers that cannot be separated until competing
+MMs exist. And there is no historical realized-IL dataset to calibrate against, *because the
+protocol is the mechanism that creates it*.
+
+**Mitigation / path forward.** Every primitive is captured from day one so the
+dynamics are *reconstructable as volume arrives, never retroactively lost*. The
+on-chain moat events (`SwapPriced`, `QuoteFilled`) are **live now** and stamp the
+dataset's genesis block; the off-chain telemetry sinks (`DEMAND_LOG`,
+`COMPETITION_LOG`) are **capturing from the first interaction** — and that latent /
+dynamic data is *unreconstructable retroactively* by [invariant I7](/security/invariants),
+which is exactly why it is logged now. The
+structures sharpen into dynamics with `≥3` competing MMs and `~30–50` fills per bucket
+— weeks-to-months at launch flow, not a redesign.
+</Warning>
+
+## The implied-vol-inversion idea was dropped as circular
+
+The moat's credibility rests on **not being circular**. An earlier draft framed the
+product as "infer implied volatility by inverting `fairRate`". **That idea is DROPPED
+as circular** — and we explain *why* on purpose, because
+demonstrating the rigor is itself part of the moat.
+
+Every premium in the protocol is, by construction:
+
+$$
+\frac{\text{charged premium}}{\text{MaxIL}} \;=\; \text{fairRate}(\sigma_{\text{ref}})\,\bigl(1 + \text{load}\bigr)
+$$
+
+Here `fairRate` is the protocol's *own* published closed form — [the Phi-sum](/math/fair-value-phi-sum),
+computed by the Stylus `FairValueOracle` — and `σ_ref` is the protocol's *own*
+published realized-vol oracle. So inverting `fairRate` from the charged premium:
+
+$$
+\sigma_{\text{implied}} \;=\; \text{fairRate}^{-1}\!\left(\frac{\text{charged}}{\text{MaxIL}\,(1+\text{load})}\right) \;=\; \sigma_{\text{ref}}
+$$
+
+recovers **nothing but our own published `σ_ref`** (plus our own dealer load stack).
+It tells an outside observer of our oracle exactly what they already knew. That is not
+a market-implied vol — **it is a tautology.**
+
+<Note>
+**The fix — reframe the moat around behavior, not derivation.** A number is a signal
+only if it comes from a free CHOICE the protocol does *not* compute, **measured
+against** the transparent mechanical baseline, never *derived from* it. The behavioral
+degrees of freedom are the MM's freely chosen `loadBps` (Path B) and the LP's
+geometry/duration choice. The full circular-vs-behavioral treatment, signal by signal,
+lives at [/moat/circular-vs-behavioral](/moat/circular-vs-behavioral).
+</Note>
+
+The non-circularity decision table:
+
+| Source of the number | Circular? | Why |
+| --- | --- | --- |
+| MM-signed `quote.loadBps` (Path B) | **NO** | An external actor's free choice; the protocol does not compute it. Capped only by `loadParams.maxLoadBps` (I10). |
+| Which `tokenId` an LP brings + duration chosen | **NO** | LP demand choice; the protocol does not pick the geometry. |
+| Path-A pool load `totalLoadWad(σ_ref, util, conc)` | **YES** | Pure deterministic function of protocol state. Inverting it recovers our own formula. Kept as the **mechanical baseline / "price-to-beat"**, not a behavioral signal. |
+| `fairRate(a, b, σ_ref, T)` | **YES** | Our own published closed form — the dropped IV-inversion idea. |
+
+**The rule, stated verbatim:** a signal
+is non-circular **iff** its informative degrees of freedom come from the MM's
+`loadBps` or the LP's geometry/duration choice — measured AGAINST the transparent
+mechanical baseline, not derived from it.
+
+## What the dataset actually is
+
+The defensible asset is the join of three things no other system holds together,
+atomically, per fill:
+
+1. **The behavioral load** — the markup the actor freely chose above the protocol's
+   [published fair value](/concepts/fair-value): the MM's `QuoteFilled.loadBps` on
+   Path B (the single non-circular load datum).
+2. **Over a transparent reference** — the on-chain realized-vol oracle
+   [σ_ref](/math/sigma-ref), stamped on every fill via `SwapPriced.sigmaRefWad`, so
+   the load *above* it is a well-defined, identifiable quantity rather than a
+   back-solved, non-identifiable "implied σ".
+3. **For exactly which geometry** — the specific position's width × distance-to-edge ×
+   duration, recovered off-chain by decoding the swap's `tokenId` via
+   `NPM.positions(tokenId)` at the `SwapCreated` block, plus `expiry − createdAt`.
+
+[MaxIL](/concepts/maxil) is what makes this legible: because premium is quoted as a
+percent of MaxIL, positions are **fungible** to an underwriter and the load is
+**range-agnostic** (an MM quote is per-MARKET — a load + a MaxIL-ratio band +
+capacity — never per-NFT). That is why bucketing the load by geometry is *informative*
+rather than noisy.
+
+### The five behavioral signals (lead with the verdicts)
+
+The moat is **five non-circular behavioral signals**, each with an explicit
+circularity verdict. Lead with the verdicts — they are the rigor. The deep treatment
+is at [/moat/five-signals](/moat/five-signals).
+
+| # | Signal | Behavioral source | Non-circular? |
+| - | --- | --- | --- |
+| 1 | Realized clearing **load** over a transparent `σ_ref` (bucketed by geometry) | MM `loadBps` vs the pool baseline | **PARTIAL — Path B only** (Path-A pool load is mechanical/circular; keep it as the price-to-beat) |
+| 2 | Pool-vs-MM load **spread** + MM win-rate / win-depth | `poolLoad − mmLoad` (the subtraction removes the circular leg) | **YES — as a spread** |
+| 3 | **Term structure** of convexity (`loadBps` slope across 7/30/90d per range) | MM `loadBps` slope by duration | **PARTIAL** (Path-A load is duration-independent by construction → flat; the slope is an MM signal) |
+| 4 | Moneyness / **demand skew** by geometry | which `tokenId`/duration LPs bring (realized) + unfilled interest (latent) | **PARTIAL** (realized = LP choice → non-circular; latent half is off-chain) |
+| 5 | Net convexity / **gamma supply** (protocol-wide) | `Σ` gamma over the active set | **YES — as a supply/quantity gauge** |
+
+<Warning>
+**Two structural exclusions that travel with every load signal.** (1) The clearing
+load is *CONTAMINATED* by liquidity, smart-contract-risk, capital-lock, and
+inventory-skew premia — **trade the SPREAD (MM − pool), not the level**. (2) **Exclude cap-bound fills**
+(`SwapPriced.cappedAtMaxIL == true`) from Signals 1, 2, and 3 — when `premium ==
+MaxIL` the load was truncated by the cap, so the number you observe is the cap, not the
+actor's load.
+</Warning>
+
+## Why this is a moat and not a feature
+
+<CardGroup cols={2}>
+<Card title="It cannot exist elsewhere" icon="fingerprint">
+No other venue prices the in-range convexity of a *specific* Uniswap v3 range
+on-chain. A competitor cannot license, scrape, or reconstruct the dataset — it accrues
+only at the mechanism that clears the market.
+</Card>
+<Card title="It is captured, not retroactive" icon="clock-rotate-left">
+The latent demand and the losing/withdrawn MM quotes leave **no on-chain trace** by
+[invariant I7](/security/invariants), so they are *unreconstructable later*. The
+telemetry sinks log them from the first interaction — the entire point.
+</Card>
+<Card title="It compounds with flow" icon="chart-line">
+Structures present day-one mature into dynamics as MM competition and volume grow. The
+moat widens with adoption rather than being a fixed deliverable.
+</Card>
+<Card title="The mechanical baseline is the yardstick" icon="ruler">
+The pool's deterministic load is fully reproducible from public getters — which is
+exactly what makes the *behavioral* MM load measurable *against* it. Transparency of
+the baseline is what de-circularizes the signal.
+</Card>
+</CardGroup>
+
+## State of the dataset (as of 2026-06-09)
+
+<Tabs>
+<Tab title="Live now">
+- **On-chain moat events are LIVE.** `SwapPriced` and `QuoteFilled`, plus the on-chain
+  load decomposition `CvammPricing.loadComponents`, shipped in the fresh full redeploy
+  **2026-06-05**. The redeploy
+  block `274081134` is the subgraph `startBlock` — **the on-chain moat dataset begins
+  here**.
+- **Off-chain telemetry is CAPTURING NOW.** `DEMAND_LOG` and `COMPETITION_LOG` write
+  append-only from the first interaction; the SDK `previewPremium` ping fires now. Live deployment addresses: <AddressTable />.
+</Tab>
+<Tab title="Pending (with the why)">
+<Warning>
+**Limit.** The subgraph is built but **not yet deployed** — `SUBGRAPH_URL` is unset,
+so every history/aggregate surface degrades to a typed `pending` state naming its
+future route.
+
+**Why.** This is a *build gap, not a contract gap*. The contracts already emit every
+event the moat needs; the subgraph passes its offline checks (codegen, type-check, and unit tests) and awaits one deploy.
+
+**Mitigation.** History/aggregate routes return a typed `pending` body with the exact
+future GraphQL query embedded — **never an error** — so wiring the API later is a
+one-line body swap. The live RPC and telemetry surfaces serve real data today. See
+[/reference/status-caveats](/reference/status-caveats) and
+[/moat/state-and-limits](/moat/state-and-limits).
+</Warning>
+</Tab>
+</Tabs>
+
+## Where to go next
+
+<CardGroup cols={2}>
+<Card title="The five signals" icon="list-ol" href="/moat/five-signals">
+Each behavioral signal, defined precisely, with its non-circularity verdict, sourcing,
+and maturity caveat.
+</Card>
+<Card title="Circular vs behavioral" icon="rotate" href="/moat/circular-vs-behavioral">
+Why inverting `fairRate` is circular, the decision rule, and the mechanical-vs-behavioral subtraction.
+</Card>
+<Card title="The on-chain primitives" icon="cube" href="/moat/primitives">
+`SwapPriced`, `QuoteFilled`, the load-breakdown library, and why two signals can never
+be on-chain (I7).
+</Card>
+<Card title="State and limits" icon="triangle-exclamation" href="/moat/state-and-limits">
+The honest, framed account of what is live, what is pending, and the path forward for
+each.
+</Card>
+</CardGroup>
