@@ -38,6 +38,10 @@ pnpm --filter @inflexion/backend start
 
 Always-on, $0, persistent telemetry. The stack is [`docker-compose.yml`](../../docker-compose.yml): the combined backend + a [Caddy](./Caddyfile) reverse proxy that obtains **automatic Let's Encrypt HTTPS** — required, because an HTTPS dApp cannot call a plain-HTTP backend (mixed content is blocked).
 
+> **Fast path:** create the VM and add the Security List ingress rules (step 2a below), then on the VM run
+> `git clone https://github.com/frytegg/inflexion.git && cd inflexion && bash scripts/oracle-vm-setup.sh`.
+> The script handles the VM firewall, Docker install, the `.env` scaffold (it pauses once for you to fill in `SUBGRAPH_URL` / `ARBITRUM_SEPOLIA_RPC` / `BACKEND_DOMAIN`), and `docker compose up`. The numbered steps below are the same thing spelled out.
+
 ### 1. Create the VM
 
 Oracle Cloud → Compute → Instances → **Create**. Image **Ubuntu 22.04**; shape **VM.Standard.A1.Flex** (Ampere/ARM, Always Free — e.g. 2 OCPU / 12 GB; fall back to **VM.Standard.E2.1.Micro** if A1 capacity is unavailable). Add your SSH key, create, note the **public IP**.
