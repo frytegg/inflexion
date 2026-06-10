@@ -1,0 +1,284 @@
+---
+title: "Markets browser"
+description: "The fully-live 9-market grid in the app — clearing load (the price-to-beat), pool premium, sigma_ref and regime per row, all from one RPC multicall, with honest per-row degradation."
+---
+
+import AddressTable from '/snippets/address-table.mdx';
+import Maturity from '/snippets/maturity-disclaimer.mdx';
+
+The **`/markets`** page is the action-oriented browser over the protocol's nine
+markets — the same surface a trader scans before choosing a position to
+[protect](/app/protect) or a market to [underwrite](/app/underwrite). **Everything on it
+is live RPC right now**: no subgraph, no engine, no cached snapshot. One multicall, one
+block, nine rows.
+
+<Note>
+This is the **action** market browser. For the conceptual model behind it — why there
+are exactly 9 markets over one vault, how the `marketId` is derived, and the three-way
+parity that pins it — see [Markets &amp; marketId](/protocol/markets). For the public,
+wallet-free *data-moat* heat-matrix of the same clearing-load surface, see
+[`/app/data`](/app/data).
+</Note>
+
+## What the page is
+
+The grid renders the **9 markets** — 3 fee tiers (`0.05% / 0.30% / 1.00%`) crossed with
+3 durations (`7d / 30d / 90d`) — each with its on-chain **clearing load** and **fair
+premium**, read live via an RPC multicall with no indexer in the path. The header
+restates the load-bearing framing — the
+[in-range convexity hedge](/concepts/in-range-convexity-hedge), the
+`min(realized_IL, MaxIL)` cap — and names the clearing load for what it is: *"the Path-A
+pool floor an MM must undercut to win the fill"*.
+
+That last phrase is the whole point of the page. The **clearing load** is the
+**price-to-beat**: the bps markup over [on-chain fair value](/concepts/fair-value) that
+the always-on [cvAMM pool (Path A)](/protocol/path-a-cvamm) charges right now. A
+competing [market maker (Path B)](/protocol/path-b-mm) wins the
+[route](/protocol/routing) only by quoting **strictly below it**. Reading this grid is
+how an MM finds the market where the pool floor is fattest — the most room to undercut
+and still profit.
+
+## The columns, row by row
+
+Each row is one market. The layout:
+
+| Column | What it is |
+| --- | --- |
+| **Market** | label (`fee · duration`) + truncated `marketId` |
+| **σ_ref · regime** | the EWMA reference vol and the regime band it sits in |
+| **Clearing load** | the **price-to-beat**, in bps over fair value (Path-A pool floor) |
+| **Pool premium** | the dollar premium, with a `fair … · cap …` sub-line |
+| **Status** | a badge: live / paused / unregistered / oracle degraded |
+| **Actions** | **Protect** + **Underwrite** links carrying the `marketId` query |
+
+### Clearing load — the price-to-beat
+
+This is the headline number. It is the live Path-A pool **load** in basis points *over*
+the fair premium — the markup the mechanical pool demands today for taking the risk. It
+is the floor a Path-B MM must come in under. Formally the premium an LP pays on the pool
+rail is the [fair premium](/concepts/fair-value) scaled up by the load:
+
+$$
+\text{PoolPremium} = \text{FairPremium}\cdot\Big(1 + \tfrac{\text{clearingLoad}_{\text{bps}}}{10{,}000}\Big),
+\qquad
+\text{FairPremium} = \text{fairRate}\big(\sigma_{\text{ref}}^2\, T\big)\cdot \text{MaxIL}
+$$
+
+The clearing load is itself a stack — a regime **base** floor plus utilization and
+dispersion skews, clamped to the per-market `maxLoadBps` (invariant **I10**). The full
+decomposition lives in [the load stack](/math/load-stack); on `/markets` you see the
+clamped total, which is exactly what an MM has to beat.
+
+<Tip>
+**The fattest clearing load is where the alpha is.** Sort the grid by clearing load and
+the top row is the market where the pool floor is highest — the most bps of room for a
+competing [MM quote](/app/underwrite) to undercut while still being paid for the
+convexity it is short. This is the grid an MM reads before signing a quote.
+</Tip>
+
+### Pool premium — fair · cap
+
+Next to the load, each row shows the **dollar pool premium** for a representative fill,
+with a sub-line breaking it into `fair … · cap …` — the on-chain
+[fair premium](/concepts/fair-value) (the Φ-sum floor) and the
+[MaxIL cap](/concepts/maxil) the premium is a fraction of.
+Premiums are denominated in the **dUSDC numéraire (6 decimals)** — `fmtUsd` divides the
+raw `1_000_000n`-per-dollar integer by `1e6`. MaxIL,
+V0, fair premium and the pool premium are all 6-dec raw on the wire.
+
+### σ_ref · regime
+
+All nine markets share **one** dWETH oracle and **one** σ_ref — the EWMA realized vol
+of the volatile token. σ_ref is a WAD (1e18) ratio. The **regime** badge — *calm /
+normal / stressed* — is σ_ref read against
+the protocol's load bands, and it is the same regime that sets the base floor of the
+clearing load. See [σ_ref](/math/sigma-ref) for how the reference vol is computed and
+[the load stack](/math/load-stack) for how the regime maps to a base load.
+
+<Info>
+**Why one σ_ref across all nine rows.** The reference vol is a property of the *pair*,
+not of any single market. What differs across the grid is the **duration** ($T$) and the
+**fee tier** (the pool the position lives in) — not the vol input. So the same σ_ref
+flows into all nine fair-rate computations, and the [S-curve in $\sigma^2 T$](/concepts/fair-value)
+is what makes the 7d / 30d / 90d rows price differently for identical geometry. MaxIL,
+by contrast, is pure geometry and is identical across all three durations.
+</Info>
+
+### Status badge + actions
+
+Every row carries a **status badge** — `live`, `paused`, `unregistered`, or
+`oracle degraded` — and two action links, **Protect** and **Underwrite**, each carrying
+the row's `marketId` in the query so the destination page opens pre-selected on that
+market.
+
+<CardGroup cols={2}>
+  <Card title="Protect this market" icon="shield-halved" href="/app/protect">
+    Carries the marketId into <code>/protect</code> so the LP flow opens on the market
+    you clicked — pick a position, preview the premium, buy.
+  </Card>
+  <Card title="Underwrite this market" icon="pen-nib" href="/app/underwrite">
+    Carries the marketId into <code>/underwrite</code> so the MM quote builder opens on
+    the market whose clearing load you want to undercut.
+  </Card>
+</CardGroup>
+
+## Summary stats + live block
+
+Above the grid, four summary stats put the surface in context:
+
+<Steps>
+  <Step title="Markets — 9 (3 × 3)">
+    The fixed grid size: 3 fee tiers × 3 durations for the dWETH/dUSDC pair.
+  </Step>
+  <Step title="Priceable now">
+    How many of the 9 currently resolve to a live price — i.e. have a live oracle and a
+    σ_ref. A market that can't be priced this block is counted out here and shows a
+    reason badge in its row, never a fabricated number.
+  </Step>
+  <Step title="σ_ref (dWETH)">
+    The shared EWMA reference vol that feeds every row.
+  </Step>
+  <Step title="Regime">
+    σ_ref read against the load bands — calm / normal / stressed — the protocol-wide
+    regime that sets the base floor of every clearing load.
+  </Step>
+</Steps>
+
+The header right-side prints the **live block number** of the multicall that produced
+the grid — a deliberate trust signal: every visible number was read at that block, in one
+call, from the chain.
+
+### How the data is fetched
+
+The whole grid is **one multicall, refetched every 15 seconds** — there is no per-row
+RPC fan-out and no indexer in the path:
+
+```ts
+// One multicall over all 9 markets → clearing load + fair/cap/pool premium per row
+const surface = data.getCurrentLoadSurface({ markets });   // 15s refetch, one call
+// Shared reference vol (single oracle for the whole pair)
+const sigmaRef = data.getSurfaceSigmaRef(demoWeth);
+// Per-row config read for the active flag (live / paused / unregistered)
+const cfg = mm.getMarketConfig(marketId);
+```
+
+`getCurrentLoadSurface` is RPC-only and returns the clearing load and premiums for all
+nine markets in a single round-trip; `getSurfaceSigmaRef` reads the shared dWETH vol;
+and a per-row `getMarketConfig` supplies the active flag behind the status badge. None of
+these touch the subgraph.
+
+<Note>
+The pool load is computed **client-side** via the SDK's parity-locked TypeScript port
+of `CvammPricing` — the deployed library is **delegatecall-only** and
+cannot be `eth_call`-ed directly, so the SDK reproduces it exactly and pins the parity
+in tests. The fair premium underneath it comes
+from the on-chain [Stylus FairValueOracle](/concepts/fair-value), never reimplemented
+off-chain.
+</Note>
+
+## Per-row degradation is inlined, never thrown
+
+This is the page's signature behavior. **Degradation is per-row, inline, and honest.**
+A market that can't be priced this block is **not dropped and never throws** — it shows
+a muted "—" in the price columns with a reason badge, and stays in the grid:
+
+| Reason badge | What it means | Why it is shown, not hidden |
+| --- | --- | --- |
+| **unregistered** | the market isn't registered on this deploy | the grid is fixed at 9; a not-yet-registered cell still has a row |
+| **oracle degraded** | the live oracle reverted (stale feed / sequencer) this block | the market still exists; it becomes priceable when the oracle recovers |
+| **paused** | the market is registered but not active | surfaced as status, with no live price |
+
+A degraded row keeps its label, its `marketId`, and its Protect/Underwrite links — only
+the price columns degrade. This mirrors the protocol-wide contract that **reads are
+graceful and never throw**: any read needing a reverting oracle, an absent event, or the
+not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }`
+envelope and renders a calm pending/degraded state.
+
+<Tip>
+**"Pending" ≠ "error."** A `—` with an "oracle degraded" badge is a *correct* answer to
+"what is the price right now?", not a failure. The grid telling you a cell is unpriceable
+is the same trust signal as it telling you another cell's exact clearing load — both are
+honest reports of on-chain state at the live block.
+</Tip>
+
+## The pending footer — framed, not naked
+
+The page closes with a footer that draws the live/pending line explicitly. The limitation
+is never exposed naked — it is stated with its cause and its path-forward:
+
+<Warning>
+**Limit — some surfaces are not on this page yet.** Per-market **volume**, MM
+**win-rate / share**, and the *historical* clearing-load surface (the term structure
+over time) are not shown on `/markets`.
+
+**Why.** These are **aggregate / time-series** quantities. They require an indexer that
+folds the rich on-chain events emitted since the deploy (`SwapPriced`, `QuoteFilled`)
+into per-market history — and the [subgraph](/integrate/subgraph) is deployed but **not
+yet indexed** (events have been on-chain since block `274081134`). A point-in-time
+multicall, which is all `/markets` does, cannot reconstruct history.
+
+**Mitigation.** Everything *visible* on the grid — **clearing load, fair premium, pool
+premium, σ_ref, regime, status** — is **live RPC right now**, independent of the
+subgraph. The historical and aggregate surfaces degrade to a typed `pending` state that
+names the future route, never a fabricated number and never an error. When the indexer
+finishes, those columns light up with zero changes to the live ones.
+</Warning>
+
+So the partition is clean and worth stating plainly:
+
+- **Live today (this page, RPC multicall):** clearing load (the price-to-beat), pool
+  premium with fair · cap, σ_ref, regime, per-row status, the live block number.
+- **Pending the subgraph:** per-market volume, MM win-rate / share, the historical
+  clearing-load surface (the [convexity term structure](/concepts/data-moat) over time).
+
+## How this page fits the moat
+
+The clearing-load surface you read here is **Signal 1** of the
+[data moat](/concepts/data-moat) — *clearing load over a transparent σ_ref, bucketed by
+geometry* — and it is the **one signal that is fully live today**, the same surface the
+public [`/app/data`](/app/data) heat-matrix renders for a wallet-free audience. The grid
+is the structure; the *dynamics* (how the surface and the pool-vs-MM spread move with
+real flow) mature as MMs compete and volume accumulates.
+
+<Maturity />
+
+## Where this connects in the app
+
+<CardGroup cols={2}>
+  <Card title="Protect — buy IL cover" icon="shield-halved" href="/app/protect">
+    The LP flow the Protect link lands in: pick a position, preview the premium, buy
+    <code>min(IL, MaxIL)</code> cover on the cheaper of pool vs MM.
+  </Card>
+  <Card title="Underwrite — quote a market" icon="pen-nib" href="/app/underwrite">
+    The MM flow the Underwrite link lands in: build a per-market firm quote that
+    undercuts the clearing load you saw here.
+  </Card>
+  <Card title="Earn — pooled underwriting" icon="vault" href="/app/earn">
+    Supply the cvAMM vault that backs the Path-A clearing load across all 9 markets.
+  </Card>
+  <Card title="Data — the moat heat-matrix" icon="grid" href="/app/data">
+    The public, wallet-free view of this same clearing-load surface as a fee × duration
+    heat grid (Signal 1, live).
+  </Card>
+</CardGroup>
+
+## Concepts behind the columns
+
+<CardGroup cols={2}>
+  <Card title="Markets &amp; marketId" icon="table-cells" href="/protocol/markets">
+    Why exactly 9 markets over one vault, and the keccak marketId that keys every row.
+  </Card>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    How the clearing load decomposes into base + util + dispersion, clamped by I10.
+  </Card>
+  <Card title="Fair value &amp; the S-curve" icon="chart-line" href="/concepts/fair-value">
+    The on-chain Φ-sum fair premium under the load — and why duration moves the price.
+  </Card>
+  <Card title="Routing — pool vs MM" icon="route" href="/protocol/routing">
+    How the clearing load becomes the price-to-beat: createSwapRouted picks the cheaper.
+  </Card>
+</CardGroup>
+
+## Live registry
+
+<AddressTable />

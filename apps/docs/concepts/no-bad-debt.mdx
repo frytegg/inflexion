@@ -1,0 +1,324 @@
+---
+title: "The no-bad-debt guarantee"
+description: "In FULL mode the protocol cannot produce bad debt — but only under its full clause. Why each clause is load-bearing, why I1 is structurally oracle-independent, and why the LP-paid claim and the depositor-capital claim must never be merged."
+---
+
+Inflexion makes exactly one guarantee to the LP about getting paid, and it is a
+strong one: in **FULL mode** the protocol **cannot produce bad debt** — the LP's
+capped payout is always backed by collateral already locked. But the guarantee is
+**conditional**, and the conditions are not decorative. Said without them, the claim
+is simply wrong.
+
+This page states the guarantee correctly, shows *why* each clause is load-bearing,
+and draws the one distinction that matters most: **no-bad-debt (Claim A) is a promise
+to the LP, never a promise to the underwriter.** Depositor and MM capital is a
+separate question with a separate, honest answer.
+
+<ClaimA />
+
+## The structural core: `payout ≤ collateral == MaxIL`
+
+Everything rests on a single arithmetic fact. At creation, the underwriter locks
+exactly **`MaxIL`** of collateral. At settlement, the protocol pays the LP
+
+$$
+\text{payout} \;=\; \min(\text{realized\_IL},\ \text{MaxIL}).
+$$
+
+Because `collateral == MaxIL` in FULL mode and the payout is capped at `MaxIL`,
+
+$$
+\text{payout} \;=\; \min(\text{realized\_IL},\ \text{MaxIL}) \;\le\; \text{MaxIL} \;=\; \text{collateral}
+$$
+
+for **any** price path — in-range, below `Pa`, above `Pb`, and the no-IL region.
+This is **invariant [I1](/security/invariants)**, and it is a *construction*, not a
+hope: there is no sequence of prices, no settlement timing, and no σ value that can
+make a capped payout exceed the collateral that equals the cap.
+
+| Quantity | Definition | Where |
+|---|---|---|
+| Collateral locked (FULL) | `== MaxIL`, locked at creation | `InflexionCore` (Path A and Path B) |
+| Payout cap | `payout = realisedIL > maxIL ? maxIL : realisedIL` | `InflexionCore` |
+| Defensive re-check | `payout ≤ lockedAmount` at distribution | `ConvexityVault`, `UnderwriterVault` |
+
+[MaxIL](/concepts/maxil) is the maximum *in-range* impermanent loss of the specific
+position — pure geometry, frozen at creation. It is convex on `[Pa, Pb]`, so its
+maximum while price stays in range is attained at a boundary,
+`MaxIL = max(IL(Pa), IL(Pb))`. That is exactly why the
+cap is the right collateral amount: it is the worst case the product covers. See
+[the MaxIL derivation](/math/maxil-derivation) and [the no-bad-debt math](/math/no-bad-debt-math)
+for the full proof.
+
+<Note>
+**`realized_IL` is recomputed on-chain at settle, never caller-supplied.** The
+settlement price `sqrtPTX96` is derived on-chain from the Chainlink round pinned at
+expiry `T` via `_oracleSqrtPriceX96`, then fed to
+`computeIL` together with the **stored** liquidity `L` (invariant
+[I6](/security/invariants)). A permissionless settler cannot set the payout anywhere
+in `[0, MaxIL]` — the inputs are not theirs to choose. This is what makes I1, I2, and
+[I4](/security/invariants) hold against an adversarial settler.
+</Note>
+
+## The full clause — and why every word is load-bearing
+
+The guarantee is exact **only** under four conditions. Each one, if removed, breaks a
+different link in the chain `payout ≤ collateral`. A caveat is only honest when it
+comes with its *why* and its *mitigation*, so here is each clause with both.
+
+<AccordionGroup>
+  <Accordion title="(a) Capped payoff — payout = min(realized_IL, MaxIL)">
+    **Why it is load-bearing.** Remove the cap and beyond-range IL is **unbounded**.
+    Above `Pb` the LP is fully rotated into one asset at constant value while a hold
+    position keeps growing linearly with price, so *absolute* IL has no ceiling.
+    No fixed amount of collateral can back an unbounded liability —
+    the product could not be fully collateralized, so it could not be trustless.
+
+    **Why the cap is the right product, not a defect.** At the range boundary the LP
+    has already fully rotated; loss beyond that point is *directional* (foregone spot
+    upside), not the *impermanent* loss the LP set out to hedge. Capping at MaxIL is
+    what keeps the hedge fully collateralized and trustless. This is an
+    [**in-range convexity hedge**](/concepts/in-range-convexity-hedge), not unbounded
+    "IL insurance," and the cap is the line between the two.
+
+    **Mitigation / path-forward.** LPs who want protection beyond the range simply
+    re-cover after re-ranging — a new in-range position, a new MaxIL, fresh collateral.
+  </Accordion>
+
+  <Accordion title="(b) Solvent collateral asset (USDC)">
+    **Why it is load-bearing.** Collateral, premium, and payout are all denominated in
+    USDC (`dUSDC`, 6 decimals, the [numéraire](/reference/decimals-units)). The
+    non-oracle token in every pair is assumed to be a USD-stable numéraire.
+    If that asset loses its peg or its redeemability,
+    `payout ≤ collateral` can still hold *in token units* while failing in real value.
+
+    **Why this is a disclosed shared risk, not a protocol bug.** A USDC depeg is a
+    systemic event that hits every party denominated in USDC equally — it is not
+    something the protocol's settlement logic can or should try to absorb. We disclose
+    it rather than pretend it away.
+
+    **Mitigation / path-forward.** Use a collateral asset with a credible peg and
+    instant redeemability; the design is asset-agnostic at the numéraire layer, so a
+    different solvent stable can be configured per market.
+  </Accordion>
+
+  <Accordion title="(c) Oracle / settlement liveness">
+    **Why it is load-bearing.** `settle()` pins the price to the Chainlink round at
+    expiry `T`. If the oracle *never* produces a usable round, funds cannot settle —
+    not because the math fails, but because settlement cannot run. Note the subtlety:
+    **the *amount* I1 caps is oracle-independent; the *act* of settling needs the
+    oracle live.** A wrong σ cannot violate I1, but a permanently dead oracle could
+    strand funds.
+
+    **Why it does not become a permanent lockup.** This was an audited risk
+    ([Fork 1](/security/forks)). The fix is invariant [I8](/security/invariants): the
+    price stays pinned to the round-at-T for fairness, a glitched "lone spike" (a print
+    differing from **both** neighbours by ≥ `LONE_SPIKE_BPS = 500` / 5%) is deferred,
+    and a `LIVENESS_WINDOW = 86,400s` (24h) **backstop unconditionally accepts the
+    round** after the window. A missing neighbour round across a Chainlink `phaseId`
+    boundary is read tolerantly via `_tryRound` (try/catch, not revert), so it degrades
+    to the backstop rather than locking. Implemented in
+    `OracleManager.getSettlementPrice`.
+
+    <Warning>
+    **Limit → Why → Mitigation (the I8 window).** The *spec-literal* staleness
+    `require` fires before the backstop can recover the round, so the **actual usable
+    settlement window is `[expiry + LIVENESS_WINDOW, expiry + MAX_STALENESS)` ≈ 1 hour
+    wide** with current Sepolia constants (90,000 − 86,400 = 3,600s), not the full
+    additive sum the I8 wording suggests. **Why:** the two guards were tuned
+    independently. **Mitigation:** past `expiry + MAX_STALENESS` funds still settle via
+    a *newer* Chainlink round (Arbitrum majors tick frequently), just not via the
+    round-at-T; the window is *symmetric* for LP and MM, preserving fairness. Surfaced
+    in the `OracleManager` NatSpec, not papered over.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="(d) No rehypothecation breach">
+    **Why it is load-bearing.** `payout ≤ collateral` is only meaningful if the
+    collateral is **actually there when settle runs**. Route locked collateral to a
+    utilization-gated venue (Aave / Compound) and a withdrawal could *revert in a
+    crash* — exactly when payouts are due — turning a solvent-on-paper position into a
+    failed settlement.
+
+    **Why this is a hard rule, not a preference.** Locked collateral must stay
+    instantly liquid. This is a hard rule and audit fix #3:
+    only **idle** capital may earn yield, and only to
+    **instantly-redeemable** wrappers (sDAI / tokenized T-bills) — never to anything
+    whose redemption depends on pool utilization.
+
+    **Mitigation / path-forward.** The yield adapter interface requires
+    `isInstantlyRedeemable()`; locked collateral is never routed to a gated venue by
+    construction. Idle-only, instant-only.
+  </Accordion>
+</AccordionGroup>
+
+> **Stated without these qualifiers, the guarantee is not correct.** "Bad debt
+> impossible" — full stop — is incorrect. The exact
+> claim is always: *no bad debt in FULL mode under capped payoff + solvent USDC +
+> oracle/settlement liveness + no rehypothecation breach.*
+
+## I1 is structurally oracle-independent
+
+This is the most important nuance on the page, and the one that makes the guarantee
+robust. **The no-bad-debt invariant (I1) does not depend on any pricing oracle being
+right.**
+
+In FULL mode, `collateral == MaxIL` and `payout = min(realized_IL, MaxIL) ≤ MaxIL`
+**regardless of what σ was, regardless of what the [FairValueOracle](/concepts/fair-value)
+priced, regardless of what the VolOracle estimated.** A wrong `σ_ref` cannot violate
+I1, because I1 is about the *cap and the collateral*, both of which are fixed pure
+geometry — they were never functions of σ.
+
+What the pricing oracles *are* load-bearing for:
+
+| Oracle | Load-bearing for | NOT load-bearing for |
+|---|---|---|
+| `FairValueOracle` (Φ-sum) | the [I10 price cap](/security/invariants), [depositor solvency](/concepts/tranches) | **I1 (FULL no-bad-debt)** |
+| `VolOracle` (σ_ref EWMA) | I10, premium correctness, [depositor solvency](/concepts/tranches) | **I1 (FULL no-bad-debt)** |
+| `OracleManager` (Chainlink round-at-T) | settlement *liveness* and the realized-IL *value* | the *amount* I1 caps (capped structurally) |
+
+<Tip>
+**The crucial split.** A vol-oracle fault can cost *depositors* money — bad pricing
+compresses pool NAV, the junior tranche absorbs first, the senior takes the systemic
+tail — but it can **never** create *LP* bad debt in FULL. The pricing stack governs
+who profits and who loses on the *underwriting* side; it does not govern whether the
+LP is paid. That separation is exactly the two-claims rule below.
+</Tip>
+
+The Slither cvAMM review confirmed this independence directly: manual review
+verified that **the FULL no-bad-debt guarantee (I1) is structural and independent of
+the FairValue / Vol oracles** — `settle` caps payout at `MaxIL == collateral`
+regardless of any pricing input.
+
+## Two separate guarantees — never merged
+
+Claim A (LP no-bad-debt) and Claim B (depositor/MM capital) are **two different
+promises to two different parties.** Both are true; neither implies the other; merging
+them is a category error.
+
+<CardGroup cols={2}>
+  <Card title="Claim A — LPs are always paid" icon="shield-check">
+    No bad debt in FULL, **code-enforced (I1)**. Structural and oracle-independent:
+    `settle` caps payout at `MaxIL == collateral` regardless of any pricing oracle.
+    Qualified by the full clause above.
+  </Card>
+  <Card title="Claim B — capital is NOT guaranteed" icon="triangle-exclamation">
+    The underwriter is a **volatility seller**. Junior is first-loss; senior is
+    structurally protected from *underwriting* loss only, never from the systemic
+    tail. Applies to **both** the cvAMM pool and any MM.
+  </Card>
+</CardGroup>
+
+<ClaimB />
+
+A worked way to hold the two apart:
+
+- **A bad price path** moves money *from the underwriter to the LP* — the LP is paid
+  `min(IL, MaxIL)` out of locked collateral. Claim A holds (LP paid); Claim B is
+  *realized* (the underwriter took the loss it was paid a premium to take). Nothing is
+  broken; this is the product working.
+- **A wrong σ / mispricing** can make underwriting *systematically unprofitable* over
+  time — premiums too low for the risk. Claim B bites (depositors can lose principal);
+  Claim A is **untouched** (every individual LP is still paid up to MaxIL from
+  collateral that equals MaxIL).
+- **A USDC depeg or dead oracle** is a *shared* systemic failure outside both the
+  capped-payoff and the FULL-collateral mechanisms — it sits in the qualifying clause
+  of Claim A, and it is part of the "systemic tail" that even the senior tranche bears
+  in Claim B.
+
+> Inflexion is **not Bancor.** The cvAMM pays claims in **pre-locked USDC and mints
+> nothing** — no token-inflation reinsurance, no death spiral. In FULL the pool cannot
+> become insolvent against its LPs (collateral = MaxIL ≥ payout) and cannot be run
+> (withdrawal cooldown + locked/free accounting). See [what this is not](/what-this-is-not).
+
+## Senior protection is a calibration result, not a third guarantee
+
+It is tempting to read the senior tranche as "safe." It is not — and conflating
+structural senior *protection* with a *guarantee* would be a third claim we do not
+make.
+
+The pool enforces **`totalLocked ≤ juniorAssets`** at *every* `lockCollateral`
+(the `SeniorProtectionBreached` revert). Since every
+payout `≤` its MaxIL `=` its locked amount, total payouts `≤ totalLocked ≤
+juniorAssets`, so the **junior-first-loss waterfall absorbs all underwriting loss
+before senior is ever touched** (in `releaseAndDistribute`).
+
+<Warning>
+**Limit → Why → Mitigation (senior P(loss) = 0).** Senior `P(loss) = 0` is a
+**calibration** result — it holds while utilization stays within the buffer
+(`u ≤ 1−sf`), **not** a structural guarantee. **Why:** the `totalLocked ≤
+juniorAssets` invariant protects senior from *underwriting* loss, but no invariant
+shields any tranche from the *systemic* tail (USDC depeg, oracle failure, contract
+bug). **Mitigation:** the dual-tranche structure lets each depositor pick a risk dose
+honestly; **capital-not-guaranteed remains the umbrella for both tranches**.
+See [tranches](/concepts/tranches).
+</Warning>
+
+## How the guarantee is verified, not just asserted
+
+I1 is not a comment in the code — it is fuzzed over the whole price domain.
+
+<CodeGroup>
+```solidity I1 + I2 — the payout cap (InflexionCore)
+// realisedIL recomputed on-chain from the Chainlink-pinned P_T and the STORED L
+uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
+//               └─────────────────── min(realized_IL, MaxIL) ───────────────┘
+// collateral == s.maxIL was locked at creation ⇒ payout ≤ collateral, any path.
+```
+
+```solidity Defensive re-check at distribution (ConvexityVault)
+require(payout <= lockedAmount, "payout exceeds locked"); // defense-in-depth
+// UnderwriterVault mirrors this for Path B.
+```
+</CodeGroup>
+
+| Invariant | What it asserts | Verified by |
+|---|---|---|
+| I1 / I2 | `payout ≤ MaxIL == collateral`, `payout == min(IL, MaxIL)` | `testFuzz_I1_I2_payoutCappedAtMaxIL` (256 runs) |
+| I3 | guarded subtraction, never underflow | `testFuzz_I3_ilNonNegative` (256 runs) |
+| I4 | `V_lp ≥ V_hold ⇒ payout == 0` | `test_il_atEntryIsZero` + I3 fuzz |
+| I5 | `locked ≤ deposited` per MM and per pool | `invariant_I5_lockedLeDeposited` — 256 runs × 128,000 vault-op calls × 0 reverts |
+| I6 | settle uses `L` stored at creation | `testFuzz_I6_settleUsesStoredLiquidity` |
+| I8 | settle always succeeds in the backstop window | `OracleManager` invariant suite — 5 fuzz tests, ~1,280 runs |
+
+The supporting invariants close the vectors that *could* otherwise break the core
+inequality from the side: [I3](/security/invariants) (no underflow when `V_lp >
+V_hold`), [I4](/security/invariants) (the LP never profits from the swap — payout is
+`0` whenever IL is `0`), [I5](/security/invariants) (`locked ≤ deposited`, so the
+collateral is genuinely there), and [I6](/security/invariants) (settle uses the `L`
+*stored at creation*, so an external `increaseLiquidity` on the custodied NFT cannot
+inflate the payout above MaxIL).
+
+## The guarantee, proven live
+
+The 2026-06-05 redeploy ran real create→settle lifecycles on both rails, and in both
+cases the payout came from the **counterparty's own collateral**, never protocol funds:
+
+- **Path A (cvAMM):** swap #1 — premium \$9.70 on MaxIL \$1,669.24 (0.58% of MaxIL),
+  realized IL \$148.64, payout \$148.64, paid from the `ConvexityVault`.
+- **Path B (routed → MM):** swap #2 — `createSwapRouted` picked the MM (\$8.93 vs the
+  cvAMM's \$13.80); MaxIL \$3,215.65 was locked from the **MM's own** `UnderwriterVault`,
+  realized IL \$245.66, payout \$245.66 settled from that collateral.
+
+In each case `payout ≤ collateral == MaxIL` held, and the LP was paid from collateral
+locked at creation — the guarantee, end to end. See [the two rails](/concepts/two-rails)
+and [the full lifecycle](/protocol/lifecycle).
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The invariants (I1–I10)" icon="list-check" href="/security/invariants">
+    Every invariant precisely stated, with why it holds and where it is enforced.
+  </Card>
+  <Card title="The no-bad-debt math" icon="square-root-variable" href="/math/no-bad-debt-math">
+    The formal `payout ≤ collateral` argument and the convexity of MaxIL.
+  </Card>
+  <Card title="Tranches & capital risk" icon="layer-group" href="/concepts/tranches">
+    Junior first-loss, senior protection, and why capital is not guaranteed.
+  </Card>
+  <Card title="MaxIL — cap and unit" icon="ruler" href="/concepts/maxil">
+    Why the cap is load-bearing and how it doubles as the unit of risk.
+  </Card>
+</CardGroup>

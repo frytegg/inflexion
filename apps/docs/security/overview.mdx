@@ -1,0 +1,140 @@
+---
+title: "Security model overview"
+description: "The one structural fact behind Inflexion's safety — FULL-mode no-bad-debt is collateral == MaxIL and oracle-independent — stated with its full qualifying clause, plus a recommended reading order."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+Inflexion's security story is small at its core and large at its edges. The core is **one structural fact**; everything else — ten fuzzed invariants, two resolved audit forks, a bounded off-chain matcher, junior-first-loss tranching — is the scaffolding that protects the *rest* of the system around that fact.
+
+This page states the headline claim correctly (with its qualifiers, every time), separates the two claims that must never be merged, and gives you a reading order for the rest of the security documentation.
+
+## The one structural fact
+
+In **FULL mode**, for every swap, collateral is locked at exactly `MaxIL` at creation, and coverage at settlement is `min(realized_IL, MaxIL)`. Therefore:
+
+$$
+\text{payout} \;=\; \min(\text{realized\_IL},\; \text{MaxIL}) \;\le\; \text{MaxIL} \;=\; \text{collateral}
+$$
+
+This holds **for any price path** — in-range, below `Pa`, above `Pb`, and the no-IL region — because it is an algebraic property of a `min`, not a heuristic or a calibration. It is enforced by a single line in `settle`:
+
+```solidity
+uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
+```
+
+with the collateral having been locked at `MaxIL` at creation on both Path A and Path B, and both vaults defensively re-checking `payout ≤ lockedAmount`. This is invariant **I1**, verified by Foundry fuzz over the whole price domain.
+
+<Info>
+**The most important consequence: the no-bad-debt proof is oracle-independent.**
+
+`settle` caps the payout at `MaxIL == collateral` *regardless of any pricing oracle*. The [FairValueOracle](/concepts/fair-value) and `VolOracle` are load-bearing for the **I10 price cap** and for **depositor solvency** — they are **not** part of the I1 proof. You can imagine both pricing oracles returning garbage and I1 still holds: the LP can never be paid more than the collateral that was locked for them.
+</Info>
+
+## The headline claim, stated correctly
+
+The no-bad-debt guarantee is exact **only** under its full clause. State it with the qualifier every time — a stripped version is not just imprecise, it is wrong.
+
+<ClaimA />
+
+Why each clause is load-bearing — caveats framed with their *why*, not exposed naked:
+
+| Clause | Why it is load-bearing | What carries it |
+| --- | --- | --- |
+| **(a) Capped payoff** | Remove the cap and IL above `Pb` is *unbounded* (the LP is fully in token1 at constant value while hold value grows linearly with price); no fixed collateral can back it. The cap is what makes `payout ≤ collateral` hold. | `min(IL, MaxIL)` enforced in `settle` |
+| **(b) Solvent USDC** | Collateral, premium, and payout are all denominated in `dUSDC` (6 decimals, the numeraire). A depeg is a *disclosed shared risk*, not a protocol bug. | The `dUSDC` numeraire assumption |
+| **(c) Oracle / settlement liveness** | `settle` pins the Chainlink round-at-T. If the oracle never produces a usable round, funds can't settle. **Mitigation:** [Fork-1](/security/forks) bounds this with a 24h liveness backstop so funds are never *permanently* locked (I8). | `OracleManager.getSettlementPrice` |
+| **(d) No rehypothecation breach** | Routing locked collateral to a utilization-gated venue (Aave/Compound) could make a withdrawal revert in a crash, breaking the guarantee. **Mitigation:** locked collateral stays instantly liquid — idle capital only, only to instantly-redeemable wrappers. | `IYieldAdapter.isInstantlyRedeemable()`; the locked-collateral liquidity rule |
+
+## Two claims that must never be merged
+
+These are **separate** guarantees with **separate** truth conditions. Conflating them is the single most common framing error when describing this protocol.
+
+<CardGroup cols={2}>
+<Card title="Claim A — LPs are always paid" icon="shield-check">
+No bad debt in FULL mode. **Structural and oracle-independent** (collateral = MaxIL ≥ payout), qualified by the clause above. This is invariant I1.
+</Card>
+<Card title="Claim B — depositors / MMs can lose capital" icon="triangle-exclamation">
+The pool is a volatility *seller*. **Capital is not guaranteed for either tranche.** Junior is first-loss; senior is protected from *underwriting* loss only — never from the systemic tail.
+</Card>
+</CardGroup>
+
+<ClaimB />
+
+The crucial split: Claim A's proof is structural and orthogonal to every pricing oracle. The pricing oracles matter for the **I10 price cap** and **depositor solvency** — Claim B's territory — but not for Claim A. Keep them apart.
+
+## What protects what
+
+A one-screen map of the security surface, so you know which mechanism guards which risk:
+
+<CardGroup cols={2}>
+<Card title="LP payout integrity" icon="lock" href="/security/invariants">
+**I1–I4.** Capped payout, on-chain-recomputed `realized_IL`, guarded subtraction, LP-never-profits clamp. Settlement price pinned to Chainlink round-at-T, never calldata.
+</Card>
+<Card title="Underwriter solvency" icon="vault" href="/security/invariants">
+**I5** (`locked ≤ deposited`) + the pool-side `totalLocked ≤ juniorAssets` senior-protection check and junior-first-loss waterfall.
+</Card>
+<Card title="Quote / capacity integrity" icon="signature" href="/security/forks">
+**I7** (atomic capacity + Permit2 bitmap nonces), **I9** (oracle-anchored band — *not* last-look), and EIP-712 signature verification.
+</Card>
+<Card title="Settlement liveness" icon="clock" href="/security/forks">
+**I8.** Round-at-T pin + lone-spike sanity check + 24h backstop, so `settle()` always succeeds within the window and funds are never permanently locked.
+</Card>
+<Card title="Price ceiling" icon="gauge" href="/concepts/no-bad-debt">
+**I10.** Premium ≤ `FairPremium · (1 + maxLoadBps)` on both paths, by construction, upstream of settle. No overcharge by code.
+</Card>
+<Card title="Trust model" icon="diagram-project" href="/security/trust-model">
+The off-chain matcher (Path B only) can censor/reorder but cannot steal, forge, or force-stale. Path A is fully on-chain and immune.
+</Card>
+</CardGroup>
+
+## Recommended reading order
+
+<Steps>
+<Step title="The qualified no-bad-debt claim — never unqualified">
+Start here, with the <ClaimA /> clause above. If you remember one thing, remember that I1 is *structural and oracle-independent* and is stated only with its four-part qualifier.
+</Step>
+<Step title="The ten invariants I1–I10, and why each holds">
+Read [the invariants](/security/invariants). I1–I9 are the settle-path set; **I10 is the price cap**, added *upstream* of settle and orthogonal to I1–I9. Each invariant states its precise form, why it holds, where it is enforced, and which Foundry fuzz test verifies it.
+</Step>
+<Step title="The two resolved architectural forks">
+Read [the forks](/security/forks): Fork-1 (oracle settlement-liveness deadlock → round-at-T pin + lone-spike + 24h backstop, I8) and Fork-2 (no-last-look firm-quote pickoff → deterministic oracle-anchored price band, I9). These were the two *open* items from the external audit; both are now in code.
+</Step>
+<Step title="The trust model — what the matcher can and cannot do">
+Read [the trust model](/security/trust-model). Settlement is non-custodial and on-chain; the engine exists for Path B only and its power is strictly bounded. This is the clean answer to "isn't the matcher centralized?"
+</Step>
+<Step title="Everything else is supporting detail">
+[Price pinning](/security/price-pinning), [CEI / reentrancy](/security/cei-reentrancy), the [attack-vector ledger](/security/attack-vectors), [audits](/security/audits), and [immutability & custody](/security/immutability-custody).
+</Step>
+</Steps>
+
+## Where this is enforced — live
+
+<AddressTable />
+
+A few security-relevant deployment facts worth knowing — each stated with its *why* and its mitigation, never naked:
+
+<Warning>
+**No sequencer feed on Arbitrum Sepolia.** The testnet has no sequencer-uptime SLA, so `sequencerFeed == address(0)` and the sequencer gate is skipped.
+**Why it's safe here:** there is nothing to gate on a testnet without an L2-sequencer guarantee.
+**Mitigation / path forward:** the gate (`_requireSequencerHealthy`, uptime + 1h grace, fails-closed on a future `updatedAt`) **must be set before any mainnet deploy** — flagged in the on-chain address registry via `_sequencerNote`.
+</Warning>
+
+<Warning>
+**The subgraph deploy is pending.** The on-chain moat dataset begins at the 2026-06-05 redeploy block (`_deployBlock` is the subgraph `startBlock`).
+**Why:** the dataset is anchored to a single fresh redeploy so history is clean and non-overlapping.
+**Mitigation:** until the subgraph lands, history degrades to a **typed `pending` state — never an error** (registry `_note`). See [the data moat's state & limits](/moat/state-and-limits).
+</Warning>
+
+<Maturity />
+
+## One-paragraph summary
+
+Inflexion's security rests on one structural fact: in FULL mode collateral is locked at `MaxIL` and coverage is `min(realized_IL, MaxIL)`, so `payout ≤ collateral` by construction (I1/I2) — a proof that is *oracle-independent* and holds under any price path, qualified only by capped payoff + solvent USDC + oracle/settlement liveness + no rehypothecation breach. Around that core, ten Foundry-fuzzed invariants (I1–I10) and a multi-LLM spec audit (12 fixes plus two resolved forks — the Chainlink round-walking liveness backstop for I8, and the deterministic oracle-anchored price band, *not* last-look, for I9) close every audited vector. The off-chain matcher (Path B only) is strictly bounded: it cannot steal, forge, or force-stale, and [Path A](/protocol/path-a-cvamm) is fully on-chain and immune. The cvAMM adds a code-capped fair price ([I10](/concepts/no-bad-debt), by construction) plus structural junior-first-loss senior protection (`totalLocked ≤ juniorAssets`) — while honestly disclosing that depositor capital is *not* guaranteed for either [tranche](/concepts/tranches).
+
+<Card title="Next: the ten invariants" icon="list-check" href="/security/invariants">
+Read each invariant's precise statement, why it holds, where it is enforced, and the Foundry fuzz test that verifies it.
+</Card>

@@ -1,0 +1,74 @@
+{/*
+  Auto-generated from deployments/arbitrum-sepolia.json.
+  Import as a default component: `import AddressTable from '/snippets/address-table.mdx'`
+  then render `<AddressTable />`.
+*/}
+
+**Network:** Arbitrum Sepolia &middot; **chainId** `421614` &middot; **deploy block** `274081134` (subgraph startBlock) &middot; **deployed** 2026-06-05
+
+## Core protocol
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| InflexionCore | `0xC19865cF8403F59B8Eca835833aFEe3Aa8DA4848` | Main entry point — quotes, createSwap, settlement |
+| ILVault | `0x9f7615Aca943832977CEf3ac1862fD48B87b7664` | Holds LP premiums and protocol IL accounting |
+| UnderwriterVault | `0x4Fb459F3393D206c2b7faD7f0fC9C35a78348D64` | Market-maker (Path B) collateral deposits |
+| ConvexityVault | `0xDE2fFeBA2E6A18f3A53D43EC0fCCD299158eC30d` | Pooled cvAMM (Path A) underwriter collateral |
+| Treasury | `0x96455C9b00D530BD0629b71B674298440328b1Dd` | Protocol fee recipient (also deployer) |
+
+## Stylus & libraries
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| FairValueOracle (Stylus) | `0x98a6aa75108b70fc0794bc3b87efe0ae99d5d52c` | Rust/WASM fair-premium pricing (set-once init to live VolOracle) |
+| ILMath | `0x7e90362bc6Df9cb5faA13952e07853ab16c77bd2` | Core impermanent-loss math |
+| TickMath (library) | `0xbf02bbc82e0fb1a4b9828bb90fc9dd9e97578965` | Tick &harr; sqrtPrice conversions (delegatecall) |
+| CvammPricing (library) | `0x4a053d29a55a64172140f9ebbc27c321c0ba2b53` | Path-A pool pricing components (delegatecall) |
+| SwapMath (library) | `0xf7be9745b6768d06a18c386c6db5c8cb065ba314` | Swap math helpers (delegatecall) |
+| QuoteVerification (library) | `0x74819eed322f3e1a2dc10bb0d3cae50078d90807` | EIP-712 quote signature verification (delegatecall) |
+
+## Oracles
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| OracleManager | `0x2c18147B6ec75dcb330d9A48B6B96a4d1a8b529b` | Chainlink feed router, staleness & sequencer checks |
+| VolOracle | `0xfdEafBB381192FC5337499d041eaead04d565Ed9` | Realized-volatility reference (sigma_ref) |
+
+## Uniswap
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| UniswapV3Factory | `0x248AB79Bbb9bC29bB72f7Cd42F17e054Fc40188e` | v3 pool factory |
+| NonfungiblePositionManager | `0x6b2937Bde17889EDCf8fbD8dE31C3C2a70Bc4d65` | LP position NFTs |
+| SwapRouter02 | `0x101F443B4d1b059569D643917553c771E1b9663E` | Swap routing |
+| QuoterV2 | `0x2779a0CC1c3e0E44D2542EC3e79e3864Ae93Ef0B` | Off-chain swap quoting |
+
+## Chainlink feeds
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| ETH / USD | `0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165` | Price feed (8 dec, ~120s heartbeat) |
+| BTC / USD | `0x56a43EB56Da12C0dc1D972ACb089c06a5dEF8e69` | Price feed (8 dec, ~120s heartbeat) |
+| ARB / USD | `0xD1092a65338d049DB68D7Be6bD89d17a0929945e` | Price feed (8 dec, 86400s heartbeat) |
+| USDC / USD | `0x0153002d20B96532C639313c2d54c3dA09109309` | Price feed (8 dec, 86400s heartbeat) |
+
+## Demo tokens / pool / LP
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| WETH9 | `0x980B62Da83eFf3D4576C647993b0c1D7faf17c73` | Canonical Arbitrum Sepolia WETH (18 dec) |
+| USDC (Circle) | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` | Circle native testnet USDC (6 dec) |
+| dWETH (demo) | `0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D` | Mock WETH, oracle-priced via Chainlink ETH/USD (18 dec) |
+| dUSDC (demo) | `0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d` | Mock USDC numeraire (6 dec) |
+| Demo pool (dWETH/dUSDC, fee 500) | `0xfE1Eb4D5796a350B13852F822B3E6a9fDbb858a5` | Seeded v3 pool, tokenId 3218 ~\$100k unprotected LP |
+
+## Lifecycle swaps
+
+| Contract | Address | Role |
+| --- | --- | --- |
+| Market maker (demo signer) | `0xe632B215120dD43A719458487bA3e03638fec953` | Path-B underwriter; deposited 5,000 dUSDC, own collateral paid settlement |
+
+Live create&rarr;settle lifecycle (2026-06-05, short 300s fee-500 market `0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2`):
+
+- **Path A (cvAMM convexity)** — swapId 1, LP tokenId 3220 &middot; V0 \$270,531.28 &middot; MaxIL \$1,669.24 &middot; premium \$9.70 (0.58% of MaxIL) &middot; settled payout \$148.64 from ConvexityVault.
+- **Path B (MM routing)** — swapId 2, LP tokenId 3221 &middot; MM beat cvAMM (\$8.93 vs \$13.80) &middot; MaxIL \$3,215.65 &middot; MM collateral locked \$3,215.65 &middot; settled payout \$245.66 from MM collateral.

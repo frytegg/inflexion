@@ -1,0 +1,190 @@
+---
+title: "Environment variables"
+description: "Every env var across the root .env, the frontend NEXT_PUBLIC_* surface, the engine, and the API — with defaults, purpose, and the day-one DEMAND_LOG / COMPETITION_LOG rule."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion's configuration lives in four scopes, each with its own `.env` or `process.env` read site:
+
+- **Root `.env`** — contracts, deploy scripts, and shared keys (`.env.example`).
+- **Frontend `apps/web`** — build-time `NEXT_PUBLIC_*` keys (`apps/web/.env.example`).
+- **Engine `packages/engine`** — the Path-B matching relayer (`process.env`).
+- **API `packages/api`** — the public REST surface over the subgraph (`process.env`).
+
+This page documents every variable, its default, and what it controls. Two of these — [`DEMAND_LOG`](#day-one-the-demand-log--competition-log-rule) and `COMPETITION_LOG` — are **day-one sinks**: the behavioral signals they capture cannot be reconstructed after the fact, so they must be set from the very first deploy.
+
+<Note>
+Contract addresses are **not** an env-var concern. The SDK loads them from the on-chain address registry and hardcodes nothing. See [/reference/deployments](/reference/deployments) for the live registry. The only address that flows through env is the engine's `VERIFYING_CONTRACT`, which defaults to the registry value anyway.
+</Note>
+
+## Root `.env` (contracts / deploy / shared)
+
+Used by Foundry deploy scripts, Stylus deploys, and verification.
+
+| Var | Default / example | Purpose |
+| --- | --- | --- |
+| `ARBITRUM_RPC` | `https://arb1.arbitrum.io/rpc` | Arbitrum One RPC (mainnet / migration). |
+| `SEPOLIA_RPC` | `https://sepolia-rollup.arbitrum.io/rpc` | Arbitrum Sepolia RPC — the live network (chainId `421614`). |
+| `LOCAL_RPC` | `http://localhost:8545` | Local Nitro fork for `forge test --profile local`. |
+| `DEPLOYER_PRIVATE_KEY` | — (required to deploy) | Deploy/broadcast key. **Sepolia + local only; never a mainnet key.** |
+| `OPERATOR_PRIVATE_KEY` | — | Oracle operator (pokes the VolOracle, advances testnet state). **Never a mainnet key.** |
+| `ETHERSCAN_API_KEY` / `ARBISCAN_API_KEY` | — | Source verification on the explorer. |
+| `THEGRAPH_DEPLOY_KEY` | — | The Graph deploy key (used once the subgraph redeploy lands). |
+| `ENGINE_PORT` | `8787` | Path-B relayer port (mirrors the engine's own `PORT`). |
+| `REDIS_URL` | `redis://localhost:6379` | Engine quote/state store. |
+| `VITE_API_URL` / `VITE_SUBGRAPH_URL` / `VITE_NETWORK` | (`sepolia`) | Legacy frontend keys, retained for compatibility. New frontend config uses the `NEXT_PUBLIC_*` keys below. |
+
+<Warning>
+**Limit:** `DEPLOYER_PRIVATE_KEY` and `OPERATOR_PRIVATE_KEY` are plaintext in the local `.env`.
+**Why:** the live deployment is a public testnet (Arbitrum Sepolia) where the deployer/treasury EOA is a throwaway testnet key (`0x96455C9b00D530BD0629b71B674298440328b1Dd`), not custody of real value.
+**Mitigation:** these keys are **scoped to Sepolia + local only** by convention and must never hold a mainnet key. A mainnet deploy would move signing to a hardware/MPC signer and never touch a flat env file.
+</Warning>
+
+## Frontend `apps/web` (`NEXT_PUBLIC_*`)
+
+All build-time public keys — they are inlined into the client bundle, so they hold **no secrets**.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `NEXT_PUBLIC_RPC_URL` | falls back to a public RPC | Arbitrum Sepolia RPC the dApp reads from. Set your own Alchemy/Infura URL for reliable throughput — the public fallback rate-limits. |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | — | WalletConnect Cloud project id for RainbowKit. Injected wallets (MetaMask etc.) work **without** it. |
+| `NEXT_PUBLIC_ENGINE_URL` | `http://localhost:8787` | Path-B engine base URL. **Unset ⇒ Path-B MM quotes are unavailable** and the premium falls back to Path A — the app still works end-to-end. |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8088` | Public REST API base URL. Optional — the dApp reads live on-chain data via the SDK directly. |
+
+<Info>
+The frontend is designed to **degrade, never fail**. With no `NEXT_PUBLIC_ENGINE_URL` and no `NEXT_PUBLIC_API_URL`, the app reads everything it needs straight from chain via the SDK and prices off the always-on cvAMM pool ([Path A](/protocol/path-a-cvamm)). Wiring in the engine adds the [Path-B MM quotes](/protocol/path-b-mm); wiring in the API adds historical/aggregate views. This mirrors the SDK's [graceful degradation](/sdk/degradation) contract.
+</Info>
+
+## Engine `packages/engine` (`process.env`)
+
+The Path-B matching relayer.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `8787` | Relayer HTTP/WS listen port. |
+| `CHAIN_ID` | `421614` | Arbitrum Sepolia chain id (must match the EIP-712 domain). |
+| `VERIFYING_CONTRACT` | registry `core.inflexionCore` | EIP-712 `verifyingContract` for [signed quotes](/integrate/quote-signing) — i.e. `InflexionCore`. Defaults to the value in the deployment registry. |
+| `QUOTE_LOG` | (optional) | Append-only JSONL of accepted quotes. |
+| `DEMAND_LOG` | (optional) | **Signal-4** latent-demand telemetry: unfilled / previewed interest. |
+| `COMPETITION_LOG` | (optional) | **Signal-2** quote-competition telemetry: winners *and* losers. |
+
+### The MM bot
+
+The reference market-maker bot reads its own set:
+
+| Var | Purpose |
+| --- | --- |
+| `MM_PRIVATE_KEY` | The MM's signing key for EIP-712 quotes. |
+| `MARKET_ID` | The [market](/protocol/markets) the bot quotes into (a quote is **per-market**, never per-NFT). |
+| `ENGINE_WS` | WebSocket URL of the engine the bot streams quotes to. |
+| `CHAIN_ID` | Chain id for the EIP-712 domain (`421614`). |
+| `VERIFYING_CONTRACT` | `InflexionCore` address — the quote's `verifyingContract`. |
+| `QUOTE_PRICE` | The oracle price at signing, the band anchor for the [Fork-2 price band](/security/forks). |
+| `LOAD_BPS` | The MM's load over [FairPremium](/concepts/fair-value), in basis points. Must satisfy `loadBps ≤ maxLoadBps` ([invariant I10](/security/invariants)). |
+
+## API `packages/api` (`process.env`)
+
+The public REST surface over the subgraph.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `8088` | REST listen port. |
+| `SUBGRAPH_URL` | (absent ⇒ surfaces a typed "pending" state) | The deployed subgraph GraphQL endpoint. |
+| `ARBITRUM_SEPOLIA_RPC` / `SEPOLIA_RPC` | — | RPC for live on-chain reads. |
+| `DEMAND_LOG` / `COMPETITION_LOG` | (optional) | Telemetry log paths surfaced through the API (same files the engine writes). |
+
+<Warning>
+**Limit:** `SUBGRAPH_URL` is commonly **unset** today — the [subgraph deploy is pending](/reference/status-caveats).
+**Why:** three additions (the `QuoteFilled` and `SwapPriced` events plus `CvammPricing.loadComponents()`) are coded but await a single redeploy, blocked on an EIP-170 size pass (`InflexionCore` is +213 B over the 24,576 B limit).
+**Mitigation:** with `SUBGRAPH_URL` absent the API returns a **typed pending state** (`'rich-events-absent'` / `'no-history-source'`) rather than erroring. Live reads via RPC still work; only history and precise fill attribution degrade.
+</Warning>
+
+## Day-one: the DEMAND_LOG / COMPETITION_LOG rule
+
+`DEMAND_LOG` and `COMPETITION_LOG` are not ordinary optional knobs. They are **append-only telemetry sinks for two of the five [data-moat signals](/moat/five-signals)**, and the data they capture is **unreconstructable retroactively**:
+
+<CardGroup cols={2}>
+  <Card title="DEMAND_LOG → Signal 4" icon="chart-line" href="/moat/five-signals">
+    The **latent / unfilled half** of moneyness-and-demand skew: interest that was previewed or quoted but never executed. Nothing on-chain records a swap that *didn't* happen, so if you don't log it at request time, it is gone forever.
+  </Card>
+  <Card title="COMPETITION_LOG → Signal 2" icon="trophy" href="/moat/five-signals">
+    The **losing** side of quote competition: every MM quote, not just the winner. The chain only commits the executed rail (so [invariant I7](/security/invariants) holds), so the losers — the raw material for win-rate and the pool-vs-MM spread — exist only in this log.
+  </Card>
+</CardGroup>
+
+<Warning>
+**Rule:** set `DEMAND_LOG` and `COMPETITION_LOG` from the **first deploy**, on both the engine and (for read-out) the API.
+**Why:** these two signals are derived from events that never reach the chain — unfilled interest and losing quotes. There is no backfill: a day run without these sinks is a permanent hole in the moat dataset.
+**Mitigation:** the sinks are append-only JSONL with negligible cost, so the safe default is **always on**.
+</Warning>
+
+<Maturity />
+
+## Minimal configurations
+
+<Tabs>
+  <Tab title="Local dev (full stack)">
+    ```bash .env
+    # root — deploy + shared
+    SEPOLIA_RPC=https://sepolia-rollup.arbitrum.io/rpc
+    LOCAL_RPC=http://localhost:8545
+    DEPLOYER_PRIVATE_KEY=0x...        # Sepolia/local key ONLY
+    OPERATOR_PRIVATE_KEY=0x...        # demo oracle operator
+    REDIS_URL=redis://localhost:6379
+    ```
+
+    ```bash packages/engine/.env
+    PORT=8787
+    CHAIN_ID=421614
+    # VERIFYING_CONTRACT defaults to core.inflexionCore from the registry
+    DEMAND_LOG=./data/demand.jsonl        # day-one sink — set it now
+    COMPETITION_LOG=./data/competition.jsonl
+    QUOTE_LOG=./data/quotes.jsonl
+    ```
+
+    ```bash apps/web/.env.local
+    NEXT_PUBLIC_RPC_URL=https://your-alchemy-or-infura-url
+    NEXT_PUBLIC_ENGINE_URL=http://localhost:8787
+    NEXT_PUBLIC_API_URL=http://localhost:8088
+    NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=your_wc_project_id
+    ```
+  </Tab>
+  <Tab title="Frontend only (Path A)">
+    The app runs end-to-end against the live deployment with **only** an RPC URL. No engine, no API — premium prices off the always-on cvAMM pool.
+
+    ```bash apps/web/.env.local
+    NEXT_PUBLIC_RPC_URL=https://your-alchemy-or-infura-url
+    # NEXT_PUBLIC_ENGINE_URL unset ⇒ Path-B unavailable, falls back to Path A
+    # NEXT_PUBLIC_API_URL   unset ⇒ live data read via the SDK directly
+    ```
+  </Tab>
+  <Tab title="MM bot">
+    ```bash
+    MM_PRIVATE_KEY=0x...
+    MARKET_ID=0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69
+    ENGINE_WS=ws://localhost:8787
+    CHAIN_ID=421614
+    VERIFYING_CONTRACT=0xC19865cF8403F59B8Eca835833aFEe3Aa8DA4848   # InflexionCore
+    QUOTE_PRICE=...        # oracle price at signing (band anchor)
+    LOAD_BPS=1000          # 10% load over FairPremium; must be ≤ maxLoadBps (I10)
+    ```
+  </Tab>
+</Tabs>
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Deployments" icon="server" href="/reference/deployments">
+    The live address registry — what env never holds.
+  </Card>
+  <Card title="Decimals & units" icon="ruler" href="/reference/decimals-units">
+    dUSDC (6), dWETH (18), feeds (8), WAD (1e18).
+  </Card>
+  <Card title="Status & caveats" icon="triangle-exclamation" href="/reference/status-caveats">
+    The pending subgraph and the EIP-170 size blocker.
+  </Card>
+  <Card title="The five signals" icon="chart-line" href="/moat/five-signals">
+    What DEMAND_LOG and COMPETITION_LOG feed.
+  </Card>
+</CardGroup>

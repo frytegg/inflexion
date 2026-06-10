@@ -1,0 +1,413 @@
+---
+title: "Integration recipes"
+description: "A copy-pasteable cookbook: read the live load surface, preview and buy protection, deposit to a tranche, stream and sign and publish an MM quote, read pool NAV, and consume a moat signal — each grounded in the per-surface worked examples."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+<Info>
+This page is a **task cookbook**. Each recipe is a short, runnable snippet pulled from the per-surface worked examples. Nothing here re-implements protocol math: the fair-value Φ-sum is always read on-chain from the Stylus `FairValueOracle`, and only the deterministic load stack is mirrored client-side via the parity-locked `cvamm` TS port. Every recipe degrades gracefully — reads return a typed envelope rather than throwing, and writes degrade rather than crash at construction.
+</Info>
+
+All recipes assume a single `sdk` built once with [`createInflexionSdk`](/sdk/getting-started). No contract address is ever passed in — every address loads from the on-chain address registry. For the live addresses, see [the deployments reference](/reference/deployments).
+
+<AddressTable />
+
+```ts
+// One factory call wires all five surfaces (lp / depositor / mm / data) + greeks/hedge.
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({
+  publicClient,        // reads (browser: wagmi usePublicClient)
+  walletClient,        // writes (omit → writes throw a clear error on call)
+  engineBaseUrl: process.env.ENGINE_URL, // Path-B quotes + the previewPremium telemetry ping
+  chainId: 421614,     // EIP-712 chainId for quote signing (Arbitrum Sepolia)
+})
+```
+
+<Note>
+**Units are load-bearing.** dUSDC is the numéraire at **6 decimals** — every premium, collateral, `V0`, and `maxIL` figure is a 6-dec raw `bigint` (`1 dUSDC = 1_000_000n`). dWETH is 18 decimals, Chainlink feeds are 8, and ratios (`aWad`, `bWad`, σ_ref, load components) are WAD = `1e18`. See [decimals & units](/reference/decimals-units).
+</Note>
+
+---
+
+## Recipe 1 — Read the live load surface
+
+The **price-to-beat**: the current pool clearing load across a set of markets. This is the one [DataClient](/sdk/data-client) method that hits live RPC — it fans the same read set MM pricing uses (one shared `loadParams` + `inventory`, a per-market `markets` multicall, then a per-market `fairPremium` multicall) and finishes the load stack with the TS port. It works **now**, with no subgraph.
+
+```ts {{ title: 'read-load-surface.ts' }}
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+
+const surface = await sdk.data.getCurrentLoadSurface({
+  markets: [{ marketId: demo.marketId_fee500_7d }], // geometry optional → neutral ref geometry
+})
+
+for (const row of surface.rows) {
+  if (row.available) {
+    console.log(
+      row.marketId,
+      row.fairPremium,        // 6-dec raw bigint, the Φ-sum baseline
+      row.poolPremium,        // ceil(fairPremium·(1+totalLoad)) capped at MaxIL
+      row.load.totalLoadWad,  // the mechanical load (WAD) — the "price to beat"
+      row.regime,             // calm | normal | stressed
+    )
+  } else {
+    console.log(row.marketId, 'degraded:', row.reason) // 'oracle-degraded' | 'market-unknown'
+  }
+}
+
+// σ_ref + regime for the volatile token (its own degraded envelope).
+const sig = await sdk.data.getSurfaceSigmaRef(tokens.demoWeth)
+if (sig.available) console.log(sig.sigmaRefWad, sig.regime)
+```
+
+<Tip>
+The **load %** is geometry-independent — only the dollar `fairPremium`/`poolPremium` scale with `a`/`b`/`maxIL`, so passing geometry is optional and a neutral reference geometry is used when omitted. To read the same surface with **no wallet and no RPC key**, hit the public API instead: `GET /pool/load-surface?marketIds=…`.
+</Tip>
+
+This is the live half of [Signal 1](/moat/five-signals). The Path-A load is the **mechanical baseline**, never sold as a behavioral signal — see [circular vs behavioral](/moat/circular-vs-behavioral).
+
+---
+
+## Recipe 2 — Preview, then buy protection (routed best-of)
+
+The two-step LP flow: price it with [`previewPremium`](/sdk/lp-client) (Path-A pool + the best engine MM quote, both capped at MaxIL), then commit with `buyProtection`. With no `quote`/`signature`, `buyProtection` fires `createSwapRouted`, which gives the LP the **cheaper of pool vs MM on-chain** and falls back to the pool on a bad MM quote — it never reverts on a bad quote.
+
+<Steps>
+<Step title="Price it">
+`previewPremium` reads `FairValueOracle.fairPremium` (never re-implemented), finishes the load stack via the TS port, and best-effort fetches the cheapest live MM quote from the engine. An unreachable engine simply leaves `premiumB` undefined and routes Path A.
+
+```ts {{ title: 'buy-protection.ts' }}
+import { createInflexionSdk, demo } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient, engineBaseUrl })
+const lp = sdk.lp
+
+const preview = await lp.previewPremium(demo.lpPositionTokenId, demo.marketId_fee500_7d)
+if (!preview.priceable) throw new Error(`not priceable: ${preview.reason}`)
+
+console.log(preview.maxIL)          // the cap AND the unit of risk (6-dec raw)
+console.log(preview.best, preview.path) // e.g. 8_930_000n (=$8.93), 'B'  (MM beat the pool)
+```
+</Step>
+
+<Step title="Set the slippage guard">
+`maxPremium` is the LP's slippage guard (numéraire raw, 6-dec). The on-chain create reverts if the routed premium would exceed it. Round **up**.
+
+```ts
+const maxPremium = (preview.best * 10_100n) / 10_000n + 1n // best + 1% slippage
+```
+</Step>
+
+<Step title="Buy (routed)">
+Default approvals send two txs before the create call — NPM `approve(core, tokenId)` and dUSDC `approve(core, maxPremium)` — the spender is **InflexionCore**.
+
+```ts
+const txHash = await lp.buyProtection({
+  tokenId: demo.lpPositionTokenId,
+  marketId: demo.marketId_fee500_7d,
+  maxPremium,
+  // omit quote/signature → createSwapRouted picks the cheaper of pool vs MM on-chain
+})
+```
+</Step>
+
+<Step title="Settle after expiry">
+`settle` recovers the expiry from the swap, walks Chainlink rounds to find the bracketing round (or accepts a `hintRoundId`), and calls `Core.settle`. The protocol pays the LP `min(realized_IL, MaxIL)` from the chosen underwriter's collateral.
+
+```ts
+const settleTx = await lp.settle(/* swapId */ 2n)
+```
+</Step>
+</Steps>
+
+<Tabs>
+<Tab title="Routed (default)">
+Omit `quote`/`signature`. A missing quote uses the **EMPTY_QUOTE sentinel** (`mm == address(0)`) so the router falls back to the pool.
+</Tab>
+<Tab title="Force Path A">
+Pass `escapeHatch: 'A'` to force the always-on pool — fires `createSwapPathA(marketId, tokenId, maxPremium)`.
+</Tab>
+<Tab title="Force a specific MM quote (Path B)">
+Pass `{ quote, signature, escapeHatch: 'B' }` where `quote` is the `SignedQuote` and `signature` its EIP-712 sig — fires `createSwap(...)`. See [Recipe 4](#recipe-4-stream-sign-and-publish-an-mm-quote).
+</Tab>
+</Tabs>
+
+<ClaimA />
+
+Entry requires `Pa ≤ P0 ≤ Pb` — out-of-range positions are rejected at creation by the `inRange` gate in `resolveGeometry`. This is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), not "IL insurance".
+
+---
+
+## Recipe 3 — Deposit to a tranche
+
+Underwrite the always-on [cvAMM pool (Path A)](/protocol/path-a-cvamm) by depositing dUSDC into the **junior** (first-loss) or **senior** tranche. The deposit spender is the **ConvexityVault**, not Core.
+
+```ts {{ title: 'deposit-to-tranche.ts' }}
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient })
+const dep = sdk.depositor
+
+// Deposit 10,000 dUSDC (6-dec raw) into JUNIOR; auto-approve to the vault.
+const res = await dep.deposit('junior', 10_000_000_000n, { autoApprove: true })
+// res.status === 'sent' | 'deferred-no-wallet' | 'error'
+
+// Read the pool + my position (claim B is carried on both).
+const state = await dep.getVaultState() // Degraded<VaultState>
+if (state.available) {
+  console.log(state.utilWad, state.regime, state.capitalNotGuaranteed)
+}
+
+const me = await dep.getPosition(walletClient.account.address)
+if (me.available) console.log(me.juniorShares, me.juniorAssets)
+
+// Withdraw is cooldown-gated: request, wait the on-chain cooldown, then withdraw.
+await dep.requestWithdrawal('junior', /* shares */ 5_000_000_000n)
+// …after dep.getWithdrawalCooldown() seconds elapse:
+const w = await dep.withdraw('junior') // reverts JuniorBelowLocked → status:'error'
+```
+
+<Warning>
+**Withdraws are cooldown-gated and the junior tranche cannot drain below the locked amount.**
+- **Limit:** `withdraw` can return `status:'error'` with a `JuniorBelowLocked` revert.
+- **Why:** the on-chain `totalLocked ≤ juniorAssets` junior-first waterfall must hold so senior protection is never broken.
+- **Mitigation:** the SDK surfaces the revert as a typed `error` `WriteResult`, not a thrown exception — wait for active swaps to settle (freeing locked collateral) and retry, or withdraw a smaller amount.
+</Warning>
+
+<ClaimB />
+
+The junior tranche is **first-loss** and captures most of the premium; the senior tranche is structurally protected from *underwriting* loss only — not from a systemic tail. See [the tranche waterfall](/concepts/tranches).
+
+---
+
+## Recipe 4 — Stream, sign, and publish an MM quote
+
+The Path-B market-maker loop. A quote is **per-market** (a load + a MaxIL-ratio band + capacity), **never per-NFT** — the `SignedQuote` carries no `tokenId`. The MM streams the geometry-free pool **load to beat**, builds a quote that undercuts it, signs it (EIP-712), and publishes it to the engine.
+
+<Steps>
+<Step title="Read the pool load to beat">
+`getPoolLoadToBeat` is geometry-free — it needs no position. It returns the pure pool floor an MM must undercut, with the `baseLoad`/`util`/`disp` decomposition.
+
+```ts {{ title: 'mm-quote.ts (server / key-based) — Node only' }}
+import { createInflexionSdk, encodeNonce } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ rpcUrl, privateKey: MM_KEY }) // raw key — NOT in the browser
+const mm = sdk.mm
+
+const tick = await mm.getPoolLoadToBeat(marketId) // PoolLoadTick
+```
+</Step>
+
+<Step title="Build the per-market quote">
+The 13 fields must match `InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly or `createSwap`/`createSwapRouted` rejects the signature. `quotePrice`, `maxNotionalV0`, `validUntil`, `nonce` are **bigint**; the `*Bps`/`model` fields are plain `number`.
+
+```ts
+const quote = {
+  mm: MM_ADDRESS,
+  marketId,
+  loadBps: Number(tick.totalLoadBps) - 50,            // undercut the pool by 50 bps
+  minMaxILRatioBps: 0,
+  maxMaxILRatioBps: 10_000,                            // accept any MaxIL ratio
+  quotePrice: liveOraclePrice,                         // bigint — the Fork-2 band anchor
+  priceBandBps: 50,                                    // ∈ [25, 500]
+  model: 0,                                            // FULL (the only v1 mode)
+  partialRatioBps: 0,
+  maxNotionalV0: 1_000_000_000_000n,                   // capacity (numéraire raw)
+  validUntil: BigInt(Math.floor(Date.now() / 1000) + 30), // on-chain bound to now + [5,15]s
+  quoteId: ('0x' + 'ab'.repeat(32)) as `0x${string}`,
+  nonce: encodeNonce(0n, 0),                           // bitmap (word<<8)|bit
+}
+```
+</Step>
+
+<Step title="Sign (enforces I10 + below-pool) and publish">
+`mm.signQuote` delegates to the engine signer (never re-implemented) and enforces two guards before returning: **I10** (`loadBps ≤ loadParams.maxLoadBps`) and **below-pool** (`loadBps < live pool load`) — else it throws `MmQuoteError`.
+
+```ts
+const signed = await mm.signQuote(MM_KEY, quote) // throws on i10-exceeded / not-below-pool
+// → publish signed.envelope to the engine (WS or POST /quote), or hand to an LP for createSwap
+```
+
+Publish over WebSocket — `{ type: 'quote', quote: <QuoteWire>, signature }` — or via the browser-friendly `POST /quote`. The engine verifies the signature + a light freshness gate, stores the cheapest-per-market candidate, and logs winners **and** losers to `COMPETITION_LOG`.
+</Step>
+</Steps>
+
+<CodeGroup>
+```ts Browser (wagmi) — recommended for /underwrite
+// No private key in the browser. Sign with the connected wallet, enforce the guards yourself.
+import { SignedQuoteTypes, quoteDomain, core, CHAIN_ID } from '@inflexion/sdk'
+
+const params = await mm.getLoadParams()
+if (quote.loadBps > params.maxLoadBps) throw new Error('i10-exceeded')
+const pool = await mm.getPoolLoadToBeat(quote.marketId)
+if (pool.available && quote.loadBps >= Number(pool.totalLoadBps)) throw new Error('not-below-pool')
+
+const signature = await walletClient.signTypedData({
+  account: walletClient.account,
+  domain: quoteDomain(CHAIN_ID, core.inflexionCore), // { 'Inflexion','1',421614, core }
+  types: SignedQuoteTypes,
+  primaryType: 'SignedQuote',
+  message: quote, // bigints for uint128/64/256
+})
+const envelope = { quote, signature } // → POST /quote or hand to LP buyProtection
+```
+
+```ts Auto-requote stream
+// Each tick: read getPoolLoadToBeat, build(poolLoad), sign (re-enforces guards), publish.
+const handle = mm.quoteStream({
+  privateKey: MM_KEY,
+  marketId,
+  build: (poolLoad) => {
+    if (!poolLoad.available) return undefined // skip this tick
+    return { ...quoteTemplate, loadBps: Number(poolLoad.totalLoadBps) - 50 }
+  },
+  publish: (env) => ws.send(JSON.stringify({ type: 'quote', ...encodeEnvelope(env) })),
+  intervalMs: 5000, // re-issue every 5s; each quote valid 10s, inside the on-chain [5,15]s window
+})
+// later: handle.stop()
+```
+
+```bash curl — browser-style publish
+curl -s -X POST http://localhost:8787/quote \
+  -H 'content-type: application/json' \
+  -d '{"quote":{"mm":"0x...","marketId":"0x...","loadBps":500,"minMaxILRatioBps":0,"maxMaxILRatioBps":10000,"quotePrice":"0","priceBandBps":100,"model":0,"partialRatioBps":0,"maxNotionalV0":"340282366920938463463374607431768211455","validUntil":"1900000010","quoteId":"0x...","nonce":"0"},"signature":"0x..."}'
+# → 200 {"ok":true,"marketId":"0x...","loadBps":500}
+```
+</CodeGroup>
+
+<Warning>
+**MM collateral is a separate flow — not part of `signQuote`.**
+- **Limit:** signing a quote does not post collateral; an unfunded MM's quote cannot be filled.
+- **Why:** collateral lives in the **UnderwriterVault**, locked at MaxIL on a Path-B fill to pay the LP at settlement.
+- **Mitigation:** approve + deposit dUSDC to the UnderwriterVault before quoting, and read it with `mm.getMmCollateral(mm)` → `{ deposited, locked, available }`.
+</Warning>
+
+This is the no-last-look design: firm GTD quotes with a tiny TTL + an oracle-anchored band. See [the Path-B market-maker rail](/protocol/path-b-mm) and [quote signing](/integrate/quote-signing).
+
+---
+
+## Recipe 5 — Read pool NAV
+
+Pool NAV is a [DataClient](/sdk/data-client) surface split into a **live composite** (current vault state) and a **history** series. The live composite reuses the [depositor](/sdk/depositor-client) `getVaultState` and works **now**; the per-tranche NAV time series is subgraph-backed and degrades to a typed pending state until the subgraph deploys.
+
+<CodeGroup>
+```ts SDK — live composite (works now)
+const state = await sdk.depositor.getVaultState() // Degraded<VaultState>
+if (state.available) {
+  console.log(state.totalAssets, state.seniorAssets, state.juniorAssets)
+  console.log(state.totalLocked, state.freeAssets, state.utilWad)
+  console.log(state.regime, state.capitalNotGuaranteed)
+}
+```
+
+```ts SDK — NAV history (subgraph-pending)
+const nav = await sdk.data.getNavHistory({ bucket: 'day' })
+if (!nav.available) {
+  // ApiPending names the FUTURE route + the exact query that WILL run — render it, never an error.
+  console.log(nav.reason)   // 'no-history-source'
+  console.log(nav.endpoint) // e.g. '/pool/nav-history'
+}
+```
+
+```bash API — live pool state (claim B)
+curl -s http://localhost:8088/pool
+# → {"available":true,"pool":{...NAV, senior/junior, util, conc, skews, regime...},
+#    "disclosure":"Depositor capital is NOT guaranteed..."}
+```
+</CodeGroup>
+
+<Warning>
+**NAV history is subgraph-pending today.**
+- **Limit:** `getNavHistory` (and the API `GET /pool/nav-history`) return a typed `pending` body, not data.
+- **Why:** the subgraph that indexes the on-chain events is built and passing CI but not yet deployed (`SUBGRAPH_URL` is unset) — a build gap, not a contract gap. The contracts already emit every event needed.
+- **Mitigation:** the **live** composite (`getVaultState` / `GET /pool`) returns current NAV now; the history surface embeds the exact future route + query so wiring it later is a one-line body swap.
+</Warning>
+
+<ClaimB />
+
+---
+
+## Recipe 6 — Consume a moat signal
+
+The [data moat](/concepts/data-moat) exposes [five non-circular behavioral signals](/moat/five-signals). One — **Signal 4 (demand skew)** — is intrinsically split: its *latent* half (LPs who priced but did not buy) is off-chain engine telemetry that is **LIVE now**, while its *realized* half (on-chain fills) is subgraph-backed and pending. Putting unfilled interest on-chain would break invariant I7, so the latent half can only live in telemetry.
+
+<Tabs>
+<Tab title="SDK">
+```ts {{ title: 'consume-moat-signal.ts' }}
+// Signal 4 — demand skew. Returns a typed ApiPending until the subgraph deploys;
+// the latent half is already captured in the engine DEMAND_LOG.
+const demand = await sdk.data.getDemandRequests({ marketId: demo.marketId_fee500_7d })
+if (!demand.available) {
+  console.log(demand.reason)   // 'no-history-source'
+  console.log(demand.endpoint) // '/data/demand-requests'
+  console.log(demand.query)    // the exact query that WILL be sent
+}
+```
+</Tab>
+<Tab title="API — latent half LIVE">
+```bash
+# Signal 4: latent half LIVE (engine DEMAND_LOG), realized half pending (subgraph).
+curl -s http://localhost:8088/data/demand-requests
+# → {"available":true,
+#    "realized":{"available":false,"reason":"subgraph-not-deployed","query":"..."},
+#    "latent":[{"marketId":"0x...","widthBucket":"tight","distanceBucket":"at-edge",
+#               "durationBucket":"week","count":3,"previews":2,"quoteRequests":1}],
+#    "latentEnabled":true,"disclosure":"Structures ship..."}
+
+# Signal 2 dynamic half — quote competition (winners AND losers from COMPETITION_LOG).
+curl -s 'http://localhost:8088/data/quote-competition?marketId=0x...&since=1900000000'
+# → {"available":true,"competition":[{"mm":"0x...","quotes":12,"accepted":10,"rejected":2,
+#    "minLoadBps":480,"avgLoadBps":510,...}],"enabled":true,...}
+```
+</Tab>
+</Tabs>
+
+The five signals — clearing-load surface, pool-vs-MM spread + win-rate, convexity term structure, demand skew, and net gamma — are all **behavioral**, measured against the transparent mechanical baseline, never derived from it. Inverting `fairRate` to recover an "implied vol" is deliberately **dropped as circular** — it would recover nothing but our own published σ_ref and load stack. See [circular vs behavioral](/moat/circular-vs-behavioral) for the rigor.
+
+<Warning>
+**Two halves of the moat are unreconstructable retroactively — capture them from day one.**
+- **Limit:** the *latent* half of Signal 4 and the *dynamic* half of Signal 2 never reach the chain.
+- **Why:** invariant I7 guarantees an unchosen quote touches no nonce/capacity, so a previewed-but-unbought LP interest and a losing/withdrawn MM quote leave no on-chain trace — and the data is gone forever if not logged at the time.
+- **Mitigation:** set `DEMAND_LOG` and `COMPETITION_LOG` on the engine from the first deploy; the SDK `previewPremium` ping (PII-free, coarse buckets only) and every `GET /quote` feed them now.
+</Warning>
+
+<Maturity />
+
+---
+
+## Degradation cheat-sheet
+
+Every recipe above returns one of these typed envelopes rather than throwing:
+
+| Envelope | Shape | Used by |
+| --- | --- | --- |
+| `Degraded<T>` | `{available:true} & T` \| `{available:false, reason}` | vault state, position, regime, surface σ_ref |
+| `Priceable<T>` | `{priceable:true} & T` \| `{priceable:false, reason}` | anything needing P0 (preview, geometry, payoff) |
+| `ApiPending` | `{available:false, reason:'no-history-source', endpoint, query, detail}` | all DataClient history methods |
+| `WriteResult` | `{tx, txHash?, status:'sent'\|'deferred-no-wallet'\|'error', detail?}` | DepositorClient writes |
+| `NonceStatus` | `{spent, precision:'coarse'\|'precise', detail}` | MM fill attribution |
+
+<Info>
+**Live today, no subgraph needed:** premium preview, current load surface, σ_ref, market pricing, vault state, protection status, position geometry, on-chain book scan, coarse fill watching, and the off-chain telemetry halves (Signals 2 & 4 dynamic/latent). **Subgraph-pending** (typed pending, render the state — never an error): all DataClient history, precise `QuoteFilled` fill attribution, full fee accounting, and NAV history.
+</Info>
+
+<CardGroup cols={2}>
+  <Card title="SDK overview" icon="bolt" href="/sdk/overview">
+    The five surfaces, the factory, and the degradation contract in full.
+  </Card>
+  <Card title="API endpoints" icon="globe" href="/integrate/api-endpoints">
+    The cached, public, read-only REST facade — every route, query, and backing.
+  </Card>
+  <Card title="Quote signing" icon="signature" href="/integrate/quote-signing">
+    The definitive EIP-712 `SignedQuote` reference and the on-chain bounds.
+  </Card>
+  <Card title="The five signals" icon="chart-line" href="/moat/five-signals">
+    Each behavioral signal with its exact non-circularity verdict.
+  </Card>
+</CardGroup>

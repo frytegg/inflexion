@@ -1,0 +1,243 @@
+---
+title: "Protect — buy IL protection (LP)"
+description: "The complete /protect walkthrough: pick a market, pick an in-range position, preview Path A vs Path B premiums, read the payoff-with-cap chart, buy via createSwapRouted (three approval spenders), and settle at expiry."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+`/protect` is the LP's door. You hold a Uniswap v3 LP NFT; you want to hedge its **in-range** impermanent-loss risk for a fixed upfront premium. This page walks the whole flow end to end — from picking a market to settling at expiry — against the live deployment on **Arbitrum Sepolia (chainId 421614)**.
+
+The page is driven by the SDK's [`LpClient`](/sdk/lp-client) (`lp.*`). Its header copy restates the entire product in two sentences, including the qualified no-bad-debt clause. This is [claim A](/concepts/no-bad-debt): **the LP is always paid in FULL mode — qualified.**
+
+<Note>
+**Three facts the UI repeats on every risk surface, because they are load-bearing.**
+1. This is an [**in-range convexity hedge**](/concepts/in-range-convexity-hedge), not "IL insurance." Entry requires $P_a \le P_0 \le P_b$ — out-of-range positions are **rejected at creation**.
+2. Payout $= \min(\text{realized\_IL},\ \text{MaxIL})$. The [**cap is load-bearing**](/concepts/maxil) for the no-bad-debt guarantee.
+3. "No bad debt" is only true with [its full qualifying clause](/concepts/no-bad-debt) — never stated unqualified.
+</Note>
+
+## The page at a glance
+
+The layout is two columns plus a full-width footer:
+
+- **Left** — the market picker and your eligible v3 positions.
+- **Right** — the premium preview (Path A vs Path B), the payoff-with-cap chart, and the Buy panel.
+- **Below, full width** — *Your active protections*, with per-swap Settle buttons.
+
+Every write action is gated behind a `ConnectGate` — reads work immediately, writes need a connected wallet. The empty connect state reads: *"Connect a wallet on Arbitrum Sepolia to view your positions and buy protection."*
+
+## The seven steps
+
+<Steps>
+  <Step title="Connect a wallet on Arbitrum Sepolia">
+    Reads are graceful and resolve without a wallet, but buying and settling require a connected signer. The stack is RainbowKit + wagmi + viem. See [App prerequisites](/app/prerequisites) for tokens and network setup, and [addresses & units](/sdk/addresses-units) for the numéraire decimals.
+  </Step>
+
+  <Step title="Pick the market — fee tier × duration">
+    Two button rows derived from the canonical `MARKETS` list: fee tiers **0.05% / 0.30% / 1.00%** and durations **7d / 30d / 90d** — **9 markets** in all. The default is the **fee-500 / 7d** market. The selected `marketId` is shown truncated under the picker.
+
+    The marketId is deterministic geometry, not an off-chain registry key:
+
+    $$\text{marketId} = \text{keccak256}\big(\text{abi.encodePacked}(\text{dWETH},\ \text{dUSDC},\ \text{fee},\ \text{durationSeconds})\big)$$
+
+    The same derivation runs on-chain, so [your off-chain id matches the chain exactly](/integrate/marketid-parity).
+  </Step>
+
+  <Step title="Pick a position — read the in-range badge">
+    The left list calls `lp.listEligiblePositions(owner, { durations: [selectedDuration] })`. It enumerates your NPM positions and computes geometry and MaxIL per position. Each `PositionRow` shows:
+
+    - the **tokenId** (e.g. `#3218`);
+    - an **in-range badge** — teal *"in range"*, amber *"out of range"*, or *"oracle degraded"* when `inRange` is `undefined`;
+    - **V0** (notional), **MaxIL** (the cap, in amber), and **L** (the stored liquidity) when priceable; otherwise a degraded reason.
+
+    The in-range flag is exact geometry: `inRange = sqrtP0 >= sqrtPa && sqrtP0 <= sqrtPb` — the same gate `createSwap` enforces on-chain. If there are **no eligible positions**, the empty-state explains the gate: *"Out-of-range positions are not protectable — entry requires $P_a \le P_0 \le P_b$"*.
+
+    <Warning>
+      **Limit:** an out-of-range position cannot be protected, and the badge will not turn teal.
+
+      **Why:** Inflexion hedges *in-range convexity* — the deterministic, bounded IL geometry between $P_a$ and $P_b$. Outside the range a v3 position is a single-sided spot bet, not a convexity claim, and its MaxIL geometry no longer defines a bounded cap.
+
+      **Mitigation:** the cap $\text{MaxIL} = \max\big(\text{IL}(P_a),\ \text{IL}(P_b)\big)$ is what makes [no bad debt](/concepts/no-bad-debt) hold; rejecting out-of-range entries is not a bug but the load-bearing precondition. Re-enter once your position is back in range, or pick a market whose duration suits your view.
+    </Warning>
+  </Step>
+
+  <Step title="Preview the premium — Path A vs Path B, cheaper highlighted">
+    `PreviewAndBuy` calls `lp.previewPremium(tokenId, marketId)` and refetches every 30s. The `PreviewResult` carries `{ maxIL, fairPremium, fairRateWad, sigmaRefWad, premiumA, premiumB?, best, path }`. The panel shows:
+
+    - **Premium (best)** — what you pay once, with a Path A/B badge in the panel header;
+    - **MaxIL (cap)** in amber;
+    - side-by-side **Path A · pool** vs **Path B · MM** — the MM cell shows *"—" / "no live MM quote"* when `premiumB` is undefined because the engine isn't running;
+    - **Fair premium** (the on-chain Φ-sum floor) and **σ_ref** (annualised vol).
+
+    **Why two prices?** Path A is the mechanical pool floor — the always-on, signature-free [cvAMM](/protocol/path-a-cvamm). Path B is a competing **firm** MM quote — [the ceiling of price](/protocol/path-b-mm). [The route picks the cheaper](/protocol/routing) and highlights it. In the live lifecycle, the MM beat the pool (\$8.93 vs \$13.80) and won the fill.
+  </Step>
+
+  <Step title="Read the payoff-with-cap chart">
+    Rendered from the selected position's geometry $\{P_a, P_0, P_b\}$, the chart draws the whole product in one picture:
+
+    | Element | What it is |
+    |---|---|
+    | **Teal bold line** | the payout you actually receive $= \min(\text{IL}, \text{MaxIL})$ |
+    | **Teal shaded area** | the covered region |
+    | **Dashed red line** | the *true* IL, which keeps growing beyond the range |
+    | **Red shaded area** | the uncovered region (true IL above the cap; zero in-range) |
+    | **Amber dashed horizontal line** | the **MaxIL cap** — the hero of the chart |
+    | **Vertical markers $P_a$ / $P_0$ / $P_b$** | the range bounds and entry price |
+
+    The caption is the protocol's safety argument in one sentence: *"You are paid your realized IL up to MaxIL (teal) while the price is in range. Beyond the range the true IL (dashed red) keeps growing but your payout is capped at the amber line — the cap that makes the no-bad-debt guarantee hold"*.
+
+    The curve math is deterministic v3 geometry:
+
+    $$\text{IL}(P) = \max\big(\text{holdValue}(P) - \text{lpValue}(P),\ 0\big)$$
+
+    $$\text{MaxIL} = \max\big(\text{IL}(P_a),\ \text{IL}(P_b)\big)$$
+
+    all normalized to a percentage of V0. If geometry is unavailable, the chart shows a degraded note instead of failing. See [the IL formula](/math/il-formula) and [the MaxIL derivation](/math/maxil-derivation) for the full math.
+  </Step>
+
+  <Step title="Buy — approve (three spenders) + createSwapRouted">
+    The Buy panel states the deal in plain language — *"Pay \$X now to cover this position's in-range IL up to \$MaxIL for {duration}"* — and shows the **max premium** sent with a **1% slippage buffer** (`SLIPPAGE_BPS = 100`).
+
+    On click, `onBuy` calls `lp.buyProtection({ tokenId, marketId, maxPremium, approve: true })`. The SDK **auto-approves two things, then sends one create call**:
+
+    1. **NPM** `approve(core.inflexionCore, tokenId)` — the position NFT, to InflexionCore.
+    2. **dUSDC** `approve(core.inflexionCore, maxPremium)` — the premium, spender is **InflexionCore**.
+    3. **`createSwapRouted`** (default) — picks the cheaper of pool vs MM, and **never reverts on a bad MM quote** (a missing quote uses the `EMPTY_QUOTE` sentinel so the router falls back to the pool).
+
+    <Warning>
+      **Three different approval spenders — this is the recurring gotcha.** Across the app, premium → **InflexionCore**; depositor deposit → **ConvexityVault**; MM collateral → **UnderwriterVault**. On `/protect` you only touch the first: the NFT and the dUSDC premium are **both approved to InflexionCore**. Do not approve the premium to the vault.
+    </Warning>
+
+    The button uses `useTx` to drive through `signing → pending → success`, waits for the receipt, and trims viem's verbose revert dumps to the first line. On success, the eligible-positions, owner-swaps, and preview queries invalidate so the new protection appears immediately.
+
+    <Note>
+      **Escape hatches exist, but the default UI always routes.** `escapeHatch:'A'` forces `createSwapPathA` (the always-on pool); `escapeHatch:'B'` forces `createSwap` against a specific signed quote. The default — `createSwapRouted` — is the right choice for almost everyone: it gives you the cheaper rail with no signature risk. See [routing](/protocol/routing).
+    </Note>
+  </Step>
+</Steps>
+
+## After the buy — manage active protections and settle
+
+`ActiveProtections` (full-width, below the columns) discovers your swaps by an **on-chain scan** — no subgraph required. It reads `nextSwapId`, walks up to **200** swap ids, and keeps the ones where the protection's `lp` matches the connected owner. Each renders an `ActiveProtection` card:
+
+- a header with `swap #id`, an **Active / Settled** badge, and a **Path A · pool** vs **Path B · MM** badge (`isPathA = mm == convexityVault`);
+- stats: **Premium paid**, **MaxIL cap** (amber), **V0**, and **IL to date** with the live `payout` and a *"· capped"* flag when the cap is hit. IL-to-date is itself a `Priceable` — a degraded oracle renders a pending note, not an error: *"The protection is intact — payout is still computed at settlement from the price-at-expiry"*.
+
+### Settle at expiry
+
+The **Settle** button appears only once the swap is **expired** (`secondsToExpiry === 0n`) and still active. Clicking calls `lp.settle(swapId)`, which:
+
+1. reads `Core.swaps(swapId)` to recover expiry;
+2. walks the Chainlink feed backwards to find the bracketing round if no hint is supplied;
+3. calls `settle(swapId, hintRoundId)`.
+
+The caption restates the deal: *"Pays your realized IL — capped at MaxIL — from the underwriter's collateral"*. The list footer restates the qualified claim: *"LPs are always paid in FULL mode (no bad debt — qualified)"*.
+
+Settlement uses the liquidity `L` **stored at creation**, never re-read from the NFT — [invariant I6](/security/invariants). That is why an external `increaseLiquidity` cannot inflate your payout, and why the payout is `min(IL, MaxIL)` computed against frozen geometry. The settlement core is [identical regardless of which rail opened the swap](/protocol/lifecycle).
+
+```typescript Protect: preview → buy → settle
+import { createInflexionSdk, demo } from "@inflexion/sdk";
+
+const sdk = createInflexionSdk({ publicClient, walletClient, engineBaseUrl });
+const lp = sdk.lp;
+
+// 1. Price it: Path A pool floor + best engine MM quote, both capped at MaxIL.
+const preview = await lp.previewPremium(demo.lpPositionTokenId, demo.marketId_fee500_7d);
+if (!preview.priceable) throw new Error(`not priceable: ${preview.reason}`);
+console.log(preview.best, preview.path); // e.g. 8_930_000n (=$8.93), "B"
+
+// 2. maxPremium = best + 1% slippage buffer (raw 6-dec; round up).
+const maxPremium = (preview.best * 10_100n) / 10_000n + 1n;
+
+// 3. Buy. Default approvals: NPM approve(core, tokenId) + dUSDC approve(core, maxPremium).
+//    Omitting quote/signature → createSwapRouted picks the cheaper rail on-chain.
+const txHash = await lp.buyProtection({
+  tokenId: demo.lpPositionTokenId,
+  marketId: demo.marketId_fee500_7d,
+  maxPremium,
+});
+
+// 4. After expiry: settle. The round-walk finds the bracketing Chainlink round.
+const settleTx = await lp.settle(/* swapId */ 2n);
+```
+
+<Tip>
+**maxPremium is your slippage guard.** It is a numéraire-raw bigint (6 decimals — `1 dUSDC = 1_000_000n`). The on-chain create reverts if the routed premium would exceed it, so the 1% buffer protects you against a price tick between preview and signing without overpaying. See [decimals & units](/reference/decimals-units).
+</Tip>
+
+## The in-range / cap framing — why it is the whole product
+
+Everything on `/protect` reinforces two geometric facts:
+
+<CardGroup cols={2}>
+  <Card title="In-range entry" icon="ruler-combined" href="/concepts/in-range-convexity-hedge">
+    Entry requires $P_a \le P_0 \le P_b$. The in-range badge, the eligible-positions filter, and the on-chain `createSwap` gate all enforce it. Out-of-range is rejected at creation.
+  </Card>
+  <Card title="The MaxIL cap" icon="square-root-variable" href="/concepts/maxil">
+    Payout $= \min(\text{realized\_IL}, \text{MaxIL})$. The amber line on the chart is the cap; it is also the unit of risk that makes positions fungible to an underwriter — which is why an [MM quote is per-market, not per-NFT](/protocol/path-b-mm).
+  </Card>
+</CardGroup>
+
+Together they are what makes $\text{payout} \le \text{collateral} \equiv \text{MaxIL}$ hold by construction ([invariant I1](/security/invariants)) — the structural reason the protocol cannot produce bad debt in FULL mode under its stated assumptions.
+
+<Note>
+**Live on-chain lifecycle (2026-06-05).**
+- **Path A** swap #1 — V0 \$270,531, MaxIL \$1,669.24, premium **\$9.70 (0.58% of MaxIL)**, realized IL \$148.64 paid in full from the `ConvexityVault`.
+- **Path B** swap #2 — the MM beat the pool (\$8.93 vs \$13.80), locked \$3,215.65 of its own collateral, and settled \$245.66 from the `UnderwriterVault`.
+
+This is the floor/ceiling routing, demonstrated end to end.
+</Note>
+
+## What is live, and what degrades to pending
+
+<Warning>
+**The subgraph is not yet indexed — and that is a typed, honest state, not a bug.**
+
+**Limit:** anything historical or aggregate (per-market volume, NAV history, the time-series [data-moat signals](/concepts/data-moat), precise MM fill attribution) is not yet available.
+
+**Why:** the rich on-chain events (`SwapPriced`, `QuoteFilled`) have been emitted since deploy block `274081134`, but the indexer is still pending deployment.
+
+**Mitigation:** every such surface degrades to a typed `pending` state that names the route it will be served from — never a fake number, never a thrown error. On `/protect` specifically, everything in the buy-and-settle flow is **live today over RPC**: premium preview, the payoff chart, eligible-position discovery, buy (Path A), and settle. **Path B previews need the engine running** (`NEXT_PUBLIC_ENGINE_URL`); without it the preview shows Path A only and `premiumB` is undefined. See [status & caveats](/reference/status-caveats).
+</Warning>
+
+A few `/protect` reads degrade honestly even when the chain is healthy:
+
+- If the **live oracle reverts** (stale feed / sequencer down), the preview panel renders a `PendingNote` — *not priceable now, the position still exists, becomes quotable when the oracle recovers* — and **Buy is disabled**. See [oracles](/protocol/oracles).
+- **IL-to-date** on an active card is a `Priceable`; a degraded oracle shows a pending note, since the actual payout is computed at settlement from the price-at-expiry, not from the live price.
+
+## Live deployment addresses
+
+<AddressTable />
+
+For the full registry and ABIs, see [the deployments reference](/reference/deployments).
+
+## The claim, stated correctly
+
+<ClaimA />
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="Earn in the cvAMM" icon="piggy-bank" href="/app/earn">
+    The other side: deposit dUSDC and underwrite the in-range IL you just hedged. Claim B — capital is not guaranteed.
+  </Card>
+  <Card title="Underwrite as an MM" icon="gavel" href="/app/underwrite">
+    Stream firm per-market signed quotes that win flow only by undercutting the pool.
+  </Card>
+  <Card title="The LP SDK client" icon="cube" href="/sdk/lp-client">
+    `previewPremium`, `buyProtection`, `settle`, and `listEligiblePositions` in full.
+  </Card>
+  <Card title="Routing" icon="route" href="/protocol/routing">
+    How `createSwapRouted` picks the cheaper rail and falls back to the pool.
+  </Card>
+  <Card title="The payoff & cap" icon="ruler-combined" href="/concepts/maxil">
+    MaxIL as both the cap and the unit of risk.
+  </Card>
+  <Card title="The full lifecycle" icon="timeline" href="/protocol/lifecycle">
+    The swap's journey from create through ACTIVE custody to the settlement core.
+  </Card>
+</CardGroup>

@@ -1,0 +1,257 @@
+---
+title: "The two rails, one settlement core"
+description: "Path A (the signature-free cvAMM pool) and Path B (firm EIP-712 MM quotes) are two upstream rails into a single, untouched settlement core — and createSwapRouted gives the LP the cheaper of the two, falling back to the pool without ever reverting."
+---
+
+Inflexion has exactly **two ways** an underwriter can be put on the other side of an
+LP's hedge, and exactly **one way** the hedge is settled. The two upstream rails
+differ only in how the price is discovered and where the collateral lives; the
+**downstream settlement core is identical** regardless of which rail opened the swap.
+
+This separation is the architectural spine of the protocol. It is why the cvAMM can
+be the floor of liquidity and the MMs the ceiling of price, why a bad MM quote can
+never harm an LP, and why the no-bad-debt guarantee is independent of how the quote
+was discovered.
+
+<CardGroup cols={2}>
+  <Card title="Path A — the cvAMM" icon="layer-group" href="/protocol/path-a-cvamm">
+    A pooled, always-on, signature-free on-chain underwriter. `createSwapPathA`. The **floor of liquidity** — there is always a code-capped price.
+  </Card>
+  <Card title="Path B — the MM rail" icon="signature" href="/protocol/path-b-mm">
+    A market maker posting a firm EIP-712 signed quote (no last-look). `createSwap`. The **ceiling of price** — an MM wins only by beating the pool.
+  </Card>
+</CardGroup>
+
+## One settlement core, two upstream rails
+
+Every difference between Path A and Path B lives in `createSwap` pricing and
+locking — strictly **upstream of `settle`**. The settlement core (`settle`, the
+`min(IL, MaxIL)` cap, the [MaxIL](/concepts/maxil) formula, and [invariants](/security/invariants)
+I1–I9) is **identical regardless of which rail opened the swap**.
+
+<Note>
+The shipped `SwapRecord` does not carry a `path` field. `settle` infers the rail
+purely from the stored counterparty — `s.mm == address(convexityVault)` means it was
+Path A, anything else means Path B. The settlement math
+does not branch on the rail; only the **vault dispatch** does (pool vs MM collateral).
+</Note>
+
+```
+        Path A (createSwapPathA)              Path B (createSwap)
+        signature-free, on-chain              firm EIP-712 signed quote
+                  │                                     │
+        on-chain load stack,                  loadBps over FairPremium,
+        I10-clamped, capped at MaxIL          ≤ maxLoadBps, capped at MaxIL
+                  │                                     │
+        lock from ConvexityVault              lock from UnderwriterVault (per-MM)
+                  │                                     │
+                  └──────────────┬──────────────────────┘
+                                 ▼
+                  ════════ ONE SETTLEMENT CORE ════════
+            settle(swapId, hintRoundId)
+            • pin Chainlink round at expiry T
+            • IL with the STORED L (I6)
+            • payout = min(realized_IL, MaxIL)   (I1 + I2)
+            • dispatch payout from the rail's vault
+            • return the NFT to the LP
+```
+
+Both rails are priced off the **same on-chain published fair value** — the
+[`FairPremium`](/concepts/fair-value) — computed once per create:
+
+$$
+\text{FairPremium} = \text{fairRate} \cdot \text{MaxIL}, \qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\,\text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+The router pokes the [VolOracle](/protocol/oracles) once and prices **both** rails
+off the same `FairPremium` — there is exactly one fair
+value per position, and the rails only differ in the load applied on top of it.
+
+## Path A — the cvAMM rail (`createSwapPathA`)
+
+Path A is the **pooled passive underwriter**: the dual-tranche `ConvexityVault`. It
+is always quoting, signature-free at the point of sale, and entirely on-chain.
+
+- **Counterparty:** the `ConvexityVault` (pooled, dual-tranche SENIOR/JUNIOR — see
+  [tranches](/concepts/tranches)).
+- **Pricing:** the on-chain [load stack](/math/load-stack), hard-capped by invariant
+  I10, then additionally capped at MaxIL.
+- **No keeper, no signed quote, no validity clock, no relayer.** Execution
+  (`_executePathA`) locks collateral from the pool,
+  pulls the premium, takes the NFT into the `ILVault`, and splits the premium **99%
+  into the pool** (across tranches) and **1% to the treasury**.
+
+The load applied on top of `FairPremium` is computed mechanically from the pool's
+own state:
+
+$$
+\text{premium}_A = \text{FairPremium}\cdot\bigl(1 + \min(\underbrace{\text{baseLoad} + \text{util\_skew} + \text{disp\_skew}}_{\text{totalLoad}},\ \text{maxLoad})\bigr)
+$$
+
+The `min(..., maxLoad)` is the I10 clamp: the pool **cannot** overcharge beyond
+`FairPremium · (1 + maxLoad)` — by construction in code, not by trust. None of these
+load primitives are hardcoded; they come from the calibrated risk-parameter set.
+
+<Tip>
+Path A is the reason there is **no cold-start problem**. The cvAMM always quotes a
+code-capped fair price with no market maker present, so an LP can always be priced
+and protected — the pool is the floor of liquidity.
+</Tip>
+
+## Path B — the MM rail (`createSwap`)
+
+Path B is the **firm signed-quote rail**. A market maker streams an EIP-712 (or
+EIP-1271 contract-signed) quote and posts collateral in its own `UnderwriterVault`.
+
+- **Counterparty:** a single MM, collateralized in the per-MM `UnderwriterVault`.
+- **The quote is PER-MARKET, never per-NFT.** The `SignedQuote`
+  carries a `marketId`, a `loadBps`, a MaxIL-ratio band,
+  and capacity — but **no `tokenId`**. This is the direct mechanical consequence of
+  [MaxIL being the fungible unit of risk](/concepts/maxil): an MM expresses "I write
+  positions whose MaxIL is 2%–7% of V0" once, and **any** LP position in that market
+  fills against it.
+- **Pricing:** the contract derives
+  $\text{premium}_B = \lceil\text{FairPremium}\cdot(1 + \text{loadBps}/10^4)\rceil$,
+  capped at MaxIL, and requires `loadBps ≤ maxLoadBps` (I10 on Path B).
+
+Because a signed payload is a **bearer instrument** that survives past an off-chain
+cancel, Path B is firm — there is **no last-look**. The MM cannot reject at
+settlement; its protections are three deterministic on-chain checks at fill (no MM
+discretion):
+
+<Steps>
+  <Step title="Oracle-anchored price band (I9 / Fork 2)">
+    At fill, `require absBps(P_live, quote.quotePrice) ≤ priceBandBps` reusing the
+    same on-chain price read. This kills the dominant
+    gap-on-stale-quote pickoff. See [price pinning](/security/price-pinning).
+  </Step>
+  <Step title="Short validity window">
+    `validUntil` must be `[5s, 15s]` ahead (default 8s) — bounds the leakage interval.
+  </Step>
+  <Step title="Selective bitmap nonce">
+    Permit2-style bitmap (word `<<` 8 `|` bit): cancel one quote by flipping one bit,
+    never cancel-all (`cancelNonces`).
+  </Step>
+</Steps>
+
+Execution (`_executePathB`) is the **only** place
+Path-B state mutates: it increments `consumedNotional[quoteId]` (capacity authority,
+I7), consumes the nonce, locks the MM's collateral, writes the record, pulls the
+premium, takes the NFT, and splits the premium **99% to the MM, 1% to the treasury**
+(no tranche split on Path B).
+
+## `createSwapRouted` — the cheaper of `{pool, MM}`
+
+The third entry point, `createSwapRouted`, is how an
+LP gets the **best of both rails in a single transaction**. It prices both rails off
+the same `FairPremium` (single poke) and routes to whichever is cheaper.
+
+<Steps>
+  <Step title="Pool must be wired">
+    The market must be `cvammEnabled` — the always-on floor must exist as a fallback,
+    else there is nothing to fall back to and the call reverts.
+  </Step>
+  <Step title="Price both rails, once">
+    `premiumA = _pricePathAFromFair` and
+    `(usableB, premiumB) = _quoteUsableAndPremiumB` off the **same** `FairPremium`.
+  </Step>
+  <Step title="Route — strict-beat, ties to Path A">
+    `useB = usableB && premiumB < premiumA`. An MM wins **only if it strictly beats**
+    the pool; a **tie resolves to Path A** — the dependency-free always-on rail. An MM
+    cannot divert flow merely by matching the pool.
+  </Step>
+  <Step title="Execute only the chosen rail">
+    **Only the executed path mutates state**, then
+    emit `SwapRouted(swapId, pathB, premiumA, premiumB)` so the cheapest-wins routing
+    is auditable on-chain.
+  </Step>
+</Steps>
+
+### The non-reverting mirror — why a bad MM quote never hurts the LP
+
+The router does not call the reverting Path-B gate. It calls
+`_quoteUsableAndPremiumB`, a **`view` mirror** of every
+Path-B check that returns `(false, 0)` instead of reverting. It reads only —
+`isNonceUsed`, `consumedNotional`, `availableBalance`, and the signature via
+STATICCALL — and **never mutates a nonce, capacity, or lock**, so an unchosen quote
+leaves **zero trace** (I7 preserved).
+
+<Warning>
+**A bad MM quote falls back to the pool — it never reverts the LP's transaction.**
+
+- **Limit:** an MM quote can be absent, expired, stale, out-of-band, over-load, over-
+  capacity, undercollateralized, zero-priced, wrong-model, or simply not cheaper.
+- **Why it cannot harm the LP:** the router evaluates the MM quote through a read-only
+  mirror, so any of those conditions just makes `usableB = false`.
+- **Mitigation (by construction):** the swap silently routes to the always-on pool.
+  Only **protocol-level** failures (market inactive, not the position owner, position
+  out of range, dust, slippage, or the pool being unwired) revert. An LP using
+  `createSwapRouted` is never worse off than going straight to Path A.
+</Warning>
+
+This is what makes the floor/ceiling framing concrete: the MM rail is a pure
+**price-improvement layer**. Nothing about correctness, solvency, or liveness depends
+on it; it can only ever undercut the pool, never degrade the guarantee the LP already
+has from the pool.
+
+## Side-by-side
+
+| | **Path A — cvAMM** | **Path B — MM** |
+|---|---|---|
+| Entry point | `createSwapPathA` | `createSwap` |
+| Counterparty | `ConvexityVault` (pool) | a single MM |
+| Signature | none (signature-free at sale) | EIP-712 / EIP-1271 firm quote |
+| Quote granularity | n/a (on-chain pricing) | **per-market, never per-NFT** (no `tokenId`) |
+| Collateral home | `ConvexityVault` (pooled, dual-tranche) | `UnderwriterVault` (per-MM) |
+| Pricing | on-chain load stack, I10 clamp | `loadBps` over FairPremium, `≤ maxLoadBps` |
+| Premium split | 99% into pool (tranche split), 1% treasury | 99% MM, 1% treasury |
+| Validity clock / nonces / band | none | `validUntil` + bitmap nonce + oracle band (I9) |
+| Relayer needed | no (pure on-chain) | yes (off-chain quote book) |
+| Role | **floor of liquidity** (always quotes) | **ceiling of price** (wins only by beating pool) |
+
+## Proven live on both rails
+
+The 2026-06-05 redeploy ran a real create→settle on **both** rails against one 300s
+market:
+
+- **Path A** (swap #1): V0 \$270,531.28, MaxIL \$1,669.24, premium **\$9.70 (0.58% of
+  MaxIL)**, realized IL \$148.64, payout \$148.64 — settled from the `ConvexityVault`.
+- **Routed → Path B** (swap #2): `createSwapRouted` saw `premiumA_cvamm $13.80` vs
+  `premiumB_mm $8.93` (MM `loadBps` 1000) and **chose the MM** because it strictly
+  beat the pool. MaxIL \$3,215.65 was locked from the **MM's own collateral**, realized
+  IL \$245.66, payout \$245.66 — settled from `UnderwriterVault`.
+
+This concretely demonstrates the routing: the cheaper rail wins, the chosen rail's
+own collateral pays, and the settlement core is the same in both cases.
+
+## The two separate claims
+
+The two rails do not change which guarantees apply. The settlement core enforces the
+LP-facing guarantee identically for both:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to whoever underwrites — the pool's
+depositors on Path A, the market maker on Path B:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Routing in depth" icon="route" href="/protocol/routing">
+    The full `createSwapRouted` decision and the non-reverting mirror, step by step.
+  </Card>
+  <Card title="The pricing stack" icon="layer-group" href="/protocol/pricing-stack">
+    How FairPremium, the load stack, and the I10 cap compose into a premium.
+  </Card>
+  <Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why MaxIL fungibility is what makes an MM quote per-market, not per-NFT.
+  </Card>
+  <Card title="The full lifecycle" icon="timeline" href="/protocol/lifecycle">
+    Create → active → settle, from `registerMarket` to NFT return.
+  </Card>
+</CardGroup>

@@ -1,0 +1,414 @@
+---
+title: "Depositor risk disclosure"
+description: "What a cvAMM depositor actually earns and risks — the heavy-run figures, the structural levers, and the mandatory disclosure tone. Capital is not guaranteed."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+A cvAMM depositor is a **volatility seller**: you collect a premium priced under the
+risk-neutral measure at a conservative [`σ_ref`](/math/sigma-ref), and you pay
+realized `min(IL, MaxIL)` under the *real* measure. In calm markets that gap is your
+yield. In a crash you pay the whole synchronized book. There is no version of selling
+volatility that is also a savings account.
+
+This page states the downside in the same breath as the upside and lets the quant
+figures speak in raw numbers.
+
+<ClaimB />
+
+## The one identity that governs everything
+
+Every figure on this page falls out of a single monthly P&L identity. It makes the
+volatility-seller nature mechanical, not rhetorical:
+
+$$
+\text{monthly\_return} \;=\; \text{utilization}\cdot\frac{\sum_i\bigl(\text{premium}_i - \text{payout}_i\bigr)}{\sum_i \text{MaxIL}_i}
+$$
+
+$$
+\text{premium}_i = \text{fairRate}(\sigma_{\text{ref}})\cdot(1+\text{baseLoad})\cdot\text{MaxIL}_i
+\quad\text{(income — risk-neutral, at }\sigma_{\text{ref}}\text{)}
+$$
+
+$$
+\text{payout}_i = \min(\text{IL}_i,\ \text{MaxIL}_i)
+\quad\text{(claim — paid under the }\textbf{real}\text{ measure)}
+$$
+
+Premium comes in priced at the conservative [`σ_ref`](/math/sigma-ref); payout goes
+out under whatever the market actually did. The edge is the spread between the two —
+the volatility-risk premium — **earned in calm months and given back in crashes.**
+When realized vol exceeds the implied vol you priced at, you lose. That is not a bug
+to be tuned away; it is the definition of the business.
+
+<Note>
+**Two separate claims, never merged.** The LP's [no-bad-debt guarantee](/concepts/no-bad-debt)
+(Claim A) is *structural* — `collateral = MaxIL ≥ payout` by construction — and holds
+**regardless of how the depositor P&L moves**. The depositor's capital-at-risk (Claim B)
+is the economic substance of being a vol seller. Neither claim implies the other. We
+state them side by side at the [bottom of this page](#the-two-claims-stated-side-by-side).
+</Note>
+
+## The model — deliberately harder than reality
+
+The figures below come from the **heavy run**. We did not calibrate to a friendly
+model. We built one *stronger than GBM* on purpose, so the downside is stress-tested
+past the obvious questions:
+
+<AccordionGroup>
+  <Accordion title="Fat tails — Student-t, t_df = 4" icon="chart-line">
+    Returns are Student-t with 4 degrees of freedom, not Gaussian — heavy tails so a
+    bad month is genuinely bad, not a normal-distribution artifact.
+  </Accordion>
+  <Accordion title="A 3-state Markov volatility regime" icon="diagram-project">
+    Vol switches between **calm 0.45 / normal 0.75 / stressed 1.30** with persistence
+    0.82 — the same calm/normal/stressed bands the on-chain
+    [`baseLoad`](/math/load-stack) keys off (0.20 / 0.30 / 0.50). Stress clusters, as
+    it does in reality.
+  </Accordion>
+  <Accordion title="Tail-dependent crash correlation → 1" icon="link">
+    This is a **single-pair** book. In a deep move, the cross-position correlation
+    rises toward 1 — every open position settles against the *same* ETH move, so the
+    diversification that helps in calm markets evaporates exactly when you need it.
+    This is the honest worst case for a mono-factor vol seller.
+  </Accordion>
+  <Accordion title="Poisson deep-crash months" icon="bolt">
+    On top of the regime model, ~0.8 deep-crash events per year with mean **−45%** —
+    bracketing March 2020, Terra-LUNA, FTX, and the 2022 bear (CoinGecko's free tier
+    is 401-gated, so this is a *labelled historical-episode-anchored real-measure*
+    calibration, not a fit to a clean dataset).
+  </Accordion>
+  <Accordion title="A lagging σ_ref" icon="clock-rotate-left">
+    Critically, the model uses a **lagging `σ_ref`** so that coverage written at a
+    stress *onset* is underpriced exactly as it would be on-chain (vol lags the jump).
+    Measured payout/premium at onset = **1.14** — that residual is the
+    volatility-risk-premium the [`baseLoad`](/math/load-stack) must carry, **not** a
+    no-bad-debt risk.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+**Limit → Why → Mitigation: the model is real-measure and adversarial, not a marketing backtest.**
+
+- **Limit:** these are *model-illustrative* figures from a Monte Carlo, not realized
+  protocol history (none exists yet — the protocol is the mechanism that will create
+  it).
+- **Why:** there is no public realized-IL dataset to backtest against; building one is
+  precisely the [data moat](/concepts/data-moat). So we used a synthetic model
+  calibrated to labelled historical crash episodes.
+- **Mitigation:** the model is **stronger than GBM** on every axis above, and a
+  6-agent adversarial self-audit independently re-ran the engine. Treat the **risk
+  panel** as the robust part and the APY figures as illustrative.
+</Warning>
+
+## The headline figures — bare pool, unhedged, untranched
+
+These are the **single-asset bare pool** numbers: before tranching, before the
+optional roadmap hedge, at base loads (calm/normal/stressed = 20/30/50%), gross of
+demand / competition / fees. **Lead with the geometric 3y CAGR, never the arithmetic
+mean** — and read the risk columns as the robust part of the result.
+
+| Operating point | 3y CAGR (med / p10 / p90) | P(3y NAV < 1) | P(losing month) | 1-in-100 month | worst month | P(3y DD > 50%) | no bad debt |
+|---|---|---|---|---|---|---|---|
+| **Disciplined `u = 0.40`** | **122% / 50% / 247%** | 0.3% | **26.5%** | **−20.1%** | **−26.8%** | **2.7%** | ✓ |
+| Fully-deployed `u = 0.60` | 209% / 72% / 491% | 0.5% | 26.5% | −30.1% | −40.1% | 18.0% | ✓ |
+
+Every number means something specific. Here is what each one is actually telling you:
+
+<AccordionGroup>
+  <Accordion title="3y CAGR — 122% median at u = 0.40 (50% / 247% at p10 / p90)" icon="arrow-trend-up">
+    The volatility-risk premium compounds strongly in the median, with a **wide**
+    distribution. The p10 column is the honest downside of the *median run*, not the
+    worst case — even a 10th-percentile three-year path still grows. We lead with the
+    **geometric** CAGR because the arithmetic mean of a fat-tailed, compounding series
+    flatters the result.
+  </Accordion>
+  <Accordion title="P(losing month) ≈ 26.5% — roughly one month in four is red" icon="calendar-xmark">
+    This is **intrinsic to volatility selling**: you lose whenever realized vol
+    exceeds the implied vol you priced at. It does not improve with utilization
+    (26.5% at both `u = 0.40` and `u = 0.60`) because it is a property of the *measure
+    split*, not of how much capital is deployed. It is not a flaw to be tuned away.
+  </Accordion>
+  <Accordion title="1-in-100 month / worst month — the tail of a single bad month" icon="chart-area">
+    At `u = 0.40`, a 1-in-100 month is **−20.1%** and the worst observed across 50,000
+    runs is **−26.8%**. Both worsen materially at `u = 0.60` (−30.1% / −40.1%). This
+    is the number a conservative depositor should anchor on — and it is exactly what
+    the [senior tranche](#the-structural-levers-how-the-targets-are-actually-met)
+    exists to remove.
+  </Accordion>
+  <Accordion title="P(3y DD > 50%) — the dominant drawdown lever is utilization" icon="arrow-down-wide-short">
+    The probability of a peak-to-trough drawdown over 50% across three years is
+    **2.7% at `u = 0.40`** versus **18.0% at `u = 0.60`** — a near-7× swing from one
+    parameter. Utilization is the dominant *drawdown* lever (not a tail-feasibility
+    lever), which is why the [`util_skew`](/math/load-stack) prices new coverage up
+    *before* the pool over-commits.
+  </Accordion>
+  <Accordion title="no bad debt ✓ — structural, on every single path" icon="shield-check">
+    Across **every** simulated path and over a ±99% (and a widened −6…+6 log-move)
+    grid, `min(IL, MaxIL)/MaxIL ≤ 1.0` with `max_payout_frac = 1.000000`, zero
+    exceptions. The LP guarantee holds **structurally
+    and oracle-independently** even while the depositor P&L swings violently. This is
+    the cleanest demonstration that the two claims are separate: the depositor can
+    have a −27% month while the LP is paid in full, from pre-locked collateral.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+**The honest headline finding: an unhedged, untranched single-pair ETH pool CANNOT meet the safety targets at any *marketable* load.**
+
+- **Limit:** the binding safety targets — **1-in-100 monthly loss `≤ 10%`** and
+  **P(losing month) `≤ 15%`** — are unreachable for a bare single-asset pool at any
+  load satisfying `premium ≤ MaxIL`.
+- **Why:** these constraints are **intrinsic to single-asset volatility selling** —
+  you lose whenever realized > implied, and a synchronized crash pays the whole
+  correlated book at once. No load setting fixes that; charging more than `MaxIL`
+  would mean charging more than the maximum possible payout, which the
+  [I10 cap](/security/invariants) forbids by construction.
+- **Mitigation:** we **did not loosen the targets**. The honest answer is the
+  *structural levers* — tranching at launch, the pool hedge on the roadmap (next
+  section). The bar stayed; the structure changed.
+</Warning>
+
+## What the underwriting fund looks like under a severe correlated crash
+
+The figures above are summary statistics; the shape behind them is a Monte Carlo
+distribution. These solvency visualizations show the underwriting fund's per-run P&L
+and ruin behavior under a **severe correlated crash** — the regime where the
+single-pair book's correlation has risen toward 1 and the whole book settles against
+one move. They are illustrative of the *mechanism* (collateral absorbs the bulk of
+loss; the fund taps only on rare tails), not a forecast.
+
+<Frame caption="Underwriting-fund P&L per Monte Carlo run under a severe correlated crash (50,000 runs). The median run is positive (the volatility-risk premium); the left tail is the crash months a depositor must be willing to absorb. The fund covers the modelled tail up to its equity.">
+  <img src="/static/quant/fund_pnl_distribution.png" alt="Histogram of underwriting-fund P&L per 30-day Monte Carlo run under a severe correlated crash: positive median, fat negative tail, with VaR(99%) and the 0.1%-tail loss marked." />
+</Frame>
+
+The distribution is the visual form of the headline table: a positive median (the
+premium you earn in the ~73% of months that are not red) and a fat negative tail (the
+crash months that drive the −26.8% worst month and the 26.5% loss-month rate). The
+left edge is exactly the risk Claim B is about.
+
+<Frame caption="More underwriter collateral → exponentially less fund ruin risk. The curve falls steeply in collateral ratio; the marked point is the ruin-budget crossing where P(ruin) meets the 0.1% budget.">
+  <img src="/static/quant/ruin_probability_vs_c.png" alt="Log-scale plot of fund ruin probability versus underwriter collateral ratio: a steep exponential decline, crossing the 0.1% ruin budget at a low collateral ratio." />
+</Frame>
+
+This is the collateralization story in one curve: ruin probability falls
+**exponentially** in the underwriter's collateral ratio. In FULL mode the underwriter
+posts exactly `MaxIL` — the right-hand, flat region of this curve — which is why
+[no bad debt is structural](/concepts/no-bad-debt) for the LP regardless of where the
+depositor P&L lands.
+
+<Frame caption="Across severity percentiles, the underwriter's posted collateral covers most of the LP loss; the fund only taps on the rare deep tail (P99.9).">
+  <img src="/static/quant/tail_coverage.png" alt="Stacked bars by severity percentile showing LP payouts covered overwhelmingly by posted collateral, with the fund contributing only at the deepest P99.9 tail." />
+</Frame>
+
+The coverage decomposition makes the same point from the LP's side: at the median and
+even the P95/P99 severities, posted collateral covers essentially the entire LP loss;
+the fund is touched only at the P99.9 deep tail. The LP is paid either way — the
+question this page answers is **who bears the loss behind that payment**, and the
+answer is the depositor.
+
+<Warning>
+**Limit → Why → Mitigation: these three charts are from a solvency-fund Monte Carlo, not the bare-pool depositor headline run.**
+
+- **Limit:** the charts visualize underwriting-fund solvency under a severe correlated
+  crash and use a collateral-ratio framing; the **authoritative depositor numbers are
+  the [headline tables](#the-headline-figures-bare-pool-unhedged-untranched)** above.
+- **Why:** the depositor risk panel is best stated as the exact percentile statistics
+  (CAGR, P(losing month), 1-in-100, worst month, P(DD>50%)); the charts add the
+  *shape* and the *collateralization intuition* the tables cannot show.
+- **Mitigation:** read the charts as illustrations of mechanism (positive median, fat
+  tail, exponential ruin decay, collateral-covers-the-bulk) and the tables as the
+  load-bearing figures. Both agree on the substance: solvent collateral, real
+  downside, capital not guaranteed.
+</Warning>
+
+## The structural levers — how the targets are actually met
+
+The bare pool fails the targets; the structure is the answer. Three levers, with
+honest status labels:
+
+| Lever | Effect (at `u = 0.40`, base loads) | Status |
+|---|---|---|
+| **Utilization cap** (`util_skew`, knee 0.45) | The **drawdown** lever: `u = 0.40 → P(DD>50%) = 2.7%` vs `u = 0.60 → 18%` | **launch** |
+| **Senior / junior tranche** (`sf = 0.60`) | **Senior `P(loss) = 0`, worst `0%`**, gross CAGR ~197% — the "convexity savings account." **Junior** worst **−67%** — the high-APY first-loss vol tranche. Holds **jointly with `u ≤ 1 − sf`** | **LAUNCH** (structural invariant) |
+| **Pool hedge** (`h ≈ 0.60`) | 1-in-100 → **−9.6%** (target ~−10%), worst → −12.3%, P(DD>50%) → ~0%; CAGR barely moves. **Tail-tightening, NOT solvency** | roadmap |
+
+### Tranching is the launch lever
+
+The dual-tranche [`ConvexityVault`](/concepts/tranches) is what turns one bare-pool
+profile into two genuinely different products, **at launch** — not a roadmap promise:
+
+<CardGroup cols={2}>
+  <Card title="Senior — the convexity savings account" icon="shield-halved">
+    At `sf = 0.60`, `u = 0.40`: **`P(loss) = 0`, worst month `0%`**, gross CAGR ~197%.
+    Structurally protected from underwriting loss **while the junior buffer holds and
+    `u ≤ 1 − sf`**. Smaller, smoother premium slice.
+  </Card>
+  <Card title="Junior — the first-loss vol tranche" icon="fire">
+    Worst **−67%**. Absorbs underwriting losses first and earns the **larger** premium
+    slice for buffering senior. High-APY, high-variance — a pure vol-selling position.
+  </Card>
+</CardGroup>
+
+Senior protection is the structural invariant `totalLocked ≤ juniorAssets`, enforced
+at every `lockCollateral`, so `Σ payouts ≤ totalLocked ≤ juniorAssets` ⇒ junior
+absorbs all underwriting loss before senior is touched (see the
+[tranche math](/math/no-bad-debt-math) and the [tranche product](/concepts/tranches)).
+
+### The hedge is roadmap, and it is tail-tightening — not solvency
+
+There is a third lever — a pool-side options hedge — and we are precise about its role:
+
+<Tabs>
+  <Tab title="The frontier">
+    The verified pool-hedge frontier at `u = 0.40`:
+
+    | hedge `h` | 1-in-100 month | worst month | P(DD > 50%) |
+    |---|---|---|---|
+    | 0.00 | −20.1% | −26.8% | 2.7% |
+    | 0.50 | −11.3% | −14.7% | 0.03% |
+    | **0.60** | **−9.6%** | **−12.3%** | **~0%** |
+    | 0.75 | −7.0% | −8.6% | 0% |
+
+    At `h = 0.60` the 1-in-100 month meets the ~−10% target, the worst month tightens
+    to −12.3%, P(DD>50%) goes to ~0% — and **CAGR barely moves**, at ~1.15× fair hedge
+    cost (\$0.0227/mo).
+  </Tab>
+  <Tab title="Why it is not solvency">
+    The hedge **tightens the tail; it does not create the no-bad-debt guarantee** —
+    that is already structural in FULL. The hedge carries **basis risk**: it
+    approximates a fixed v3 gamma profile with a perpetual-vs-fixed options position,
+    so it is an *approximation*, not a guarantee. We label it honestly as
+    tail-tightening and keep it off the critical path.
+  </Tab>
+</Tabs>
+
+<Warning>
+**Limit → Why → Mitigation: the hedge is a roadmap enhancement, not a launch dependency.**
+
+- **Limit:** the cleanest 1-in-100 ≈ −10% result depends on a pool hedge that is
+  **roadmap**, not shipped.
+- **Why:** the hedge introduces basis risk (perpetual-vs-fixed gamma) and operational
+  surface; we do not want depositor solvency to depend on an approximation.
+- **Mitigation:** the **launch** levers — the utilization cap and the senior/junior
+  tranche — already make the product honest and viable for two audiences without it.
+  The hedge is additive tail-tightening, and no part of the no-bad-debt guarantee
+  rests on it.
+</Warning>
+
+## The mandatory disclosure tone
+
+The quant did not just produce numbers — it fixed the **exact language** every
+depositor surface must use. This is verbatim, not paraphrasable:
+
+> "You earn the volatility risk premium in calm markets and absorb losses in crashes.
+> In FULL the pool cannot become insolvent and cannot be run, but **YOUR CAPITAL IS
+> NOT GUARANTEED.**"
+
+The rules around it are equally firm:
+
+<CardGroup cols={2}>
+  <Card title="Never 'stable' or 'modest APY'" icon="ban">
+    The product is a volatility seller. Calling it stable would be a
+    misrepresentation, not a softening.
+  </Card>
+  <Card title="Lead with geometric 3y CAGR" icon="chart-line">
+    Never the arithmetic mean. APY figures are gross of demand, competition, and fees,
+    and are model-illustrative — the **risk panel** is the robust part.
+  </Card>
+</CardGroup>
+
+<Note>
+**The model is, if anything, net-conservative to depositors.** The
+[`σ_ref`](/math/sigma-ref) floor of **0.50** sits *above* observed calm ETH vol
+(~0.45), so the pool **overcharges** the ~27% of months that are calm. The heavy
+run's all-months realized **payout/premium = 0.654** — i.e. over the full
+distribution the pool collected materially more than it paid. The conservatism is
+structural, not assumed.
+</Note>
+
+<Maturity />
+
+## What the adversarial audit confirmed
+
+A **6-agent adversarial self-audit** independently re-ran the engine and confirmed
+each load-bearing claim:
+
+<Steps>
+  <Step title="No bad debt is structural — confirmed">
+    `max_payout_frac = 1.000000` across every path and the widened log-move grid.
+    `min(IL, MaxIL)/MaxIL ≤ 1.0` always, independent of any oracle — the LP guarantee
+    (Claim A) does not depend on the depositor outcome.
+  </Step>
+  <Step title="Infeasibility of the bare pool is robust — confirmed">
+    The bare single-pair pool fails the safety targets even under *heavier* stress.
+    The targets were **not loosened**; the structural levers are the answer.
+  </Step>
+  <Step title="The measure split is correct — confirmed">
+    Premium is collected risk-neutral at `σ_ref`; payout is paid under the real
+    measure. The edge is the (real) gap between them, not an accounting artifact.
+  </Step>
+  <Step title="The model is net-conservative — confirmed">
+    `σ_ref` floor 0.50 > calm vol 0.45 overcharges the 27% of calm months;
+    all-months payout/premium = 0.654. The pool errs toward depositor safety.
+  </Step>
+</Steps>
+
+The result rests on the part that is *structural* (no bad debt, the senior invariant,
+the I10 cap, the conservative `σ_ref`) and is honest about the part that is *economic*
+(selling volatility is intrinsically high-variance, and no engineering makes a vol
+seller low-risk). The dual-tranche structure does not hide that risk — it lets each
+depositor pick a dose: senior for the convexity savings account, junior for the
+high-APY vol tranche.
+
+<Info>
+What this disclosure does **not** claim matters as much as what it does. A single-pair
+unhedged pool is **not** safe — the numbers above show why. The LP and depositor
+claims are **never** merged. No target was loosened. The downside is printed in full.
+</Info>
+
+## The two claims, stated side by side
+
+This is the page where both load-bearing disclosures belong together. They are
+**separate** and must never be combined.
+
+The LP-facing guarantee is structural and oracle-independent — it holds regardless of
+how the depositor P&L moves:
+
+<ClaimA />
+
+The depositor-facing reality is the opposite: capital is at risk for **both**
+tranches, junior first.
+
+<ClaimB />
+
+The split, one more time: the LP's [no-bad-debt guarantee](/concepts/no-bad-debt)
+(Claim A) is *structural* — `collateral = MaxIL ≥ payout` by construction — and is
+**orthogonal to every pricing oracle and to the tranche split**. The depositor's
+capital-at-risk ([Claim B](/concepts/tranches)) is the economic substance of being a
+volatility seller. Senior protection sits *inside* Claim B; it reduces, but never
+eliminates, junior-then-systemic risk, and it never reaches across to the LP side.
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The tranche product in depth" icon="layer-group" href="/concepts/tranches">
+    The premium waterfall in, the loss waterfall out, and the senior-protection
+    invariant that makes `seniorLoss` provably 0.
+  </Card>
+  <Card title="Earn — the depositor app" icon="piggy-bank" href="/app/earn">
+    Deposit into senior or junior, read the live risk panel, request a withdrawal.
+  </Card>
+  <Card title="The load stack & the levers" icon="sliders" href="/math/load-stack">
+    `baseLoad`, `util_skew`, `dispersion_skew`, and the I10 clamp — where the
+    utilization drawdown lever lives.
+  </Card>
+  <Card title="No-bad-debt math" icon="scale-balanced" href="/math/no-bad-debt-math">
+    Why the LP guarantee is structural and orthogonal to everything on this page.
+  </Card>
+</CardGroup>

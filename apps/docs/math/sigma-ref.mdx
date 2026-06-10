@@ -1,0 +1,249 @@
+---
+title: "sigma_ref — the volatility oracle"
+description: "Why sigma_ref = max(short EWMA, long EWMA, floor) is mandatory, why the 0.50 floor sits above calm ETH vol, and the precise scope: it is load-bearing for solvency, never for no-bad-debt."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+$\sigma_{\text{ref}}$ is the **only stochastic input** to the protocol's on-chain pricer. Everything else in [the Phi-sum](/math/fair-value-phi-sum) — the geometry $a = P_a/P_0$, $b = P_b/P_0$, the duration $T$ — is deterministic and observable. The volatility estimate is the single dial the protocol turns to decide how risky a given range looks. So the design question is not "what is the most accurate vol estimate?" but "**what is the most conservative vol estimate that can never quietly underprice a regime change?**"
+
+The answer is a deliberately defensive construction:
+
+$$
+\sigma_{\text{ref}} = \max\bigl(\,\sigma_{\text{short}},\ \sigma_{\text{long}},\ \sigma_{\text{floor}}\,\bigr)
+$$
+
+The `max(...)` and the floor are not engineering convenience. They are the conservative guard that keeps the pool from selling convexity too cheaply at exactly the worst moment. This page explains the construction, the EWMA mechanics, why the `max` is mandatory, why the floor sits *above* calm ETH realized vol on purpose — and, critically, the **precise scope** of what a wrong $\sigma_{\text{ref}}$ can and cannot break.
+
+<Note>
+**Where it lives.** On-chain production: `VolOracle`, live on Arbitrum Sepolia — see [the deployment registry](/reference/deployments).
+</Note>
+
+## The construction, term by term
+
+$\sigma_{\text{ref}}$ is the pointwise maximum of three numbers: a fast EWMA, a slow EWMA, and a hard floor. On-chain this is `VolOracle._sigmaRef`.
+
+<ParamField path="sigma_short" type="annualized vol">
+A **fast EWMA of Chainlink log-returns** with a one-day halflife. It reacts quickly: it catches a vol spike within hours, but it also decays back to calm quickly once the move passes.
+</ParamField>
+
+<ParamField path="sigma_long" type="annualized vol">
+A **slow EWMA of the same log-returns** with a 30-day halflife. It has memory: a recent crash keeps it elevated for weeks, so it carries the lingering risk that the fast window has already forgotten.
+</ParamField>
+
+<ParamField path="sigma_floor" type="constant">
+A hard lower bound of **0.50** (50% annualized). No matter how calm the realized series gets, the pool prices off **at least** 50% vol. This is the deliberate conservative anchor — see [the floor section](#the-floor-sits-above-calm-eth-vol).
+</ParamField>
+
+### Calibrated values
+
+These come from the calibrated risk-parameter set (the cvAMM block) — **none are hardcoded** in the contract. Hardcoding any vol primitive is the exact failure the [external audit](/security/audits) flagged.
+
+| Parameter         | Value      | Meaning                                         |
+| ----------------- | ---------- | ----------------------------------------------- |
+| `short_halflife`  | 86,400 s   | 1 day — weight halves every day of samples      |
+| `long_halflife`   | 2,592,000 s| 30 days — weight halves every month of samples  |
+| `floor`           | 0.50       | hard lower bound, annualized vol                |
+
+## The EWMA mechanics
+
+Both $\sigma_{\text{short}}$ and $\sigma_{\text{long}}$ are **exponentially-weighted moving averages of log-returns** taken from Chainlink price ticks, at two different horizons. Each `poke` of the on-chain oracle folds the newest price into a running per-second variance estimate, annualizes it, and takes the conservative max.
+
+### Log-returns
+
+From a sequence of price observations $P_0, P_1, \dots, P_n$, the log-returns are
+
+$$
+r_i = \ln\!\left(\frac{P_i}{P_{i-1}}\right)
+$$
+
+Working in log space is what makes the estimator multiplicative-noise-aware: it matches the GBM model the [Phi-sum](/math/fair-value-phi-sum) is integrated against, where price moves are lognormal.
+
+### Exponential weighting
+
+The EWMA variance assigns each squared return a weight that decays geometrically with its age. With decay factor $\lambda$ and the most recent return at age $0$:
+
+$$
+\hat{\sigma}^2_{\text{period}} = \frac{\displaystyle\sum_{i} \lambda^{\,\text{age}(i)}\, r_i^2}{\displaystyle\sum_{i} \lambda^{\,\text{age}(i)}}
+$$
+
+The decay factor is set from a **halflife** — the number of samples over which a weight halves:
+
+$$
+\lambda = 0.5^{\,1/\text{halflife}}
+$$
+
+So `short_halflife = 86,400 s` means a return's contribution halves after a day; `long_halflife = 2,592,000 s` means it halves after a month. **The most recent return always carries the largest weight** — the estimator is responsive to fresh data without throwing away history.
+
+<Note>
+**RiskMetrics convention — `demean = False`.** The variance is computed as $\mathbb{E}[r^2]$, not $\mathbb{E}[(r-\bar r)^2]$ — the sample mean is *not* subtracted. Over short horizons the drift term is negligible relative to the diffusion term ($\mu\, \Delta t \ll \sigma\sqrt{\Delta t}$), and including a noisy mean estimate would only add variance to the estimator. This is the standard RiskMetrics EWMA.
+</Note>
+
+### Annualization
+
+The per-period variance is scaled to an annualized standard deviation by the square-root-of-time rule:
+
+$$
+\sigma_{\text{period}} = \sqrt{\hat{\sigma}^2_{\text{period}}} \times \sqrt{\text{samples\_per\_year}}
+$$
+
+On-chain, each `poke` folds the latest price into a per-second variance and annualizes against a 365-day year. The annualized number is what feeds $\sigma^2 T$ inside the Phi-sum — see [the fair-value page](/math/fair-value-phi-sum#the-only-stochastic-input) for how it enters the S-curve.
+
+### On-chain sampling guards
+
+The on-chain `poke` is **permissionless and idempotent-when-too-soon**, which is what lets it be folded directly into `createSwap` with no dedicated keeper:
+
+<Steps>
+  <Step title="poke is a no-op when dt is too small">
+    If `dt < minSampleInterval`, `poke` does nothing. This prevents micro-samples from blowing up the $r^2/\mathrm{d}t$ ratio — two ticks a fraction of a second apart would otherwise produce an enormous spurious variance.
+  </Step>
+  <Step title="dt is clamped to a sane band">
+    `dt` is clamped to `[minSampleInterval, maxSampleInterval]`, so a single huge gap can neither divide by a tiny `dt` nor over-weight one stale sample.
+  </Step>
+  <Step title="The first poke seeds at the floor">
+    Both windows are seeded at the floor on the first observation, so early reads are conservative rather than zero. On the live deploy $\sigma_{\text{ref}}$ initialized to the `0.5e18` floor, which corresponds to $\text{fairRate} \approx 0.847$ at the reference geometry.
+  </Step>
+</Steps>
+
+`createSwap` pokes the oracle in `_fairPremium` so the vol estimate stays fresh on every fill without a separate cron — see [the lifecycle](/protocol/lifecycle).
+
+## Why the max(...) is mandatory
+
+This is the core of the design, and it is worth stating sharply: **you must never price off raw realized volatility.**
+
+The reason is a structural property of realized vol: **it understates risk right before a regime change.** Volatility lags the jump. In the calm run-up to a crash, the realized series is, by definition, calm — the violent returns that justify a high vol estimate haven't happened *yet*. A single fast EWMA would therefore collapse to a deceptively low number at exactly the moment a writer is about to be hit hardest. A pool pricing convexity off that number would sell coverage at its cheapest right before the path most likely to make it pay MaxIL.
+
+The `max` over three sources is the conservative guard against every failure mode of a single estimator:
+
+<AccordionGroup>
+  <Accordion title="Why not just the fast EWMA (short window alone)?">
+    The fast window is responsive but **forgetful**. It catches a spike quickly, but it also decays back to calm within days. A crash three weeks ago — whose risk is far from resolved — has already washed out of the short window. Pricing off it alone would underprice coverage written in the unsettled aftermath of a shock.
+  </Accordion>
+  <Accordion title="Why not just the slow EWMA (long window alone)?">
+    The slow window has memory but is **sluggish**. It would not register a fresh, fast-developing spike until it had accumulated enough samples — too late for the coverage being written *into* that spike. Pricing off it alone would underprice coverage at the onset of a new regime.
+  </Accordion>
+  <Accordion title="Why the hard floor on top of both EWMAs?">
+    Both EWMAs are backward-looking: in a genuinely quiet, extended calm they will both decay toward the low realized vol. Realized-vol estimators are structurally lagging at a regime boundary — neither window can see a jump that hasn't printed. The floor is the model-free backstop that holds the price up regardless of what the realized series says. See the next section.
+  </Accordion>
+</AccordionGroup>
+
+Taking the **maximum** of a short window (catches fresh spikes), a long window (remembers recent shocks), *and* a hard floor (model-free backstop) means $\sigma_{\text{ref}}$ can be made to **over**-estimate, but is structurally hard to **under**-estimate. For a seller of convexity, that asymmetry is exactly the one you want: overcharging in a calm month costs the LP a little; undercharging into a crash costs the depositor pool its principal.
+
+<Tip>
+The mantra: **the cost of being too high is borne by the LP buying coverage (a small overpayment); the cost of being too low is borne by the depositor pool (an undercharge that erodes NAV).** The `max(...)` deliberately puts the protocol on the conservative side of that trade.
+</Tip>
+
+## The floor sits above calm ETH vol
+
+The floor is `0.50` — and that is a deliberately conservative choice, not a casual default.
+
+Observed calm ETH realized vol sits around **~0.45**. The floor of **0.50 > ~0.45** is set *above* it on purpose. The consequence is structural and intentional: **the pool overcharges in calm months.** When realized vol is genuinely low, both EWMAs decay toward ~0.45, but $\sigma_{\text{ref}}$ is held up at 0.50, so the published [FairPremium](/math/fair-value-phi-sum) is a touch richer than the "true" calm-market fair value.
+
+That over-charge is not a bug — it is a transfer to the depositor pool that compensates for the residual model risk the [GBM, r = 0 assumption](/math/fair-value-phi-sum#the-only-modeling-assumption) leaves on the table. The depositor heavy run measures the net effect directly:
+
+<Info>
+**Net-conservative to depositors.** Across all months in the P1.13 heavy run, realized **payout / premium = 0.654** — the pool collects meaningfully more premium than it pays in claims, in aggregate, precisely because the floor overcharges the ~27% of months that are calm. See [the depositor disclosure](/risk-disclosure) for the full risk panel.
+</Info>
+
+The floor frames the worst-case residual honestly. A **lagging** $\sigma_{\text{ref}}$ at the *onset* of a stress regime — before either EWMA has caught up — underprices coverage written at that instant: the heavy run measures `payout / premium = 1.14` at a stress onset. That residual is real, but it is a **vol-risk premium that `baseLoad` must carry**, not a no-bad-debt risk — which brings us to scope.
+
+<Warning>
+**Limit → Why → Mitigation.** A backward-looking $\sigma_{\text{ref}}$ can lag a regime change, underpricing coverage written at a stress *onset* (`payout/premium ≈ 1.14` at onset). **Why:** realized vol structurally trails a jump — no realized-vol estimator can see a move that hasn't printed yet, and no on-chain formula removes the GBM assumption. **Mitigation, three layers:** (1) the `max(short, long, floor)` construction is biased to over-estimate; (2) the `0.50` floor overcharges calm months so the all-months payout/premium is **0.654**, building a cushion; (3) the residual forward-vol gap is deliberately left as **MM alpha** — forward-looking MMs price off implied vol and correct the pool's structural backward-looking bias via [Path B](/protocol/path-b-mm). Crucially, this residual costs *depositors* an undercharge, never the *LP* a default — see scope below.
+</Warning>
+
+## No on-chain implied volatility
+
+A natural question: why not use implied vol — the market's forward-looking expectation — instead of a backward-looking realized estimate?
+
+Because **there is no deep on-chain options market to read it from.** Deribit holds over 90% of ETH options off-chain, so any on-chain implied-vol feed would be a thin, manipulable, or oracle-dependent surface. Inflexion refuses to make any solvency path depend on one:
+
+- **Deribit DVOL is an optional published *enrichment* only.** It can be surfaced as context in the data layer, but **no solvency path ever depends on it.**
+- The structural backward-looking bias of realized vol is instead corrected by **the market itself**: forward-looking MMs who price off implied vol will undercut the pool whenever it is too rich, and decline to write when it is too cheap — exporting the forward-vol view into the system through [the routing](/protocol/routing) rather than through a fragile oracle.
+
+This is the same separation-of-concerns that runs through the whole protocol: the pool is the always-on **floor of liquidity** at a conservative realized-vol estimate; the MM rail is the **ceiling of price** carrying the forward-looking correction as its alpha.
+
+<Warning>
+**Do not present "inferring implied vol by inverting fairRate" as a data-moat signal.** It is the circular idea the protocol deliberately *dropped*: you cannot recover the market's implied vol by back-solving the fairRate the pool itself published from $\sigma_{\text{ref}}$ — that just hands you $\sigma_{\text{ref}}$ back, an input, not an observation. The genuine, non-circular signals are documented on [circular vs behavioral](/moat/circular-vs-behavioral) and [the five signals](/moat/five-signals).
+</Warning>
+
+## Load-bearing scope: solvency, never no-bad-debt
+
+This is the single most important — and most often-confused — point about $\sigma_{\text{ref}}$. It is load-bearing for **one** thing and structurally irrelevant to **another**, and the two must never be merged.
+
+$\sigma_{\text{ref}}$ (and the [FairValueOracle](/concepts/fair-value) that consumes it) is solvency-load-bearing for **the I10 price cap and depositor solvency only.**
+
+<Tabs>
+  <Tab title="What a wrong sigma_ref CAN break (solvency / I10)">
+    A wrong or too-low $\sigma_{\text{ref}}$ makes the pool **under-charge load**. The published premium is computed off too-calm a vol, so [premium income](/math/load-stack) stops covering payouts, and NAV compresses. The loss then hits [the tranche waterfall](/concepts/tranches) **junior-first**: junior absorbs it, senior takes only the systemic tail.
+
+    This is a real cost — it can cost depositors money. It is the [I10 / depositor-solvency](/security/invariants) surface. It is exactly why `baseLoad` exists as a structural over-fair-value charge: to carry the residual vol-risk premium a lagging estimate leaves behind.
+
+    <ClaimB />
+  </Tab>
+  <Tab title="What a wrong sigma_ref CANNOT break (no-bad-debt / I1)">
+    A wrong $\sigma_{\text{ref}}$ **cannot violate I1, the FULL no-bad-debt invariant.** That guarantee is structural and oracle-independent:
+
+    $$
+    \text{collateral}_{\text{FULL}} = \text{MaxIL} \ \geq\ \min(\text{realized\_IL},\ \text{MaxIL}) = \text{payout}
+    $$
+
+    In FULL mode the collateral equals [MaxIL](/concepts/maxil), which is pure geometry frozen at creation, and the payout is capped at MaxIL **by construction of the cap** — *regardless of what $\sigma$ was, or whether the vol oracle was ever right.* See [the no-bad-debt math](/math/no-bad-debt-math).
+
+    A vol-oracle fault can cost depositors money. It can **never** create LP bad debt in FULL.
+
+    <ClaimA />
+  </Tab>
+</Tabs>
+
+**Two separate guarantees, never merged:**
+
+| Property | Depends on $\sigma_{\text{ref}}$? | Who bears a $\sigma_{\text{ref}}$ fault |
+| -------- | --------------------------------- | --------------------------------------- |
+| **I10 price cap / depositor solvency** | **Yes** — too-low $\sigma$ ⇒ under-charge ⇒ NAV compresses | depositors (junior first, senior tail) |
+| **I1 no-bad-debt (FULL)** — LP always paid | **No** — structural: $\text{collateral} = \text{MaxIL} \geq \text{payout}$ for any $\sigma$ | nobody — the LP is paid regardless |
+
+The mental model: $\sigma_{\text{ref}}$ decides **how richly the pool gets paid for the risk it takes** (a depositor-economics question). It does **not** decide **whether the LP gets paid** (a structural-collateral question). The first is the [load stack](/math/load-stack)'s job; the second is the [cap](/concepts/in-range-convexity-hedge)'s job, and the cap holds no matter what the vol oracle says.
+
+## Where sigma_ref sits in the pricing stack
+
+$\sigma_{\text{ref}}$ is the one number that injects the stochastic world into an otherwise deterministic pricer:
+
+$$
+\underbrace{\text{MaxIL}}_{\text{geometry (}\sigma\text{-free)}} \ \xrightarrow{\ \sigma_{\text{ref}},\ T\ }\ \underbrace{\text{fairRate}}_{\text{S-curve in }\sigma^2 T} \ \longrightarrow\ \underbrace{\text{FairPremium} = \text{fairRate}\cdot\text{MaxIL}}_{\text{published on-chain}} \ \xrightarrow{\ \sigma_{\text{ref}}\text{-keyed }baseLoad\ }\ \text{premium}
+$$
+
+| Layer | Formula | $\sigma_{\text{ref}}$ role |
+| ----- | ------- | -------------------------- |
+| [MaxIL](/concepts/maxil) | $\max(\text{IL}(P_a), \text{IL}(P_b))$ | none — pure geometry |
+| [fairRate](/math/fair-value-phi-sum) | $\mathbb{E}_Q[\min(\text{IL},\text{MaxIL})]/\text{MaxIL}$ | the **only** stochastic input |
+| FairPremium | $\text{fairRate}\cdot\text{MaxIL}$ | via fairRate |
+| [baseLoad](/math/load-stack) | regime-keyed over-fair-value charge | keys the calm/normal/stressed band |
+
+The `baseLoad` regime band is itself keyed off $\sigma_{\text{ref}}$ — `calm < 0.60`, `normal 0.60–1.025`, `stressed ≥ 1.025` — so the vol oracle feeds the pricing stack twice: once through fairRate (the fair value) and once through baseLoad (the risk premium over it). See [the load stack](/math/load-stack) for the full breakdown and [a worked example](/math/worked-example) end to end.
+
+<Maturity />
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="The Phi-sum" icon="function" href="/math/fair-value-phi-sum">
+    How $\sigma_{\text{ref}}$ enters the exact closed-form fairRate as $\sigma^2 T$.
+  </Card>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    The $\sigma_{\text{ref}}$-keyed baseLoad and the I10 price cap.
+  </Card>
+  <Card title="No-bad-debt math" icon="shield-check" href="/math/no-bad-debt-math">
+    Why I1 holds for any $\sigma$ — the structural collateral proof.
+  </Card>
+  <Card title="The invariants" icon="list-check" href="/security/invariants">
+    I1 (no-bad-debt) vs I10 (price cap) — the two never-merged guarantees.
+  </Card>
+  <Card title="Oracles" icon="satellite-dish" href="/protocol/oracles">
+    The VolOracle alongside the Chainlink entry/settlement price oracle.
+  </Card>
+  <Card title="Tranches" icon="layer-group" href="/concepts/tranches">
+    Who bears a $\sigma_{\text{ref}}$ undercharge: junior first, senior tail.
+  </Card>
+</CardGroup>

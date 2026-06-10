@@ -1,0 +1,572 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Inflexion REST API",
+    "version": "0.0.0",
+    "description": "Public REST API contract for Inflexion (docs-site snapshot for the Mintlify API Reference). It is a point-in-time copy; the canonical machine-readable spec is served at GET /openapi.json. Read-only, cached, public facade over the Inflexion subgraph (history / aggregates), a few live RPC reads (current pool-load surface, pool state, pricing preview), and the engine telemetry sinks (Signals 2 & 4 dynamic halves). No wallet, no RPC key for consumers. Every surface degrades gracefully: subgraph-backed routes return a typed `pending` body (with the future GraphQL query embedded) until the subgraph is deployed; live + telemetry routes return real data now."
+  },
+  "servers": [{ "url": "/", "description": "this service" }],
+  "tags": [
+    { "name": "system", "description": "health + service metadata" },
+    { "name": "markets", "description": "market directory + per-market state" },
+    { "name": "pool", "description": "vault NAV / state / history (claim B: capital NOT guaranteed)" },
+    { "name": "swaps", "description": "protection swaps (claim A: no bad debt in FULL, qualified)" },
+    { "name": "pricing", "description": "live cached fair + pool premium preview" },
+    { "name": "data", "description": "the five data-moat signals (snapshot + series)" },
+    { "name": "mm", "description": "market-maker fills / PnL" },
+    { "name": "sigma", "description": "σ_ref history" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["system"],
+        "operationId": "getHealth",
+        "summary": "Health and backing-source status",
+        "description": "Liveness + backing-source status (subgraph / live RPC / telemetry sinks).",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["system"],
+        "operationId": "getOpenapiJson",
+        "summary": "OpenAPI document",
+        "description": "This OpenAPI 3.1 document.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": {} } }
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "tags": ["system"],
+        "operationId": "getDocs",
+        "summary": "Swagger UI docs page",
+        "description": "Minimal Swagger-UI shell rendering /openapi.json.",
+        "responses": { "200": { "description": "HTML docs page" } }
+      }
+    },
+    "/markets": {
+      "get": {
+        "tags": ["markets"],
+        "operationId": "getMarkets",
+        "summary": "Market directory",
+        "description": "Market directory (subgraph). Pending until the subgraph is deployed.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/markets/{id}": {
+      "get": {
+        "tags": ["markets"],
+        "operationId": "getMarketById",
+        "summary": "Market by id",
+        "description": "One market by id (subgraph + cached live inventory/σ_ref).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "bytes32 marketId (0x…64 hex)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/pool": {
+      "get": {
+        "tags": ["pool"],
+        "operationId": "getPool",
+        "summary": "Live vault state composite",
+        "description": "Live vault state composite (NAV, senior/junior assets, utilization, concentration, the two skews, regime). Carries the depositor-capital disclosure (depositor capital is not guaranteed). Pending if no RPC is wired.",
+        "parameters": [
+          {
+            "name": "marketIds",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "comma-separated bytes32 marketIds for the lockedByMarket (HHI) colour."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/pool/nav-history": {
+      "get": {
+        "tags": ["pool"],
+        "operationId": "getPoolNavHistory",
+        "summary": "Per-tranche NAV history",
+        "description": "Per-tranche NAV time series (subgraph; depositor capital is not guaranteed). The bucket query parameter accepts day or hour (default day).",
+        "parameters": [
+          {
+            "name": "bucket",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "day | hour (default day)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/pool/load-surface": {
+      "get": {
+        "tags": ["pool"],
+        "operationId": "getPoolLoadSurface",
+        "summary": "Live pool load surface",
+        "description": "Live current pool-load surface across markets.",
+        "parameters": [
+          {
+            "name": "marketIds",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "comma-separated bytes32 marketIds"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/swaps": {
+      "get": {
+        "tags": ["swaps"],
+        "operationId": "getSwaps",
+        "summary": "Recent swaps",
+        "description": "Recent swaps (subgraph). Optional filters: status (active or settled), mm, market. Carries the payout disclosure.",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "active | settled (optional)"
+          },
+          {
+            "name": "mm",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "MM address filter (optional)"
+          },
+          {
+            "name": "market",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "bytes32 marketId filter (optional)"
+          },
+          {
+            "name": "first",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "page size (default 100, max 1000)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/swaps/{swapId}": {
+      "get": {
+        "tags": ["swaps"],
+        "operationId": "getSwapById",
+        "summary": "Swap by id",
+        "description": "One swap by id (subgraph; payout disclosure).",
+        "parameters": [
+          {
+            "name": "swapId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "decimal swap id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/pricing/preview": {
+      "get": {
+        "tags": ["pricing"],
+        "operationId": "getPricingPreview",
+        "summary": "Live pricing preview",
+        "description": "Live cached fair + pool premium preview for a market (the API never re-derives the fair rate). Pending if no RPC.",
+        "parameters": [
+          {
+            "name": "marketId",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "a",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "a = (Pa/P0)² WAD (optional; neutral reference if omitted)"
+          },
+          {
+            "name": "b",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "b = (Pb/P0)² WAD (optional)"
+          },
+          {
+            "name": "maxIL",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "MaxIL raw (optional; reference cap if omitted)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/load-surface": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataLoadSurface",
+        "summary": "Historical load surface - Signal 1",
+        "description": "Historical load-surface evolution (subgraph MarketStateSnapshot). Signal 1.",
+        "parameters": [
+          {
+            "name": "marketId",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "bytes32 marketId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/convexity-surface": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataConvexitySurface",
+        "summary": "Convexity surface - Signals 1 and 2",
+        "description": "Signal 1 (realized clearing load over σ_ref) + Signal 2 structural (pool-vs-MM spread) bucketed by width x distance x duration, EXCLUDING cap-bound fills.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/term-structure": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataTermStructure",
+        "summary": "Term structure - Signal 3",
+        "description": "Signal 3 — term-structure slope across 7/30/90d per range.",
+        "parameters": [
+          {
+            "name": "width",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "width bucket (default medium)"
+          },
+          {
+            "name": "distance",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "distance bucket (default mid)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/demand-requests": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataDemandRequests",
+        "summary": "Demand requests - Signal 4",
+        "description": "Signal 4 — moneyness/demand skew: realized half (subgraph) + latent half (engine demand telemetry, live now).",
+        "parameters": [
+          {
+            "name": "marketId",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "optional filter"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "unix ts"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/quote-competition": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataQuoteCompetition",
+        "summary": "Quote competition - Signal 2 dynamic",
+        "description": "Signal 2 dynamic half — quote competition from the engine competition telemetry (winners and losers). Pending if the sink is absent.",
+        "parameters": [
+          {
+            "name": "marketId",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "optional filter"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "unix ts"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/net-gamma": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataNetGamma",
+        "summary": "Net gamma - Signal 5",
+        "description": "Signal 5 — net convexity / gamma supply (off-chain Greeks over the open set).",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/data/supply-depth": {
+      "get": {
+        "tags": ["data"],
+        "operationId": "getDataSupplyDepth",
+        "summary": "Supply depth - Signal 5 raw",
+        "description": "Signal 5 raw active-swap set (subgraph isActive open set).",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/mm/{address}/fills": {
+      "get": {
+        "tags": ["mm"],
+        "operationId": "getMmFills",
+        "summary": "MM fills and PnL",
+        "description": "MM fills + PnL aggregate (subgraph).",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "MM address (0x…40 hex)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    },
+    "/sigma/{token}/history": {
+      "get": {
+        "tags": ["sigma"],
+        "operationId": "getSigmaHistory",
+        "summary": "Sigma ref history for a token",
+        "description": "σ_ref history for a token (subgraph; includes SwapPriced backfill points).",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "token address (0x…40 hex)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ApiResult" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PendingReason": {
+        "type": "string",
+        "description": "Why a subgraph-backed surface is unavailable today.",
+        "enum": [
+          "subgraph-not-deployed",
+          "subgraph-unreachable",
+          "rich-events-pre-redeploy",
+          "telemetry-sink-absent",
+          "rpc-unavailable"
+        ]
+      },
+      "Pending": {
+        "type": "object",
+        "description": "A typed \"not available yet\" body. Carries the future GraphQL query so the surface is self-documenting and wired-and-ready for the redeploy.",
+        "required": ["available", "reason", "detail"],
+        "properties": {
+          "available": { "const": false },
+          "reason": { "$ref": "#/components/schemas/PendingReason" },
+          "detail": { "type": "string" },
+          "query": {
+            "type": "string",
+            "description": "the future GraphQL query this surface will run"
+          }
+        }
+      },
+      "Available": {
+        "type": "object",
+        "description": "A successful body merged with `available: true`.",
+        "required": ["available"],
+        "properties": { "available": { "const": true } },
+        "additionalProperties": true
+      },
+      "ApiResult": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/Available" },
+          { "$ref": "#/components/schemas/Pending" }
+        ],
+        "description": "Every data endpoint returns this discriminated union — never throws."
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": ["ok", "subgraph", "live", "telemetry"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "subgraph": { "type": "boolean", "description": "a subgraph URL is configured" },
+          "live": { "type": "boolean", "description": "an RPC is wired for the live surfaces" },
+          "telemetry": {
+            "type": "object",
+            "properties": {
+              "demand": { "type": "boolean" },
+              "competition": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

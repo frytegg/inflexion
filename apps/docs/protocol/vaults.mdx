@@ -1,0 +1,286 @@
+---
+title: "The vaults"
+description: "ConvexityVault (dual-tranche cvAMM, lock/settle/accrue, run defense) and UnderwriterVault (per-MM collateral) — where underwriter capital lives, how the senior-protection invariant holds, and why depositor capital is never guaranteed."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+Every Inflexion swap is backed by **pre-locked USDC collateral** equal to its `MaxIL`. Two contracts hold that collateral, one per underwriting rail, and a single settlement core draws on whichever one opened the swap:
+
+<CardGroup cols={2}>
+  <Card title="ConvexityVault" icon="layer-group" href="#convexityvault-the-pooled-dual-tranche-cvamm">
+    The pooled, always-on **Path A** underwriter. Dual-tranche SENIOR / JUNIOR USDC, fungible across all 9 marketIds of a pair. The floor of liquidity.
+  </Card>
+  <Card title="UnderwriterVault" icon="vault" href="#underwritervault-per-mm-collateral-path-b">
+    Per-MM collateral for **Path B**. One isolated pool per market maker; invariant **I5** keeps `locked ≤ deposited` by construction.
+  </Card>
+</CardGroup>
+
+Both vaults share one structural property that makes the whole system tractable: because coverage is `min(realized_IL, MaxIL)` and each swap locks exactly `MaxIL`, **every payout is bounded by its own locked amount**. The vaults never need to find money they did not already lock. What differs between them is the _accounting around_ that locked amount — pooled and tranched on Path A, isolated per signer on Path B.
+
+<Note>
+Each vault wires its `core` address **once** and then freezes it one-way (`setCore` → `freezeCore`). Only the frozen `core` (the [`InflexionCore`](/protocol/lifecycle) state machine) can call `lockCollateral` or `releaseAndDistribute`; there is no admin path to redirect a vault after freeze. See [immutability & custody](/security/immutability-custody).
+</Note>
+
+---
+
+## ConvexityVault — the pooled, dual-tranche cvAMM
+
+The `ConvexityVault` is **Path A**: a pooled, passive, signature-free underwriter that quotes algorithmically on-chain off the published [FairPremium](/concepts/fair-value). One vault backs an entire pair — for ETH/USDC that is **3 fee tiers × 3 durations = 9 marketIds**, all underwritten by the same fungible USDC. It is the [centrepiece pillar](/concepts/three-pillars): the _floor of liquidity_ that guarantees a price exists even with zero market makers online.
+
+It is **dual-tranche SENIOR / JUNIOR from launch** (deployed, see [deployments](/reference/deployments)). The two tranches are two different products on the same capital — and that distinction is load-bearing for both the economics and the safety properties.
+
+<CardGroup cols={2}>
+  <Card title="Senior — convexity savings account" icon="piggy-bank">
+    Low-yield, structurally protected from **underwriting** loss while junior capital buffers. Takes a small, configurable share of every premium.
+  </Card>
+  <Card title="Junior — the vol seller" icon="chart-line">
+    High-APY, **first-loss**. Absorbs all underwriting loss before senior is ever touched, and earns the bulk of the premium for doing so.
+  </Card>
+</CardGroup>
+
+For the depositor-facing product framing of these two tranches, see [Tranches](/concepts/tranches).
+
+### Accounting
+
+The vault keeps the two tranches fully separate, plus the locked-capital bookkeeping that drives both pricing and run defense:
+
+| Quantity | Meaning |
+| --- | --- |
+| `seniorAssets` / `juniorAssets` | USDC backing each tranche |
+| `seniorShares` / `juniorShares` | ERC-4626-style share supply per tranche |
+| `seniorBalanceOf` / `juniorBalanceOf` | per-depositor share balances |
+| `totalLocked` | USDC committed to live swaps across all markets |
+| `lockedByMarket[marketId]` | committed per market (used for the settle-side bound) |
+| `sumLockedSq` | incremental `Σ lockedByMarket²` — the O(1) HHI accumulator |
+
+Two derived quantities matter everywhere downstream:
+
+$$
+\texttt{totalAssets} = \texttt{seniorAssets} + \texttt{juniorAssets}
+\qquad
+\texttt{freeAssets} = \texttt{totalAssets} - \texttt{totalLocked}
+$$
+
+`freeAssets` is what can still back a new swap. As it shrinks, the [load stack](/math/load-stack)'s `util_skew` rises — the same locked/free accounting that defends against a run also prices marginal capacity up _before_ over-commitment.
+
+### The senior-protection invariant
+
+This is the single most important line in the vault. Enforced at **every** `lockCollateral` (reverting `SeniorProtectionBreached`):
+
+$$
+\boxed{\;\texttt{totalLocked} \le \texttt{juniorAssets}\;}
+$$
+
+Why this is the whole game: every payout is `≤` its `MaxIL`, which equals its locked amount, so
+
+$$
+\sum \texttt{payouts} \;\le\; \texttt{totalLocked} \;\le\; \texttt{juniorAssets}.
+$$
+
+Therefore the **junior-first-loss waterfall absorbs all underwriting loss before senior is ever touched.** Senior capital is structurally shielded from ordinary underwriting losses for as long as the junior buffer covers what is locked.
+
+<Info>
+This constraint is the **adaptive code form** of the `u ≤ 1 − sf` rule, but keyed to the _actual_ junior buffer rather than a fixed ratio — strictly safer. With the P1.13 target tranche ratio `sf = 0.60`, junior `= 1 − sf = 0.40`, so `totalLocked ≤ juniorAssets` is exactly `u ≤ 0.40 = 1 − sf`. Note `sf` is a UX/incentive _target_, not the hard cap — the hard cap is the live `juniorAssets` figure itself.
+</Info>
+
+<Warning>
+**Limit:** senior `P(loss) = 0` is a _calibration_ result, not a structural guarantee. **Why:** the invariant protects senior only from _underwriting_ loss while `u ≤ 1 − sf`; it cannot protect either tranche from systemic failure (USDC depeg, oracle/settlement fault, contract bug). **Mitigation:** capital-not-guaranteed is the umbrella claim for **both** tranches — see the disclosure below and [the no-bad-debt page](/concepts/no-bad-debt) for the strict separation of the LP guarantee from depositor risk.
+</Warning>
+
+This pool-side invariant is the cvAMM half of [**I5**](/security/invariants) (vault solvency) and is reviewed in full on the [invariants page](/security/invariants).
+
+### Lock, settle, accrue — the three core operations
+
+<Steps>
+  <Step title="lockCollateral(marketId, amount) — at swap creation">
+    Called by `core` inside `_executePathA` when an LP opens a Path-A swap. Two requirements:
+
+    - `freeAssets ≥ amount` else `InsufficientFree` — the vault must have uncommitted capital.
+    - `totalLocked + amount ≤ juniorAssets` else `SeniorProtectionBreached` — the senior-protection invariant above.
+
+    On success it commits the capital and updates the HHI accumulator incrementally:
+
+    $$
+    \texttt{sumLockedSq} \mathrel{+}= \texttt{amt}^2 + 2\cdot x \cdot \texttt{amt}
+    \quad\text{(where } x = \texttt{lockedByMarket[marketId]} \text{ before the add)}
+    $$
+
+    This keeps the concentration measure O(1) per lock — no loop over markets.
+  </Step>
+
+  <Step title="releaseAndDistribute(marketId, lp, payout, collateral) — at settlement">
+    Called by `core` inside `settle` when the counterparty is the vault (`s.mm == address(convexityVault)`). It:
+
+    1. Requires `payout ≤ lockedAmount` (`PayoutExceedsCollateral`) and `lockedAmount ≤ lockedByMarket[marketId]` — defensive re-checks of the cap.
+    2. Unlocks the collateral (reverses the `totalLocked` / `sumLockedSq` updates).
+    3. Applies the loss **junior-first**:
+       $$
+       \texttt{juniorLoss} = \min(\texttt{payout},\ \texttt{juniorAssets}),
+       \qquad
+       \texttt{seniorLoss} = \texttt{payout} - \texttt{juniorLoss}
+       $$
+       The `min` is defense-in-depth — by the senior-protection invariant junior always covers it, so `seniorLoss` is 0 in practice.
+    4. Transfers `payout` to the LP and emits `JuniorLoss`.
+
+    The counterparty (the pool) keeps `collateral − payout` — the residual `MaxIL` that was never needed.
+  </Step>
+
+  <Step title="accruePremium(amount) — at swap creation (premium split)">
+    99% of every Path-A premium flows here (the other 1% goes to treasury). The vault splits it across the two tranches:
+
+    $$
+    \texttt{toSenior} = \texttt{amount} \cdot \frac{\texttt{seniorPremiumShareBps}}{10^4},
+    \qquad
+    \texttt{toJunior} = \texttt{amount} - \texttt{toSenior}
+    $$
+
+    Senior takes a small, fixed slice (the "convexity savings account" yield); junior takes the remainder (the high-APY vol-seller return). `seniorPremiumShareBps` is **immutable**, set from the calibrated risk-parameter set, never hardcoded.
+  </Step>
+</Steps>
+
+<Tip>
+The premium split (`accruePremium`) and the loss waterfall (`releaseAndDistribute`) are **orthogonal to settle semantics and to the [I10 price cap](/security/invariants)**. Neither the tranche split nor the `totalLocked ≤ juniorAssets` constraint changes how a payout is computed — they only decide _who in the pool_ earns the premium and bears the loss.
+</Tip>
+
+### Inventory, utilization, and concentration
+
+The vault exposes three live risk reads that feed the on-chain [load stack](/math/load-stack) for Path-A pricing. They are not just telemetry — they actively price marginal capacity:
+
+<AccordionGroup>
+  <Accordion title="Inventory — freeAssets vs totalLocked">
+    `freeAssets = totalAssets − totalLocked` is the headroom for new swaps. The vault never locks beyond `juniorAssets`, so true headroom for a lock is `min(freeAssets, juniorAssets − totalLocked)`. Inventory is the raw input to utilization.
+  </Accordion>
+  <Accordion title="Utilization — u = totalLocked / totalAssets">
+    `util_skew(u)` is flat below a knee, then convex and capped above it (`CvammPricing.utilSkewWad`). As the pool nears full commitment, the marginal price rises so capacity is rationed by price _before_ the pool over-commits. This is the same accounting that the run defense relies on — the pricing dial and the safety dial are one mechanism.
+  </Accordion>
+  <Accordion title="Concentration — normalized coverage HHI">
+    `dispersion_skew(h)` keys off the normalized Herfindahl index `h` of coverage across markets (`CvammPricing.dispSkewWad`). It is the honest single-pair concentration analogue: many positions bunched at one edge all hit `MaxIL` together. The HHI is computed O(1) from the incremental `sumLockedSq` accumulator (`ConvexityVault.concentrationWad`) — no per-market loop at quote time.
+  </Accordion>
+</AccordionGroup>
+
+All three skew curves (knees, slopes, powers, caps) and the base load come from the calibrated risk-parameter set via `LoadParams` — **no PARTIAL or cvAMM primitive is ever hardcoded**. The full pricing math lives on the [load-stack page](/math/load-stack) and the I10 clamp is detailed under [the invariants](/security/invariants).
+
+### Run defense and the withdrawal cooldown
+
+Deposits are instant. Withdrawals are deliberately not, because instant withdrawals on a vault that has _locked_ capital against live swaps would let a depositor exit ahead of an in-flight loss — the classic run. Two mechanisms prevent it:
+
+<Steps>
+  <Step title="Cooldown-gated withdrawals">
+    A depositor calls `requestWithdrawal`, waits `withdrawalCooldown`, then calls `withdraw`. The delay (sourced from the calibrated risk-parameter set, not hardcoded) removes the timing advantage of front-running a settlement.
+  </Step>
+  <Step title="Junior cannot be drawn below totalLocked">
+    `withdraw` reverts with `JuniorBelowLocked` if it would push `juniorAssets` under `totalLocked`. Locked collateral cannot be withdrawn out from under a live swap — this is what makes the senior-protection invariant hold _through_ a withdrawal, not just at lock time.
+  </Step>
+</Steps>
+
+<Warning>
+**Limit:** a withdrawal cooldown is friction for depositors who want instant liquidity. **Why:** instant withdrawals against locked capital are a solvency hole — a depositor could exit before a known loss is distributed, dumping it on those who stayed. **Mitigation:** the cooldown is finite and parameterised from the quant model; deposits remain instant; and locked capital is the _only_ thing pinned (free capital still rotates), so the live yield is unaffected for committed depositors. The same accounting also blocks routing locked collateral to utilization-gated venues — see [the no-rehypothecation rule](/security/trust-model).
+</Warning>
+
+### Depositor capital is not guaranteed
+
+<ClaimB />
+
+The numbers for the P1.13 single-asset bare-pool model (`u = 0.40`): 3-year CAGR 122% / 50% / 247% (median / p10 / p90), P(losing month) 26.5%, worst month −26.8%, P(3y drawdown > 50%) 2.7%. **Senior P(loss) = 0** holds _only_ while `u ≤ 1 − sf`; **junior worst case −67%.** Junior is genuinely a first-loss vol-seller position — that is the source of its yield, and the reason senior can be the calm tranche.
+
+---
+
+## UnderwriterVault — per-MM collateral (Path B)
+
+When a [market maker (Path B)](/protocol/path-b-mm) wins a swap with a firm signed quote, the collateral comes from **that MM's own isolated pool** in the `UnderwriterVault`. There is no pooling and no tranching here — one MM, one balance, one set of locks.
+
+The accounting is deliberately minimal:
+
+$$
+\texttt{availableBalance(mm)} = \texttt{deposited[mm]} - \texttt{locked[mm]}
+$$
+
+### Invariant I5 — locked ≤ deposited, by construction
+
+The vault's whole safety story is one inequality, true by construction on both operations:
+
+<Steps>
+  <Step title="lockCollateral(mm, amount)">
+    Requires `availableBalance(mm) ≥ amount`. Post-lock, `locked[mm]' = locked[mm] + amount ≤ deposited[mm]`. An MM can never lock more than it has deposited.
+  </Step>
+  <Step title="releaseAndDistribute(mm, lp, payout, collateral)">
+    Requires `payout ≤ lockedAmount ≤ locked[mm]`. The LP receives `payout` from the MM's own pool; the MM keeps `collateral − payout`. Because the release only ever unlocks what was locked, `deposited' − locked' ≥ 0` is preserved.
+  </Step>
+</Steps>
+
+$$
+\boxed{\;\texttt{locked[mm]} \le \texttt{deposited[mm]} \quad \text{(invariant \textbf{I5})}\;}
+$$
+
+This is the Path-B counterpart of the pool's `totalLocked ≤ juniorAssets`. Together they are [invariant I5](/security/invariants): every payout draws on capital the counterparty already posted, never on protocol funds or other users'. A `CapitalLow` event fires when an MM's available balance drops below 20% of its deposit, as an off-chain top-up signal.
+
+<Note>
+Path B has **no tranches and no premium split inside the vault** — 99% of the premium goes straight to the MM, 1% to treasury at creation. The MM is its own first-loss layer: it priced the load, posted the collateral, and keeps the residual `MaxIL`. There is no senior tranche to protect because there are no third-party depositors in an MM's pool.
+</Note>
+
+---
+
+## How the two vaults compare
+
+The vaults differ only in the accounting _around_ the locked collateral. The amount locked (`MaxIL`), the payout formula (`min(realized_IL, MaxIL)`), and the settle path are identical regardless of which vault opened the swap — see [the two rails](/concepts/two-rails) and [routing](/protocol/routing).
+
+| | **ConvexityVault** (Path A) | **UnderwriterVault** (Path B) |
+| --- | --- | --- |
+| Counterparty | the pool itself | a single MM |
+| Structure | dual-tranche SENIOR / JUNIOR, pooled | one isolated balance per MM |
+| Capital scope | fungible across all 9 marketIds of a pair | per-MM, per-deposit |
+| Lock check | `free ≥ amt` **and** `totalLocked + amt ≤ juniorAssets` | `available ≥ amt` |
+| Solvency invariant | `totalLocked ≤ juniorAssets` (pool side of I5) | `locked ≤ deposited` (I5) |
+| Premium handling | 99% split senior/junior via `accruePremium`, 1% treasury | 99% to MM, 1% treasury (no split) |
+| Loss handling | junior-first waterfall, senior protected | MM bears its own loss directly |
+| Withdrawal | cooldown-gated; junior can't go below `totalLocked` | MM-managed deposit/withdraw |
+| Role | floor of liquidity (always quotes) | ceiling of price (wins only by beating the pool) |
+
+---
+
+## The settlement core sees neither
+
+The key safety property is that `settle` does **not** branch on vault internals. It computes IL from the stored `L`, caps it at `MaxIL`, and then dispatches to whichever vault is the counterparty:
+
+```solidity
+// settle(): dispatch by rail — the only place the two vaults diverge at settlement
+if (s.mm == address(convexityVault)) {
+    convexityVault.releaseAndDistribute(s.marketId, s.lp, payout, s.collateral);
+} else {
+    underwriterVault.releaseAndDistribute(s.mm, s.lp, payout, s.collateral);
+}
+```
+
+In both branches the LP receives `payout` and the counterparty keeps `collateral − payout`. The no-bad-debt guarantee is enforced _here_, at the cap, before either vault is called — so it holds identically for both rails.
+
+<ClaimA />
+
+---
+
+## Live addresses
+
+<AddressTable />
+
+<Card title="Full deployment registry" icon="book" href="/reference/deployments">
+  Every address, with decimals, units, and the live create→settle lifecycle that exercised both vaults on the 2026-06-05 redeploy.
+</Card>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Tranches (depositor product)" icon="layer-group" href="/concepts/tranches">
+    The senior/junior product framing for depositors — yield, risk, and the first-loss waterfall.
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    I1–I10 in full, including I5 (vault solvency) and the senior-protection guarantee.
+  </Card>
+  <Card title="The two rails" icon="route" href="/concepts/two-rails">
+    One settlement core, two upstream underwriters — and why the difference is upstream of settle.
+  </Card>
+  <Card title="The load stack" icon="sigma" href="/math/load-stack">
+    How utilization and concentration price marginal pool capacity, under the I10 cap.
+  </Card>
+</CardGroup>

@@ -1,0 +1,286 @@
+---
+title: "SDK overview"
+description: "What @inflexion/sdk is — the typed access layer over the live deployment, its two design properties (reads degrade, writes throw or defer without a wallet), its foundation + five surfaces + quote helpers, and how it surfaces the three pillars."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+<Info>
+**`@inflexion/sdk` is the typed access layer over the live deployment.** It is the **only** layer that holds a signer, and the only one that can answer the load-bearing question — _"what dollar premium will I be charged on **this** position if I sign in the next block?"_ — by combining a fresh on-chain `FairValueOracle` read with the position's geometry. Everything in this section is built on the foundation, five stakeholder surfaces, and EIP-712 quote helpers described below.
+</Info>
+
+The SDK wraps the [live Arbitrum Sepolia deployment](/reference/deployments) (chainId `421614`, fresh full redeploy 2026-06-05) and exposes it as one ergonomic object: a single factory call wires a read client and an optional write client into all five surfaces at once. No contract address is ever passed in — every address loads from the on-chain address registry.
+
+---
+
+## The two design properties
+
+These run through the whole package. If you remember nothing else about the SDK, remember these two — they are what make it safe to use from a wallet-less server, a degraded-RPC browser tab, or a UI that loads before the subgraph is indexed.
+
+<CardGroup cols={2}>
+  <Card title="Reads are graceful" icon="shield-check">
+    Anything that needs a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a **typed degraded envelope** — never throws.
+  </Card>
+  <Card title="Writes degrade, never crash at construction" icon="pen-to-square">
+    With no `walletClient`, the SDK still constructs. Writes either throw a **clear error on call** or return a **deferred result** carrying the unsigned tx — the only place a missing signer surfaces.
+  </Card>
+</CardGroup>
+
+### 1 — Reads degrade gracefully
+
+Every read that can fail returns a **typed degraded envelope** instead of throwing. There are three shapes, and the type system forces you to handle the failure branch before you can touch the data:
+
+| Envelope | Success branch | Failure branch | Used by |
+| --- | --- | --- | --- |
+| `Degraded<T>` | `{ available: true } & T` | `{ available: false, reason }` | vault state, position, regime, surface σ_ref |
+| `Priceable<T>` | `{ priceable: true } & T` | `{ priceable: false, reason, detail? }` | anything needing the live price $P_0$ |
+| `ApiPending` | — | `{ available: false, reason: 'no-history-source', endpoint, query, detail }` | all DataClient history methods |
+
+```ts
+// The compiler will not let you read .geometry until you check the branch.
+const g = await sdk.lp.resolveGeometry(tokenId, marketId)
+if (!g.priceable) {
+  // reason ∈ { 'oracle-degraded', 'market-unknown', 'position-unknown', ... }
+  console.warn('not priceable:', g.reason)
+} else {
+  console.log(g.geometry.maxIL) // safe — narrowed to the success branch
+}
+```
+
+The `reason` is drawn from a closed union, `DegradeReason ∈ { oracle-degraded, no-rpc, rich-events-absent, no-history-source, vol-uninitialized, market-unknown, position-unknown }`. This is the discipline that lets the UI render a typed "pending" or "oracle degraded" state instead of catching an exception — a degraded read is a **value**, not a thrown error.
+
+<Note>
+The SDK **never fabricates history**. When a history surface has no source yet, `ApiPending` even names the **future** API route and the exact query that _would_ be sent — so the UI can show "coming from `<route>`" and the API can be wired in later with zero re-derivation. See [degradation](/sdk/degradation) for the full cheat-sheet.
+</Note>
+
+### 2 — Writes throw or defer without a wallet
+
+The factory always constructs, even with no signer (`makeWalletClient` returns `undefined` rather than crashing). What happens when you then call a write depends on the surface — and the difference is deliberate:
+
+<Tabs>
+  <Tab title="LP / MM — throw on call">
+    `lp.buyProtection`, `lp.settle`, `lp.poke`, and `mm.cancelNonces` throw a **clear error on call**. These are direct, user-driven transactions: there is no sensible "deferred" semantics for "buy this protection now", so a missing signer is treated as a hard, explicit error at the call site — never at construction.
+  </Tab>
+  <Tab title="Depositor — deferred result">
+    `depositor.deposit`, `requestWithdrawal`, and `withdraw` return a typed `WriteResult` with `status: 'deferred-no-wallet'` carrying the **unsigned tx** for an external signer. This suits server-side and custody flows where the SDK builds calldata that something else signs. The full status union is `'sent' | 'deferred-no-wallet' | 'error'`.
+  </Tab>
+</Tabs>
+
+```ts
+// No wallet → DepositorClient builds, but does not send.
+const sdk = createInflexionSdk({ publicClient }) // read-only
+const res = await sdk.depositor.deposit('junior', 10_000_000_000n)
+// res.status === 'deferred-no-wallet'; res.tx is the unsigned calldata.
+
+// No wallet → LpClient throws on the write call (not at construction).
+await sdk.lp.buyProtection({ tokenId, marketId, maxPremium }) // throws a clear error
+```
+
+Most write methods also have a `build*` sibling (`depositor.buildDeposit`, `mm.buildCancelNoncesTx`, …) that returns raw `{ to, data, value }` calldata for full external-signing control. See [guardrails](/sdk/guardrails) for the write-safety model.
+
+---
+
+## The foundation + five surfaces + quote helpers
+
+The SDK is the **foundation** (addresses, ABIs, viem client factory, shared types, tuple decoders, `resolveMarket`, the `CvammPricing` TS port under `cvamm`) **plus** five stakeholder surfaces **plus** the re-exported EIP-712 quote helpers.
+
+### The foundation
+
+Imported flat from the package root and re-exported wholesale:
+
+- **Addresses, decimals, units** — `import { core, stylus, libs, tokens, demo, chainlink, uniswap, npm, CHAIN_ID } from '@inflexion/sdk'`. dUSDC = **6 decimals** (the numéraire — every premium, amount, `V0`, `maxIL`, and collateral figure is a 6-dec raw bigint, `1 dUSDC = 1_000_000n`); dWETH = 18; Chainlink feeds = 8; `WAD = 1e18` for ratios. See [addresses & units](/sdk/addresses-units) and [decimals & units](/reference/decimals-units).
+- **ABIs + a viem client factory** — `makePublicClient` / `makeWalletClient` with env-fallback RPC and key resolution.
+- **Shared types + tuple decoders** — the degradation envelopes above, plus decoders for the compact on-chain structs.
+- **`resolveMarket`** — recovers a swap's `marketId` (a `SwapRecord` carries none on-chain) by reproducing `keccak256(abi.encodePacked(token0, token1, fee, uint32(expiry − createdAt)))`.
+- **The `cvamm` math port** — namespaced to avoid clobbering type names; the **permanent, parity-locked** off-chain mirror of the deployed `CvammPricing` load library (see below and [cvamm port](/sdk/cvamm-port)).
+
+### The five surfaces
+
+One factory call wires all five at once. Each carries exactly one stakeholder's claim — and **claims are never merged**:
+
+<CardGroup cols={2}>
+  <Card title="LpClient" icon="umbrella" href="/sdk/lp-client">
+    **Buy in-range IL protection (Claim A).** Price (`previewPremium`), buy (`buyProtection`, routed best-of pool vs MM), track (`getProtectionStatus`), and settle. Carries `noBadDebtFull: true`, qualified.
+  </Card>
+  <Card title="DepositorClient" icon="vault" href="/sdk/depositor-client">
+    **Passive / active underwriting (Claim B).** Deposit to the [senior or junior tranche](/concepts/tranches), read vault state and your position, withdraw under cooldown. Every result carries `capitalNotGuaranteed: true`.
+  </Card>
+  <Card title="MmClient" icon="gavel" href="/sdk/mm-client">
+    **Path-B market making.** Price a market, get the geometry-free "pool load to beat", sign firm EIP-712 quotes (with I10 + below-pool guards), stream a requote loop, read the book and capacity.
+  </Card>
+  <Card title="DataClient" icon="chart-line" href="/sdk/data-client">
+    **The data moat.** One live surface (`getCurrentLoadSurface`) plus the typed-pending history surfaces for the five behavioral signals. Read-only.
+  </Card>
+</CardGroup>
+
+<Card title="GreeksEngine + HedgeSuggester" icon="calculator" href="/sdk/greeks-hedge">
+**Read-only analytics (the fifth surface).** Greeks (δ/γ/vega/θ) and a three-leg hedge suggestion, all derived from the protocol's **own deployed math** — no parallel pricing model, and it **never submits a transaction**.
+</Card>
+
+The factory returns `{ publicClient, walletClient?, chainId, lp, depositor, mm, data, greeks, hedge }`.
+
+| Surface | Class | Claim it carries | Default writes spender |
+| --- | --- | --- | --- |
+| **LpClient** | LP buys IL protection | `noBadDebtFull: true` (qualified) | **InflexionCore** (`buyProtection`) |
+| **DepositorClient** | passive/active underwriter | `capitalNotGuaranteed: true` | **ConvexityVault** (`deposit`) |
+| **MmClient** | Path-B market making | (sign-only + cancel) | **InflexionCore** (`cancelNonces`); collateral is a separate UnderwriterVault flow |
+| **DataClient** | the data moat | — (read-only) | none |
+| **GreeksEngine + HedgeSuggester** | read-only analytics | — (read-only) | none (never sends a tx) |
+
+<Warning>
+**Claim A and Claim B are separate claims that the SDK never merges.** Claim A — _LPs are always paid; no bad debt in FULL (I1), qualified_ — lives on the LP surface only. Claim B — _depositor/MM capital is **not** guaranteed_ — lives on the depositor surface only. Both are exported verbatim as `LP_CLAIM_A` / `DEPOSITOR_CLAIM_B` so the UI renders the right one in the right place.
+</Warning>
+
+### The quote helpers
+
+The EIP-712 `SignedQuote` machinery is owned by the engine (the single source of truth) and **re-exported** through `@inflexion/sdk` and `@inflexion/sdk/quote`. The field order, types, and domain must match `InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly or `createSwap` / `createSwapRouted` rejects the signature. Helpers include `signQuote`, `quoteDigest`, `verifyQuote` / `recoverQuoteSigner`, `encodeQuote` / `decodeQuote`, plus the `SignedQuoteTypes` / `quoteDomain` building blocks used for browser (wagmi) signing. Full reference: [quote signing](/integrate/quote-signing) and [the MM client](/sdk/mm-client).
+
+---
+
+## How the SDK surfaces the three pillars
+
+The SDK is not a new pricing system — it is the typed window onto the [three pillars](/concepts/three-pillars). The mapping is exact and worth holding:
+
+<Steps>
+  <Step title="Pillar 1 — on-chain published FairValue (the truth)">
+    The SDK **reads** the exact closed-form Φ-sum from the Stylus [`FairValueOracle`](/concepts/fair-value) (`fairPremium` / `fairRate`) and **never reimplements it off-chain**. It only re-evaluates the deterministic, `pure` **load** stack client-side via the parity-locked [`cvamm` TS port](/sdk/cvamm-port) — the single duplication the architecture permits, and only because the deployed `CvammPricing` library is **delegatecall-only** (a direct `eth_call` reverts).
+  </Step>
+  <Step title="Pillar 2 — the cvAMM pool (the floor of liquidity)">
+    `DepositorClient` is the surface onto the always-on, signature-free [Path-A underwriter](/protocol/path-a-cvamm) (`ConvexityVault`) — deposits, tranche state, and the load-decomposed pool floor. The pool's "load to beat" is also a first-class MM signal via `mm.getPoolLoadToBeat` / `streamPoolLoadToBeat`.
+  </Step>
+  <Step title="Pillar 3 — MM competition (the ceiling of price)">
+    `MmClient` produces firm EIP-712 signed quotes with **no last look** (the I10 + below-pool guards live in `mm.signQuote`). On the LP side, `lp.previewPremium` and `lp.buyProtection` route the [cheaper of pool vs MM](/protocol/routing): `createSwapRouted` picks the best-of on-chain and falls back to the pool on a missing or bad quote — it **never reverts on a bad MM quote**.
+  </Step>
+</Steps>
+
+```ts
+// The three pillars in one preview call:
+const preview = await sdk.lp.previewPremium(demo.lpPositionTokenId, demo.marketId_fee500_7d)
+if (preview.priceable) {
+  preview.fairPremium // Pillar 1: read on-chain Φ-sum (never reimplemented)
+  preview.premiumA    // Pillar 2: pool floor = fairPremium + parity-locked load stack
+  preview.premiumB    // Pillar 3: best live signed MM quote (undefined if none beat the pool)
+  preview.best        // the cheaper of the two; preview.path ∈ 'A' | 'B'
+}
+```
+
+---
+
+## One-call construction
+
+`createInflexionSdk(config)` wires one public (read) client + one optional wallet (write) client into all five surfaces. With **no arguments at all**, it still constructs: env-resolved RPC and key, with graceful degradation if either is absent.
+
+<CodeGroup>
+```ts Browser / wagmi (recommended)
+'use client'
+import { useMemo } from 'react'
+import { usePublicClient, useWalletClient, useAccount } from 'wagmi'
+import { createInflexionSdk, type InflexionSdk } from '@inflexion/sdk'
+
+export function useInflexionSdk(): InflexionSdk {
+  const publicClient = usePublicClient()           // reads
+  const { data: walletClient } = useWalletClient() // writes (undefined until connected)
+  const { address } = useAccount()
+
+  return useMemo(
+    () =>
+      createInflexionSdk({
+        publicClient,                                // overrides rpcUrl/transport
+        ...(walletClient ? { walletClient } : {}),   // omit → writes throw a clear error on call
+        chainId: 421614,                             // EIP-712 chainId for quote signing
+        engineBaseUrl: process.env.NEXT_PUBLIC_ENGINE_URL,
+        fetchImpl: fetch,
+      }),
+    [publicClient, walletClient, address],
+  )
+}
+```
+
+```ts Server / key-based
+import { createInflexionSdk } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({
+  rpcUrl: process.env.ARBITRUM_SEPOLIA_RPC,
+  privateKey: process.env.DEPLOYER_PRIVATE_KEY as `0x${string}`, // → funded write client
+  engineBaseUrl: process.env.ENGINE_URL,
+})
+// sdk.lp / sdk.depositor / sdk.mm / sdk.data / sdk.greeks / sdk.hedge are all wired.
+```
+</CodeGroup>
+
+In the browser pattern, `walletClient.account` is used directly — wagmi's `useWalletClient()` already carries `.account` and `.chain`, so you pass no explicit `account`. The full config table and resolution order live in [getting started](/sdk/getting-started).
+
+<Note>
+**No address is ever passed to the factory.** Every contract address loads from the [deployment registry](/reference/deployments). Import the symbols you need (`core`, `tokens`, `demo`, …) rather than hardcoding — see [addresses & units](/sdk/addresses-units).
+</Note>
+
+---
+
+## What is live today vs. subgraph-pending
+
+The SDK is fully usable against the live deployment **without** the subgraph. The distinction is between live RPC surfaces and history/aggregate surfaces that degrade to a typed `pending` state:
+
+| Live today (no subgraph) | Subgraph-pending (typed `pending`, render the state) |
+| --- | --- |
+| premium preview, current load surface, σ_ref | all DataClient history (load-surface, quote-competition, demand, NAV, net-gamma) |
+| market pricing, vault state, protection status | precise `QuoteFilled` fill attribution (coarse today) |
+| position geometry, `getBook` (on-chain scan) | full fee accounting (under-states without subgraph) |
+| `watchFills` (coarse log poll) | NAV history |
+
+<Warning>
+**The subgraph deploy is pending — and that is a typed state, never an error.**
+
+- **Limit.** History and aggregate surfaces (`getLoadSurfaceHistory`, `getQuoteCompetition`, `getNavHistory`, …) have no live data source yet.
+- **Why.** The subgraph is not yet deployed for the 2026-06-05 redeploy, so there is no indexed event history to query.
+- **Mitigation.** These methods return `ApiPending`, which **names the future route and the exact query** that would be sent. The UI renders "coming from `<route>`"; the API is wired in later with zero re-derivation. The SDK never fabricates history. See [degradation](/sdk/degradation).
+</Warning>
+
+<Maturity />
+
+---
+
+## The claims, stated correctly
+
+The SDK carries these as first-class, never-merged flags. They are reproduced here because every consumer of the SDK must state them with their full qualifying clauses.
+
+<ClaimA />
+
+<ClaimB />
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Getting started" icon="rocket" href="/sdk/getting-started">
+    Install, the full `InflexionSdkConfig` field table, and the construction/degradation resolution order.
+  </Card>
+  <Card title="Addresses & units" icon="ruler" href="/sdk/addresses-units">
+    The address symbols, decimals (dUSDC = 6, dWETH = 18, feeds = 8, WAD = 1e18), and `sqrtPriceX96` conversions.
+  </Card>
+  <Card title="LP client" icon="umbrella" href="/sdk/lp-client">
+    Price, buy (routed best-of), track, and settle in-range IL protection.
+  </Card>
+  <Card title="Depositor client" icon="vault" href="/sdk/depositor-client">
+    Underwrite via the cvAMM tranches; vault state and position reads carry Claim B.
+  </Card>
+  <Card title="MM client" icon="gavel" href="/sdk/mm-client">
+    Per-market firm quotes, the pool load to beat, the requote loop, and capacity.
+  </Card>
+  <Card title="Data client" icon="chart-line" href="/sdk/data-client">
+    The live load surface and the five behavioral signals of the data moat.
+  </Card>
+  <Card title="Greeks & hedge" icon="calculator" href="/sdk/greeks-hedge">
+    Read-only greeks and the three-leg hedge — derived from the protocol's own math.
+  </Card>
+  <Card title="Degradation & guardrails" icon="shield-halved" href="/sdk/degradation">
+    The full envelope cheat-sheet and the write-safety model.
+  </Card>
+</CardGroup>
+
+For the live contract addresses, see the [deployments reference](/reference/deployments).
+
+<AddressTable />

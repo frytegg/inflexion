@@ -1,0 +1,284 @@
+---
+title: "Protocol status & roadmap"
+description: "The live/pending matrix across UI, SDK, API, subgraph, and contracts — plus the on-chain create→settle lifecycle for both rails and the PARTIAL / hedge / Orbit roadmap, every pending item framed Limit → Why → Mitigation."
+---
+
+This page is the accounting of what runs on-chain **today** versus what is roadmap. The standard for "live" here is strict: a thing is live only if it executes against the fresh **Arbitrum Sepolia** redeploy (`chainId 421614`, deploy block `274081134`, dated **2026-06-05**) with no time-warp and no mock. Everything else is either a *typed pending state* (the system already degrades gracefully to it) or a clearly-labelled roadmap item.
+
+The guiding principle, repeated on every surface: **"pending" is never "error".** Anything that cannot resolve — a reverting oracle, an absent rich event, the not-yet-deployed subgraph — returns a typed envelope and renders a calm degraded state with the reason and the route that will serve it later. A naked limitation is a defect; every limit below carries its **why** and its **mitigation**.
+
+<Info>
+**The one-line summary.** The full create→settle lifecycle is **live on-chain for both rails** (proven 2026-06-05). Every *live-price* surface — premium preview, payoff, buy/settle, vault deposit/withdraw, market pricing, the current clearing-load surface, σ_ref, the book — runs **now** over RPC. The single real blocker for the **history / aggregate / time-series** surfaces is that the **subgraph is built but not yet deployed**; until it is, those surfaces degrade to a typed `pending` state that names the exact future route. PARTIAL mode, MM-side hedging tooling, and an Orbit (app-chain) deploy are roadmap.
+</Info>
+
+## The live / pending matrix
+
+The matrix below is the cross-section across the five layers. "Live" = executes against the 2026-06-05 deploy today. "Telemetry-live" = an off-chain JSONL sink capturing from the first interaction. "Subgraph-pending" = coded and CI-green, awaiting the single subgraph deploy. "Roadmap" = designed, not yet built.
+
+| Layer | Live now | Pending the subgraph | Roadmap |
+| --- | --- | --- | --- |
+| **Contracts** | Full lifecycle: `createSwapPathA` / `createSwap` / `createSwapRouted` + `settle`; all 10 invariants enforced; `SwapPriced` / `QuoteFilled` / `SwapCreated` / `SwapSettled` / `SwapRouted` events **emitting on-chain** since block `274081134` | — (events are live; only the *indexer* is pending) | PARTIAL collateral mode (`UnsupportedModel` revert today); sequencer-uptime feed wiring for mainnet |
+| **UI (`apps/web`)** | `/protect` (Path A buy+settle), `/earn` (deposit/withdraw), `/underwrite` (collateral + EIP-712 sign), `/markets` (fully live multicall), `/data` Signal 1, `/dashboard` (on-chain scan) | per-market history/volume, NAV history, time-series moat signals (2–5), precise MM fill attribution | hedge-helper UX, PARTIAL leverage dial |
+| **SDK (`@inflexion/sdk`)** | `LpClient`, `DepositorClient`, `MmClient`, `DataClient.getCurrentLoadSurface`; live pricing reads on-chain FairPremium | `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNetGamma` → typed `ApiPending` | — |
+| **Engine (`packages/engine`)** | Path-B quote relay (WS intake, ranking, signed-payload API); `DEMAND_LOG` / `COMPETITION_LOG` telemetry **capturing now** | — (telemetry is the *latent/dynamic* half; live now) | multi-MM competition dynamics (needs ≥3 MMs) |
+| **API (`packages/api`)** | live RPC reads routed through the SDK; telemetry-backed routes | every subgraph-backed `GET /data/*` route returns a typed `pending` body | — |
+| **Subgraph (`packages/subgraph`)** | — | **built, CI-green offline, NOT yet deployed** (`SUBGRAPH_URL` unset) — the single real blocker | per-market dimension backfill (a bounded follow-up) |
+
+<Note>
+Read this matrix top-down by layer or left-to-right by maturity. The headline both ways: **the protocol is complete and proven on-chain; the data product's *history/aggregate* half waits on one subgraph deploy, while its *current/live* and *telemetry* halves are already serving real data.**
+</Note>
+
+## The live create→settle lifecycle — both rails
+
+A **real, no-time-warp create→settle ran end-to-end for both rails** on 2026-06-05. It executed on a short 300s fee-500 market (`0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2`), settled at the Chainlink round bracketing each expiry. This 300s market is a **separate, extra** market used only for the live proof — it is **not** one of the 9 production markets. All amounts are in `dUSDC` (6-decimal numéraire). The demo MM `0xe632B215120dD43A719458487bA3e03638fec953` deposited 5,000 `dUSDC` into `UnderwriterVault`, and its **own** collateral paid the Path-B settlement.
+
+<Tabs>
+  <Tab title="Path A — cvAMM pool (swapId 1)">
+    LP tokenId `3220`, settled from the `ConvexityVault`:
+
+    | Field | Value | Meaning |
+    | --- | --- | --- |
+    | V0 | `270,531.28` | position value (numéraire) at entry |
+    | MaxIL | `1,669.24` | collateral locked = the cap |
+    | premium | `9.70` | what the LP paid, once, upfront |
+    | premium % of MaxIL | `0.58%` | the convexity premium is a tiny fraction of the cap |
+    | settled realized IL | `148.64` | actual IL at expiry |
+    | settled payout | `148.64` | paid to the LP from the ConvexityVault (below the cap, no truncation) |
+
+    Path A is **always-on and signature-free** — no keeper, no signed quote, no validity clock, no relayer. The LP paid **\$9.70 to cap \$1,669.24 of in-range IL**, and was paid \$148.64 from pooled collateral at settlement.
+  </Tab>
+  <Tab title="Path B — routed to MM (swapId 2)">
+    LP tokenId `3221`, settled from the **MM's own** `UnderwriterVault` collateral:
+
+    | Field | Value | Meaning |
+    | --- | --- | --- |
+    | premium A (cvAMM) | `13.80` | the pool's price |
+    | premium B (MM) | `8.93` | the MM's price |
+    | chosen path | **B (MM)** | `createSwapRouted` picked the MM because it **strictly** beat the pool |
+    | MM loadBps | `1000` (10%) | the MM's load over FairPremium |
+    | MaxIL | `3,215.65` | MM collateral locked |
+    | settled realized IL | `245.66` | |
+    | settled payout | `245.66` | paid from the **MM's OWN** collateral |
+
+    This is the on-chain proof of the two-rail design: `createSwapRouted` priced **both rails off the same on-chain FairPremium** (a single VolOracle poke), and the MM won the route **only because it genuinely undercut the capped pool price** (\$8.93 &lt; \$13.80). A tie would have resolved to Path A; an absent/expired/stale/over-band MM quote would have **fallen back to the pool, never reverting**.
+  </Tab>
+</Tabs>
+
+The math at settlement is **identical regardless of which rail opened the swap**: `payout = min(realized_IL, MaxIL)`, paid from the counterparty's own collateral, the LP receiving `payout` and the counterparty keeping the residual `collateral − payout`. Both swaps settled below the cap, so neither was truncated. This single lifecycle demonstrates the whole trust model end-to-end — see [the lifecycle](/protocol/lifecycle) and [routing](/protocol/routing).
+
+<ClaimA />
+
+## What is live *right now* — by user surface
+
+Everything in this section runs over live RPC against the 2026-06-05 deploy. No subgraph, no engine, no mocks are required for any of it (Path B previews additionally want the engine — see below).
+
+<CardGroup cols={2}>
+  <Card title="/protect — LP buys protection" icon="umbrella" href="/app/protect">
+    Live: premium preview, payoff-with-cap chart, **Path A buy** (`buyProtection` → `createSwapRouted`), and **settle** at expiry. Active protections are discovered by an **on-chain scan** (walks up to 200 swap ids), no subgraph needed.
+  </Card>
+  <Card title="/earn — depositor underwrites" icon="building-columns" href="/app/earn">
+    Live: vault overview, tranche split, deposit (autoApprove → ConvexityVault), the two-step cooldown-gated withdraw. Only **NAV history** is subgraph-pending.
+  </Card>
+  <Card title="/underwrite — MM Path B" icon="signature" href="/app/underwrite">
+    Live: UnderwriterVault collateral, the **per-market EIP-712 quote builder + browser signing**, pool-load-to-beat reference, cancel-nonces. **Publishing** the signed quote needs the engine; without it the page shows the exact wire envelope.
+  </Card>
+  <Card title="/markets — market browser" icon="table-cells" href="/app/markets">
+    **Fully live** via RPC multicall — the 9 markets with clearing load, fair premium, σ_ref, regime, and the live block number. Only per-market volume/win-rate is subgraph-pending.
+  </Card>
+  <Card title="/data — the moat showcase" icon="chart-line" href="/app/data">
+    **Signal 1 (clearing-load surface) is LIVE** via `getCurrentLoadSurface` + `getSurfaceSigmaRef`. Signals 2–5 and NAV history are subgraph/telemetry-pending and render typed `PendingNote`s naming their future route.
+  </Card>
+  <Card title="/dashboard — all three roles" icon="grid-2" href="/app/dashboard">
+    Live: aggregates LP protections, depositor deposits, and the MM book via a **bounded on-chain scan** of the last 400 swaps. `getClaimableFees` under-states (checkpointed `tokensOwed` only); flagged inline.
+  </Card>
+</CardGroup>
+
+### The three approval spenders (a recurring gotcha, all live)
+
+All three approval flows are live; they target three **different** spenders, which is the single most common integration mistake:
+
+| Action | Spender | Where |
+| --- | --- | --- |
+| Buy protection (premium) | **InflexionCore** | `/protect` |
+| Depositor deposit | **ConvexityVault** | `/earn` |
+| MM collateral deposit | **UnderwriterVault** | `/underwrite` |
+
+## The on-chain moat events — live since the redeploy
+
+The data moat's on-chain primitives are **emitting on-chain now**; only the indexer that aggregates them is pending. The 2026-06-05 redeploy landed both moat events and the on-chain load decomposition:
+
+```solidity filename="InflexionCore.sol (live events)"
+// the per-fill clearing-price record — emitted on ALL THREE create paths
+event SwapPriced(
+    uint256 indexed swapId,
+    uint8   path,            // 0 = cvAMM pool (A), 1 = MM (B)
+    uint256 fairPremium,     // the WAD baseline the load multiplies
+    uint256 baseLoadWad,     // pool load decomposition (Path A); 0 on Path B
+    uint256 utilSkewWad,
+    uint256 dispSkewWad,
+    uint256 totalLoadWad,    // Path A: clamped pool load; Path B: MM loadBps in WAD
+    uint256 sigmaRefWad,     // the σ_ref the swap was priced against
+    bool    cappedAtMaxIL    // true ⇒ premium hit the cap ⇒ ZERO load info
+);
+
+// the single non-circular behavioral load datum — emitted on every Path-B fill
+event QuoteFilled(
+    uint256 indexed swapId,
+    address indexed mm,
+    bytes32 indexed quoteId,
+    uint256 nonce,
+    uint16  loadBps          // the MM's actor-chosen load, attributed to the exact quote
+);
+```
+
+So the dataset's **on-chain raw material exists from block `274081134` forward**. The five behavioral signals — clearing-load over a transparent σ_ref bucketed by geometry; pool-vs-MM spread + win-rate; convexity term structure; demand skew; net gamma — are non-circular by construction (never a back-solved implied-vol surface). The "invert fairRate for an implied-vol surface" idea is **deliberately dropped as circular**: `charged_premium / MaxIL = fairRate(σ_ref) · (1 + load)`, so inverting it recovers nothing but our own published σ_ref plus our own load stack. See [the five signals](/moat/five-signals) and [circular vs behavioral](/moat/circular-vs-behavioral).
+
+<Maturity />
+
+### The off-chain telemetry sinks — capturing now
+
+Two of the five signals need data that **never reaches the chain by design** (an LP who priced but did not buy; an MM quote that lost or was withdrawn). Invariant **I7** guarantees an *unchosen* quote touches no nonce and no capacity, so it leaves no on-chain trace. That latent/dynamic half lives in off-chain engine telemetry — and it is **capturing from the first interaction now**:
+
+- **`DEMAND_LOG`** (Signal 4 latent half) — every `GET /quote` and `POST /telemetry/preview` ping, coarse-bucketed and PII-free.
+- **`COMPETITION_LOG`** (Signal 2 dynamic half) — every inbound WS quote, winners and losers alike.
+
+These are **unreconstructable retroactively**, which is exactly why they are set from the first deploy. The writer is best-effort: a telemetry failure never breaks a quote ack, preview, or `/quote` request.
+
+## The pending items — Limit → Why → Mitigation
+
+Every pending state below is framed with its cause and its path forward. None is an error; each is a typed, honest degradation.
+
+<AccordionGroup>
+  <Accordion title="The subgraph is built but not yet deployed (the single real blocker)" icon="diagram-project">
+    <Warning>
+    **Limit → Why → Mitigation.** All history / aggregate / time-series surfaces — per-market volume, NAV history, the historical clearing-load surface, the time-series moat signals (2, 3, 5), and precise MM fill attribution — are **not yet queryable**.
+
+    **Why:** the subgraph is **built and CI-green offline** (`graph codegen` + `tsc` + `vitest`), but `SUBGRAPH_URL` is unset, so it is not yet deployed and indexing. This is a **build gap, not a contract gap** — the contracts already emit every event the moat needs. Note: the EIP-170 contract-size constraint that previously gated the redeploy was **already resolved on 2026-06-05** — `InflexionCore` is `23,934 B`, under the 24,576 B limit.
+
+    **Mitigation:** the SDK and API **degrade gracefully** — history methods return a typed `ApiPending` envelope naming the **exact future route + GraphQL query** they will be served from, so wiring the API later is a one-line body swap. The dataset begins at block `274081134` the moment the indexer comes up; nothing is lost. See [the moat's state & limits](/moat/state-and-limits) and [degradation](/sdk/degradation).
+    </Warning>
+  </Accordion>
+
+  <Accordion title="MM fill attribution is coarse on-chain (today)" icon="fingerprint">
+    <Warning>
+    **Limit → Why → Mitigation.** The `/underwrite` and `/dashboard` fills feeds show **coarse** attribution — a fill cannot yet be joined to its specific signed quote.
+
+    **Why:** the legacy `SwapCreated` event carries `mm` but not `quoteId`/`nonce`, and `isNonceUsed` is true on both fill *and* cancel, so it cannot distinguish them.
+
+    **Mitigation:** the redeploy added `QuoteFilled(swapId, mm, quoteId, nonce, loadBps)` — the precise per-quote datum — which is **emitting on-chain now**. Precise attribution becomes queryable the moment the subgraph indexes it; until then the badge honestly reads "coarse".
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Path B previews need the engine running" icon="server">
+    <Warning>
+    **Limit → Why → Mitigation.** Without `NEXT_PUBLIC_ENGINE_URL` set, `/protect` previews **Path A only** (`premiumB` undefined) and `/underwrite` can **sign but not publish**.
+
+    **Why:** Path B is a competitive quote rail — the off-chain engine is the quote book that relays firm MM quotes. It is a **liveness** dependency, not a solvency one: the engine can never steal funds, forge quotes, or censor Path A (which needs no engine at all).
+
+    **Mitigation:** the app **still works end-to-end** without it — `createSwapRouted` falls back to the always-on pool, and `/underwrite` renders the **exact wire envelope** an MM would hand the engine. An LP holding any valid signed quote can also call `createSwap` directly, bypassing the engine entirely. See [the engine](/integrate/engine) and [the two rails](/concepts/two-rails).
+    </Warning>
+  </Accordion>
+
+  <Accordion title="σ_ref sits at the floor on a fresh deploy" icon="wave-square">
+    <Warning>
+    **Limit → Why → Mitigation.** At the fresh deploy, `σ_ref` is initialized to the `0.5e18` floor, so `fairRate ≈ 0.847` and the live load surface starts in one regime.
+
+    **Why:** `σ_ref = max(σ_short, σ_long, floor)` is a poke-based EWMA of Chainlink-tick log-returns; on a brand-new VolOracle there is no history yet, so the conservative floor binds — by design, the construction can never *under*-state risk.
+
+    **Mitigation:** real dynamics accrue as the VolOracle is poked over time (every `createSwap` folds a poke). Critically, this is a **pricing** concern, not a solvency one: a wrong σ can cost *depositors* (mis-priced load → NAV compression, junior-first), but it can **never** create LP bad debt in FULL — I1 is structural and oracle-independent. See [σ_ref](/math/sigma-ref) and [no-bad-debt math](/math/no-bad-debt-math).
+    </Warning>
+  </Accordion>
+
+  <Accordion title="No L2 Sequencer Uptime Feed on Arbitrum Sepolia" icon="triangle-exclamation">
+    <Warning>
+    **Limit → Why → Mitigation.** The `OracleManager` does not perform a sequencer-uptime check on the live testnet.
+
+    **Why:** Chainlink does not publish an L2 Sequencer Uptime Feed on Arbitrum Sepolia — it is a developer testnet with no SLA, so `sequencerFeed == address(0)`.
+
+    **Mitigation:** `OracleManager` treats `address(0)` as "skip the sequencer check" — safe on testnet — **but a real sequencer feed MUST be wired before any mainnet deploy** (the mainnet address is recorded in the migration references). Tracked in [status & caveats](/reference/status-caveats); see also [oracles](/protocol/oracles).
+    </Warning>
+  </Accordion>
+
+  <Accordion title="getClaimableFees under-states uncollected fees" icon="coins">
+    <Warning>
+    **Limit → Why → Mitigation.** On `/dashboard`, the displayed uncollected Uniswap fees can read low.
+
+    **Why:** `getClaimableFees` reads the checkpointed `tokensOwed` only — it does not simulate fee growth since the last checkpoint, so it under-states.
+
+    **Mitigation:** flagged inline as a pending note; exact uncollected fees become available once the subgraph indexes the full fee history. The LP's economics are unaffected — fees still accrue on-chain to the LP and are claimable via `claimFees` regardless of the display.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="The per-market subgraph dimension (when deployed)" icon="layer-group">
+    <Warning>
+    **Limit → Why → Mitigation.** When the subgraph is deployed, the **per-market** counters (`Market` lifetime counters, `MarketStateSnapshot`) will initially be zero-init.
+
+    **Why:** `SwapCreated` / `SwapPriced` / `QuoteFilled` carry no `marketId`, and the handler does not yet derive it.
+
+    **Mitigation:** the **geometry-keyed** aggregates (`BucketAggregate` for Signals 1/2/3, `GeometryDemandBucket` for Signal 4) ARE fully populated, so the **geometry-bucketed moat signals are unaffected**. Closing the per-market gap is a bounded follow-up: derive `marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(duration)))` in `handleSwapCreated`.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+## The roadmap — designed, not yet built
+
+These are deliberate scope decisions: FULL-first, with capital-efficiency and risk-export tooling sequenced behind it.
+
+<Steps>
+  <Step title="PARTIAL collateral mode (gated on the quant)">
+    PARTIAL is a **leverage dial on the one `ConvexityVault`**, not a second pool: collateral `<` MaxIL `+` buffer, capital-efficient but carrying **real bad-debt risk**. It is **roadmap, gated on the Monte-Carlo quant**. In the shipped code, `CollateralModel` has `{FULL, PARTIAL}` but PARTIAL reverts `UnsupportedModel`.
+
+    <Warning>
+    **Limit → Why → Mitigation.** PARTIAL is not enabled at launch.
+    **Why:** every PARTIAL constant (floor curve, fee curve, liquidation buffer, circuit-breaker thresholds, withdrawal delay, exposure caps, first-loss size) must come from the calibrated risk-parameter set produced by the Monte Carlo — **hardcoding any of them is the exact failure the audit flagged**.
+    **Mitigation:** FULL is the launch mode and carries the (qualified) no-bad-debt guarantee; PARTIAL ships only once the quant gates it. See [collateral models](/protocol/collateral-models).
+    </Warning>
+  </Step>
+  <Step title="MM-side hedging tooling (Greeks + cvAMM port)">
+    The whole point of Path B is that **hedged MMs export short-gamma risk out of the system** (a closed pool can only relocate risk, not shrink it), and **forward-vol MMs correct the pool's backward-looking σ_ref bias**. The SDK already exposes the Greeks-hedge and cvAMM-port surfaces ([Greeks & hedge](/sdk/greeks-hedge), [cvAMM port](/sdk/cvamm-port)); first-class in-app hedging UX is roadmap and matures with **≥3 competing MMs**.
+  </Step>
+  <Step title="Multi-MM competition dynamics">
+    The static **structures** of the moat ship day-one; the full **dynamics** — the pool-vs-MM spread read as a forward-vol signal, the bucketed load dispersion across MMs — require multiple competing MMs (≥3) and ~30–50 fills per bucket to become a regime. This is a flow/volume milestone, not a build item.
+  </Step>
+  <Step title="Mainnet (Arbitrum One) migration">
+    A mainnet deploy is a future migration. It requires, at minimum, wiring the **sequencer-uptime feed**, the real Uniswap WETH/native-USDC pool, and native USDC — plus the standard production checklist. The mainnet reference addresses are already recorded. See [deployments](/reference/deployments).
+  </Step>
+  <Step title="Orbit / app-chain deploy (exploratory)">
+    A dedicated Arbitrum Orbit deployment is an exploratory roadmap direction for owning the full settlement and data-emission stack at lower cost. It is **not** part of the current scope and is mentioned only for completeness — the live and near-term plan is Arbitrum Sepolia today, Arbitrum One on migration.
+  </Step>
+</Steps>
+
+## What is *not* guaranteed (say it plainly)
+
+Two guarantees, and they are **never merged**: the LP no-bad-debt claim (Claim A) and depositor/MM capital risk (Claim B) are separate. Claim A is a guarantee to the LP being paid; it is **not** a guarantee that underwriting capital is preserved.
+
+<ClaimB />
+
+## What's not there yet — in one paragraph
+
+The protocol is **complete and proven on-chain**: a real, no-time-warp create→settle ran for both rails on 2026-06-05, all ten invariants are enforced, and every moat event is emitting on-chain since block `274081134`. The **single real pending item** is that the subgraph — though built and CI-green — is **not yet deployed**, so every history/aggregate/time-series surface degrades to a typed `pending` state that names its future route; the live-price and telemetry halves serve real data today. **PARTIAL** mode, first-class **MM hedging** UX, the **multi-MM** dynamics, **mainnet** migration, and an exploratory **Orbit** deploy are roadmap. Nothing on this page is faked, and nothing pending is presented as an error.
+
+---
+
+## Related
+
+<CardGroup cols={3}>
+  <Card title="Deployment addresses" icon="map-pin" href="/reference/deployments">
+    The full live Arbitrum Sepolia registry and the lifecycle proof in detail.
+  </Card>
+  <Card title="Status & caveats" icon="triangle-exclamation" href="/reference/status-caveats">
+    Every pending state, its why, and its path forward — the canonical caveat index.
+  </Card>
+  <Card title="The moat's state & limits" icon="database" href="/moat/state-and-limits">
+    What's live, what's telemetry, what's subgraph-pending across the five signals.
+  </Card>
+  <Card title="The lifecycle" icon="arrows-spin" href="/protocol/lifecycle">
+    Create → active → settle, step by step, for both rails.
+  </Card>
+  <Card title="Routing" icon="route" href="/protocol/routing">
+    How createSwapRouted gives the LP the cheaper of pool vs MM and never reverts.
+  </Card>
+  <Card title="FAQ" icon="circle-question" href="/faq">
+    Common questions about the protocol, answered.
+  </Card>
+</CardGroup>

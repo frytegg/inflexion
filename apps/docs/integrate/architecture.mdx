@@ -1,0 +1,236 @@
+---
+title: "Access-layer architecture"
+description: "The three-layer routing rule — SDK for live reads/writes, subgraph-via-API for history, API for cached public reads — the end-to-end MM → engine → chain → API flow, and why the two off-chain services are deliberately thin."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+<Info>
+**Inflexion's access layer is governed by one routing rule and one authority principle.** The rule decides _which surface answers which question_; the authority principle decides _who is allowed to compute the answer_. The chain is the authority for pricing and settlement; the two off-chain services — the **engine** (a Path-B quote relayer) and the **API** (a read-only REST facade) — are deliberately thin convenience and data surfaces that **never settle, match, or hold a wallet**.
+</Info>
+
+There are exactly three ways a consumer reaches Inflexion's state, and choosing the wrong one is the most common integration mistake. This page gives you the routing rule, the end-to-end flow that produces the data each layer serves, and the architectural reason each off-chain piece is kept thin.
+
+---
+
+## The three-layer routing rule
+
+The rule is stated verbatim as:
+
+> **Needs to write, or needs the exact price right now → SDK.**
+> **Needs history or an aggregate → Subgraph (consumed via the API).**
+> **Needs frictionless public access with no wallet and no RPC key → API.**
+
+<CardGroup cols={3}>
+  <Card title="SDK" icon="bolt" href="/sdk/overview">
+    **Live on-chain reads + all writes.** The only layer that holds a signer and the only one that can answer _"what dollar premium will I be charged on **this** position if I sign in the next block?"_ Needs an RPC key; can hold a wallet.
+  </Card>
+  <Card title="Subgraph (via API)" icon="layer-group" href="/integrate/subgraph">
+    **History and aggregates.** Internal infrastructure — nobody queries it directly in production except the API. Indexes the on-chain moat events into the entities the five behavioral signals aggregate over.
+  </Card>
+  <Card title="API" icon="globe" href="/integrate/api-endpoints">
+    **Cached, public, read-only.** No wallet, no RPC key, no signer for the consumer. A thin `node:http` facade composing the subgraph, a small set of live RPC reads (routed _through the SDK_), and the engine's telemetry sinks.
+  </Card>
+</CardGroup>
+
+### Why three layers and not one
+
+Each layer exists because the other two cannot do its job without giving something up:
+
+| Question | Why the SDK | Why the subgraph-via-API | Why the public API |
+| --- | --- | --- | --- |
+| _Write a transaction_ | Only the SDK holds a signer | Read-only | Read-only |
+| _Exact dollar premium for **this** position, right now_ | Needs a fresh `FairValueOracle` read **+** the position geometry; position-specific | Indexes the past, not the next block | Forwards the SDK's row; cannot derive it |
+| _Time series / cross-fill aggregate_ | A single client cannot scan history cheaply | Purpose-built indexer | Caches the subgraph result |
+| _Public read, no wallet, no RPC key_ | Needs an RPC endpoint | Internal infra, GraphQL, unstable to expose | Exactly this — CORS-open, cached, typed-degrading |
+
+<Note>
+**The pricing implementation exists in exactly one place per concern.** The fair rate (the [Φ-sum](/math/fair-value-phi-sum)) is computed only on-chain by the Stylus `FairValueOracle` and read through the SDK. The deterministic [load stack](/math/load-stack) is computed on-chain in pricing and re-evaluated client-side only via the SDK's **parity-locked** [`CvammPricing` TS port](/sdk/cvamm-port) (the deployed library is delegatecall-only, so a direct `eth_call` reverts). **The API never re-derives the fair rate or the load stack** — it forwards the SDK's row. One implementation per concern is what keeps the access layer honest.
+</Note>
+
+---
+
+## The two off-chain services
+
+The access layer wraps the on-chain core — `InflexionCore`, the Stylus `FairValueOracle`, the cvAMM `ConvexityVault` — with two small Node/TS services. Both are framework-free (`node:http`), offline-test-friendly, and intentionally thin.
+
+<CardGroup cols={2}>
+  <Card title="@inflexion/engine — the Path-B relayer" icon="tower-broadcast" href="/integrate/engine">
+    A thin off-chain relayer for the **optional** market-maker rail. Accepts EIP-712 signed quotes over WebSocket, verifies signature + light freshness, serves the cheapest live quote, and captures the two day-one telemetry signals. **Does not match or settle — the chain does.**
+  </Card>
+  <Card title="@inflexion/api — the public REST facade" icon="server" href="/integrate/api-overview">
+    A public, **read-only, cached** facade — no wallet, no signer, no RPC key for consumers. Composes three independently-degrading backings: the subgraph, live RPC reads via the SDK, and the engine's telemetry sinks.
+  </Card>
+</CardGroup>
+
+### Where the chain stays the authority
+
+Pushing matching or settlement off-chain would reintroduce trust — and would break the no-bad-debt guarantee. So the relayer is structurally incapable of doing either:
+
+- It **cannot compute a dollar premium.** The final premium is _position-specific_ and derived **on-chain** at `createSwapRouted` as $\text{FairPremium} \cdot (1 + \text{loadBps})$. The relayer returns the _signed quote + its `loadBps`_, not a dollar figure — it would need the LP's exact geometry and an RPC read of `FairPremium` to do otherwise.
+- It applies only a **light, non-authoritative** freshness gate. Its skew window (`maxValiditySkewS = 60s`) is deliberately _looser_ than the on-chain validity window of `[5, 15] s`. The chain re-checks everything; the relayer just drops obvious junk so the store stays clean.
+- It **holds no wallet and never signs.** It verifies an MM's EIP-712 signature; it never produces one.
+
+<Warning>
+**Limit — the engine is the only place latent demand and lost quotes are ever recorded; if the sinks are not configured from the first deploy, that data is gone forever.**
+
+- **Why.** Invariant **I7** guarantees an _unchosen_ quote touches no nonce and no capacity, so an LP who priced but did not buy, and an MM quote that lost or was withdrawn, leave **no on-chain trace by design**. Putting unfilled interest on-chain would both cost gas and break I7.
+- **Mitigation.** The engine writes two **append-only JSONL** telemetry sinks — `DEMAND_LOG` (Signal 4 latent half) and `COMPETITION_LOG` (Signal 2 dynamic half) — from the very first interaction. The writer is best-effort and **never throws**: a full disk or missing sink never breaks a quote ack, a preview, or a `/quote` request. Set `DEMAND_LOG` and `COMPETITION_LOG` on the engine from deploy day. See [the engine](/integrate/engine) and [telemetry](/moat/telemetry).
+</Warning>
+
+### Why Path A needs no engine at all
+
+The engine exists **only** so a sophisticated MM can compete on price against the pool. Path A — the cvAMM pool — is _always-on and signature-free_; a pooled vault underwrites with no relayer in the loop. `createSwapRouted` then hands the LP the cheaper of `{pool, MM quote}`. The engine is **pure upside**: if no MM is connected, [Path A](/protocol/path-a-cvamm) still clears every position, and an expired, over-band, or under-collateralized MM quote causes routing to fall back to the pool, **never revert**. See [routing](/protocol/routing).
+
+---
+
+## End-to-end: MM → engine → chain → API
+
+This is the flow that produces the state each layer serves. It is the canonical sequence followed end to end.
+
+<Steps>
+  <Step title="MM streams a firm quote to the engine (WebSocket)">
+    The market maker streams `{ type: 'quote', quote, signature }` over WS. The relayer verifies the EIP-712 signature + the light freshness gate, stores it as the cheapest-per-market candidate, and logs it to `COMPETITION_LOG` (a _winner_ if accepted, a _loser_ if rejected — **both are logged**). The quote is **per-market**, never per-NFT: it carries a `loadBps`, a `[minMaxILRatioBps, maxMaxILRatioBps]` band, and a capacity ceiling, but **no `tokenId`**. This is load-bearing — [MaxIL](/concepts/maxil) makes positions fungible to an underwriter within a market.
+  </Step>
+  <Step title="LP previews via the SDK">
+    `LpClient.previewPremium` reads the _live_ pool-load surface (RPC, or the API's `/pool/load-surface`) and the cheapest MM load from the engine's `GET /quote`, then best-effort POSTs `/telemetry/preview` (logged to `DEMAND_LOG`, `filled: false`). The preview ping carries **only bucketed geometry + marketId** (no PII, no `tokenId`, no addresses).
+  </Step>
+  <Step title="LP buys on-chain — the chain re-derives everything">
+    The LP calls `createSwapRouted` on `InflexionCore`. The chain re-derives `FairPremium` (the [Φ-sum](/math/fair-value-phi-sum) from the Stylus `FairValueOracle`), re-checks the quote's `[5, 15] s` validity window, the [price band](/security/price-pinning) (invariant **I9** / Fork 2), and the bitmap nonce (**I7**), then routes to the cheaper of `{cvAMM pool, MM quote}`. An invalid quote falls back to Path A, **never reverts**. **Only the executed rail mutates nonce, capacity, and the collateral lock.**
+  </Step>
+  <Step title="Settlement pays the LP from the chosen underwriter">
+    `settle()` pays the LP $\min(\text{realized\_IL}, \text{MaxIL})$ trustlessly from the chosen underwriter's collateral. The 2026-06-05 lifecycle demonstrated both rails: Path A (cvAMM, swap #1, premium \$9.70 = 0.58% of MaxIL, payout \$148.64) and Path B (MM beat the pool, swap #2, MM load 1000 bps, payout \$245.66 from MM collateral).
+  </Step>
+  <Step title="The API exposes the microstructure">
+    Live surfaces are served now via RPC (through the SDK); the off-chain telemetry halves are served now from the JSONL sinks; everything else returns a **typed pending body with the exact future GraphQL query embedded** until the subgraph deploys. At the redeploy, the on-chain `SwapPriced` / `QuoteFilled` events join the structural moat halves to the dynamic halves already captured. See [the five signals](/moat/five-signals).
+  </Step>
+</Steps>
+
+The two on-chain events that the subgraph indexes for the moat both shipped in the 2026-06-05 redeploy and are **live on-chain now** — only the indexer is pending:
+
+```solidity
+// the mechanical baseline, all three create paths
+event SwapPriced(
+    uint256 indexed swapId,
+    uint8   path,            // 0 = cvAMM pool (A), 1 = MM (B)
+    uint256 fairPremium,     // the WAD baseline the load multiplies
+    uint256 baseLoadWad, uint256 utilSkewWad, uint256 dispSkewWad,  // pool load decomposition (Path A)
+    uint256 totalLoadWad,    // Path A: clamped pool load; Path B: MM loadBps in WAD
+    uint256 sigmaRefWad,     // the σ_ref the swap was priced against
+    bool    cappedAtMaxIL    // true ⇒ premium hit the cap ⇒ ZERO load info
+);
+
+// THE single non-circular load datum (behavioral)
+event QuoteFilled(uint256 indexed swapId, address indexed mm, bytes32 indexed quoteId, uint256 nonce, uint16 loadBps);
+```
+
+---
+
+## What is intentionally thin — and why
+
+Thinness is a design constraint, not an unfinished state. Each service is kept small so the chain stays the only authority and so both degrade gracefully under absence.
+
+<AccordionGroup>
+  <Accordion title="The engine does not match or settle">
+    The relayer's entire job is three things: verify + store the latest signed quote per `(market, MM)`, serve the cheapest live quote over `GET /quote`, and capture the two day-one telemetry signals. Matching and settlement are the chain's — pushing them off-chain would reintroduce trust and break the no-bad-debt guarantee. The relayer returns a _load_, not a dollar premium, because the premium is position-specific and computed on-chain.
+  </Accordion>
+  <Accordion title="The API never re-derives pricing — it forwards the SDK">
+    Live RPC reads in the API reuse `@inflexion/sdk` `DataClient.getCurrentLoadSurface` and `DepositorClient.getVaultState`. The Φ-sum fair rate is computed in exactly one place (the Stylus `FairValueOracle`, surfaced through the SDK); the API only forwards it. This is a hard rule — duplicating the pricing math in the API would create a second source of truth.
+  </Accordion>
+  <Accordion title="The API has no wallet, no signer, and is GET-only">
+    Consumers need no RPC key and no signer. Non-GET requests return `405 { available:false, reason:'method-not-allowed', detail:'read-only API; GET only' }`. The whole stack is fully testable offline — mock subgraph, injected fetch, injected telemetry reader, pre-built SDK clients.
+  </Accordion>
+  <Accordion title="Engine scope: no auth, no rate-limit, no persistence beyond JSONL">
+    The store is in-memory (`marketId → mm → latest quote`) with an optional append-only JSONL log; multi-MM works because the store keys per MM, but there is no auth, no rate-limit, and no persistence beyond the JSONL log. The definitive Stylus ≡ Solidity ≡ off-chain digest cross-check is an integration test added with the SDK. Production hardening (auth, rate-limit, durable store) is a bounded follow-up — the architecture does not change, only the operational envelope.
+  </Accordion>
+</AccordionGroup>
+
+### Everything degrades to a typed value, never an exception
+
+Both services treat absence as a first-class, typed state — not an error path. This is what lets a UI render a "pending" or "degraded" panel instead of catching an exception.
+
+- **The API response envelope is a discriminated union** that **never throws**:
+
+```jsonc
+// Available
+{ "available": true, /* ...payload */ }
+
+// Pending (typed degraded) — present on subgraph routes today
+{ "available": false,
+  "reason": "subgraph-not-deployed",
+  "detail": "no subgraph url configured (not deployed yet)",
+  "query":  "query Markets($first: Int = 100) { markets(...) { id token0 token1 fee ... } }" }
+```
+
+- **`PendingReason` is a closed enum**: `subgraph-not-deployed`, `subgraph-unreachable`, `rich-events-pre-redeploy`, `telemetry-sink-absent`, `rpc-unavailable`. Each one names precisely what unblocks the surface.
+- **Subgraph-backed routes embed the exact future query** so the surface is self-documenting and the redeploy is a flip, not a rewrite. A consumer can read precisely what data will appear.
+- **A last-resort 500 guard** wraps every handler: a stray bug returns `500 { available:false, reason:'internal' }` rather than crashing the process.
+
+<Warning>
+**Limit — the subgraph is not yet deployed, so every history/aggregate (`[SG]`) surface returns a typed `pending` body today.**
+
+- **Why.** The subgraph is built and CI-green offline, but `SUBGRAPH_URL` is unset for the 2026-06-05 redeploy. This is a build gap, **not a contract gap** — the contracts already emit every event the moat needs (`SwapPriced` / `QuoteFilled` are live on-chain).
+- **Mitigation.** Each `[SG]` route returns `{ available:false, reason:'subgraph-not-deployed', query:… }` with the exact GraphQL it _will_ run embedded — wired-and-ready. The live RPC surfaces (current load surface, vault state, pricing preview) and the telemetry halves (`DEMAND_LOG`, `COMPETITION_LOG`) return **real data now**. The redeploy block `274081134` is the subgraph `startBlock` — the on-chain moat dataset begins there. See [status & caveats](/reference/status-caveats) and the [moat state](/moat/state-and-limits).
+</Warning>
+
+---
+
+## Which layer serves which surface (live status)
+
+A quick map of what is reachable today, by layer. Backing key: **[RPC]** live via the SDK, **[SG]** subgraph (pending today), **[TEL]** engine telemetry sink.
+
+| Surface | Layer | Backing | Live now? |
+| --- | --- | --- | --- |
+| Premium preview for a position | SDK / API `/pricing/preview` | [RPC] | **Yes** |
+| Current pool-load surface ("price-to-beat") | SDK `getCurrentLoadSurface` / API `/pool/load-surface` | [RPC] | **Yes** |
+| Vault / NAV state (Claim B) | SDK `getVaultState` / API `/pool` | [RPC] | **Yes** |
+| Cheapest live MM quote | Engine `GET /quote` | (engine store) | **Yes** |
+| Latent demand (Signal 4 latent half) | API `/data/demand-requests` | [TEL] | **Yes** (latent half) |
+| Quote competition (Signal 2 dynamic half) | API `/data/quote-competition` | [TEL] | **Yes** |
+| Load-surface history, term structure, NAV history | API `/data/*`, `/pool/nav-history` | [SG] | Pending (typed) |
+| Swaps, MM fills, σ_ref history | API `/swaps`, `/mm/:addr/fills`, `/sigma/:token/history` | [SG] | Pending (typed) |
+| Net gamma / supply depth (Signal 5) | API `/data/net-gamma`, `/data/supply-depth` | [SG] | Pending (typed) |
+
+<Maturity />
+
+---
+
+## The claims, stated correctly
+
+The access layer carries two **separate, never-merged** standing disclosures. The API attaches Claim A to every payout/swap/MM surface and Claim B to every NAV/yield/pool surface; they are never combined into one statement. LP no-bad-debt (Claim A) and depositor/MM capital risk (Claim B) are distinct claims.
+
+<ClaimA />
+
+<ClaimB />
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The engine" icon="tower-broadcast" href="/integrate/engine">
+    The Path-B relayer in depth: the `SignedQuote`, the WS protocol, the freshness gate, and the day-one telemetry sinks.
+  </Card>
+  <Card title="API overview" icon="server" href="/integrate/api-overview">
+    The response envelope, the closed `PendingReason` enum, caching, and graceful degradation.
+  </Card>
+  <Card title="API endpoints" icon="list" href="/integrate/api-endpoints">
+    The full path · query · backing · returns reference for every route.
+  </Card>
+  <Card title="The subgraph" icon="layer-group" href="/integrate/subgraph">
+    The internal indexer: the moat entities, the embedded queries, and the marketId-parity note.
+  </Card>
+  <Card title="SDK overview" icon="bolt" href="/sdk/overview">
+    The typed access layer — the only signer-holding surface, its five clients, and degradation model.
+  </Card>
+  <Card title="The data moat" icon="chart-line" href="/moat/thesis">
+    The five non-circular behavioral signals and how the access layer reaches each one.
+  </Card>
+</CardGroup>
+
+For the live contract addresses, see the [deployments reference](/reference/deployments).
+
+<AddressTable />

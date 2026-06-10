@@ -1,0 +1,424 @@
+---
+title: "Load, σ_ref & geometry — the three moat primitives"
+description: "The three recurring primitives behind every behavioral signal — the dealer load, the transparent σ_ref reference, and position geometry — plus the duration-independence of the Path-A load and the two on-chain moat events (SwapPriced, QuoteFilled) that record them."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+
+Every one of [the five behavioral signals](/moat/five-signals) is built from the
+same three primitives, recombined: a **load** (the price *above* fair value), a
+**σ_ref** (the transparent realized-vol reference the load is measured *against*),
+and a **geometry** (the specific Uniswap v3 position the LP brought). Pin these three
+down once and every signal becomes a recipe over them — and the
+[circularity verdicts](/moat/circular-vs-behavioral) become mechanical.
+
+The pattern that unifies them: a signal is **behavioral** (and therefore
+non-circular) exactly when its informative degree of freedom comes from an actor's
+free choice — an MM's `loadBps` or an LP's geometry/duration choice — measured
+**against** the transparent mechanical baseline, never **derived** from it. The load
+is where that choice lives; σ_ref is the yardstick; geometry is the bucket.
+
+<CardGroup cols={3}>
+  <Card title="Load" icon="layer-group" href="#1-load-the-price-above-fair-value">
+    The dealer markup over [published fair value](/concepts/fair-value). Mechanical
+    on Path A (a `pure` function of pool state); a free choice on Path B (the MM's
+    `loadBps`).
+  </Card>
+  <Card title="σ_ref" icon="wave-square" href="#2-the-transparent-realized-vol-reference">
+    The on-chain EWMA realized-vol oracle. Transparent and published — which is what
+    makes the load charged *above* it a well-defined, identifiable quantity.
+  </Card>
+  <Card title="Geometry" icon="ruler-combined" href="#3-geometry-the-position-the-lp-brings">
+    Width × distance-to-edge × duration. The LP's free choice of *what* to protect;
+    the bucket every signal is keyed by.
+  </Card>
+</CardGroup>
+
+## 1. Load — the price above fair value
+
+Every premium in the protocol is the [published fair value](/concepts/fair-value)
+multiplied by one plus a markup, hard-capped at [MaxIL](/concepts/maxil):
+
+$$
+\text{premium} = \text{FairPremium} \cdot \bigl(1 + \text{totalLoad}\bigr),
+\qquad \text{premium} \le \text{MaxIL}.
+$$
+
+The `totalLoad` is the **dealer markup over the protocol's published fair value** —
+the part of the price the protocol does *not* compute from the option math. Where it
+comes from depends on the rail ([the two rails](/concepts/two-rails)):
+
+<Tabs>
+  <Tab title="Path A — the cvAMM pool">
+    On the [cvAMM pool](/protocol/path-a-cvamm) the load is a **deterministic,
+    on-chain `pure` function of pool state** — fully reproducible from public getters.
+    This is the mechanical baseline, the *price-to-beat*. Exactly as deployed:
+
+    $$
+    \text{totalLoad} = \operatorname{clamp}\Bigl(
+      \underbrace{\text{baseLoad}(\sigma_{\text{ref}})}_{\text{regime band}} +
+      \underbrace{\text{utilSkew}(u)}_{\text{scarcity}} +
+      \underbrace{\text{dispSkew}(h)}_{\text{concentration}},
+      \; \text{maxLoad}
+    \Bigr)
+    $$
+
+    - **`baseLoad`** — a σ_ref **regime band** (calm / normal / stressed), *not* a
+      continuous function of σ_ref.
+    - **`utilSkew(u)`** — flat below a knee, convex above, capped, on
+      `u = locked / total`.
+    - **`dispSkew(h)`** — `min(dispCap, dispSlope · h^dispPower)`, where `h` is the
+      per-market coverage HHI (concentration).
+    - **The I10 clamp** — `total = min(base + util + disp, maxLoadBps·1e14)`. This is
+      invariant [I10 by construction](/security/invariants):
+      `premium ≤ FairPremium·(1+maxLoad)` for **any** inputs, on **both** rails,
+      upstream of `settle`.
+  </Tab>
+  <Tab title="Path B — the market maker">
+    On [an MM](/protocol/path-b-mm) the load is the MM's **freely chosen `loadBps`**,
+    carried in the EIP-712 [signed quote](/integrate/quote-signing). The contract
+    derives the MM premium as $\text{FairPremium}\cdot(1+\text{loadBps}/10^4)$ and
+    requires `loadBps ≤ maxLoadBps` (the same I10 ceiling, enforced here as a
+    `require`). The protocol does **not** compute this number — that is precisely why
+    it is the single non-circular load datum (see
+    [QuoteFilled](#4-2-quotefilled-the-single-non-circular-load-datum)).
+  </Tab>
+</Tabs>
+
+<Tip>
+**No load primitive is hardcoded.** Every curve parameter
+(`baseLoad` regime bands, the util-skew knee/slope/power/cap, the dispersion-skew
+slope/power/cap, `maxLoadBps`) comes from the calibrated risk-parameter set (the cvAMM
+block), mirrored on-chain by `InflexionCore.loadParams()`. This matters for the moat:
+the *mechanical* baseline is fully reproducible from public getters, which is exactly
+what makes the *behavioral* MM load measurable against it.
+</Tip>
+
+### 1.1 The duration-independence subtlety of the Path-A load
+
+This is the single subtlety that decides how the [term-structure signal](/moat/five-signals)
+behaves, and it is easy to get wrong. The Path-A load stack is
+**duration-INDEPENDENT by construction** — none of `baseLoadWad`, `utilSkewWad`,
+`dispSkewWad` takes `durationSeconds` as an argument.
+
+All maturity dependence lives **elsewhere** — in [`fairRate`](/math/fair-value-phi-sum),
+the exact closed-form Φ-sum, which is the only term carrying the σ_ref·√T dependence.
+The factorization is clean:
+
+$$
+\text{premium}(T) = \underbrace{\text{fairRate}(a,b,\sigma_{\text{ref}},T)}_{\text{all the time dependence}}
+\cdot \underbrace{\text{MaxIL}}_{\text{geometry, frozen}}
+\cdot \bigl(1 + \underbrace{\text{totalLoad}(\sigma_{\text{ref}}, u, h)}_{\text{no }T}\bigr).
+$$
+
+The consequence for the moat is precise:
+
+<Warning>
+**A Path-A "term structure of load" is a flat line.**
+
+- **Limit** — if you plot `SwapPriced.totalLoadWad` (the pool load) across the
+  7/30/90d markets for a fixed geometry, you get a *horizontal line*. The pool load
+  does not move with maturity.
+- **Why** — the load stack is `pure` in `(σ_ref, util, conc)` only; `durationSeconds`
+  never enters it. All maturity dependence is folded into `fairRate(...,T)`, the
+  protocol's own σ_ref·√T closed form — which is **mechanical and circular**, not a
+  behavioral signal.
+- **Mitigation / framing** — the **only** behavioral term structure is the MM's
+  `loadBps` slope across 7/30/90d for one range. Path A gives you the *published
+  `fairRate` term structure* (mechanical); Path B gives the *behavioral load term
+  structure*. Do not conflate them.
+</Warning>
+
+So when [Signal 3](/moat/five-signals) (term structure of convexity) measures a
+slope, the slope it cares about is `QuoteFilled.loadBps` across durations — an MM
+choice, non-circular — never the Path-A load, which is a flat mechanical line by
+construction.
+
+## 2. σ_ref — the transparent realized-vol reference
+
+`σ_ref` is the yardstick the load is measured *against*. It is a poke-based,
+time-aware EWMA of Chainlink-tick log-returns — **never** raw realized σ:
+
+$$
+\sigma_{\text{ref}} = \max\bigl(\sigma_{\text{short}},\, \sigma_{\text{long}},\, \text{floor}\bigr).
+$$
+
+It is published on-chain via `VolOracle.sigmaRef(token)`. Three properties make it
+the keystone of the moat — see [the σ_ref page](/math/sigma-ref) for the full
+derivation and calibrated values (`short_halflife = 1d`, `long_halflife = 30d`,
+`floor = 0.50`):
+
+<AccordionGroup>
+  <Accordion title="Transparent ⇒ the load is identifiable, not back-solved">
+    Because σ_ref is transparent and on-chain, the load charged *above* it is a
+    **well-defined, identifiable quantity** — not a back-solved, non-identifiable
+    "implied σ_LP". This is the property that converts the moat from *circular* to
+    *legible*. If σ_ref were hidden, an observed premium could be decomposed into
+    vol-and-load infinitely many ways; with
+    σ_ref public, the load is the *only* free quantity left, and it is exactly the
+    actor's choice.
+  </Accordion>
+  <Accordion title="Conservative by design ⇒ the floor overcharges calm months">
+    The `max(...)` is **mandatory, not optional engineering**: realized vol
+    *understates* risk right before a regime change. A single fast EWMA would
+    collapse to a deceptively calm number exactly before a crash. Taking the max of a
+    short window, a long window, and a hard floor is the conservative guard. The floor
+    (`0.50`) sits *above* observed calm ETH vol (`~0.45`) on purpose, so the pool
+    overcharges calm months and is net-conservative to depositors.
+  </Accordion>
+  <Accordion title="Backward-looking by design ⇒ the residual is MM alpha">
+    σ_ref is **backward-looking** — and the residual *forward*-looking premium is
+    deliberately left as MM alpha. That residual blindness is the incentive that keeps
+    MMs in the two-sided market, and it is exactly what
+    [Signal 2](/moat/five-signals) (the pool-vs-MM spread) extracts: the MM's forward
+    view, measured against the pool's backward-looking σ_ref.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+**σ_ref is solvency-load-bearing for depositors, not for LP no-bad-debt.** A
+wrong/too-low σ_ref makes the pool under-charge load, so premium income stops covering
+payouts and NAV compresses — junior absorbs it first, senior in the tail. It is
+**NOT** load-bearing for the FULL [no-bad-debt invariant (I1)](/concepts/no-bad-debt),
+which stays structural and oracle-independent: in FULL, collateral = MaxIL ≥ payout
+*regardless of what σ was*. Two separate guarantees, never merged.
+</Note>
+
+## 3. Geometry — the position the LP brings
+
+The third primitive is the bucket. Every behavioral signal is keyed by
+**width × distance-to-edge × duration** — the LP's free choice of *what* to protect:
+
+| Dimension | Definition | Reads as |
+| --- | --- | --- |
+| **width** | $\log(P_b/P_a)$ | tight vs wide range |
+| **distance-to-edge** | $\min(P_0 - P_a,\; P_b - P_0)\,/\,P_0$ | centered vs near-edge |
+| **duration** | $\text{expiry} - \text{createdAt}$ | 7d / 30d / 90d markets |
+
+**Geometry is not stored in any event.** No `SwapPriced` / `QuoteFilled` /
+`SwapCreated` field carries the range ticks. Geometry is recovered *off-chain* by
+decoding the swap's `tokenId` via `NPM.positions(tokenId)` at the `SwapCreated` block
+(range ticks → `Pa`/`Pb`), plus `expiry − createdAt` for duration. That archive
+`positions` decode is the **one enrichment** every geometry-bucketed signal (1, 3, 4)
+requires.
+
+<Info>
+**Why bucketing the load by geometry is informative rather than noisy.**
+[MaxIL is the unit](/concepts/maxil) that makes positions *fungible* and the load
+*range-agnostic*: premium is quoted as a fraction of MaxIL, so MM/pool return-on-capital
+is range-independent and there is no adverse selection on range width. That is why an
+MM quote is **per-market** (a load + a MaxIL-ratio band + capacity), *never per-NFT* —
+the `SignedQuote` carries no `tokenId`. With the level normalized out by MaxIL, what
+remains in the bucketed load is the actor's *view*, which is exactly what makes the
+geometry buckets a clean signal.
+</Info>
+
+## 4. The on-chain moat events
+
+The 2026-06-05 redeploy landed the two events that record these primitives at every
+fill, plus the on-chain load decomposition. They are **LIVE on-chain now**; only the
+[subgraph that indexes them](/integrate/subgraph) is pending.
+
+<Steps>
+  <Step title="SwapPriced — the mechanical baseline">
+    The per-fill clearing-price record, emitted on **all three** create paths.
+  </Step>
+  <Step title="QuoteFilled — the behavioral datum">
+    The single non-circular load datum, emitted on **every Path-B fill**.
+  </Step>
+  <Step title="loadComponents — the on-chain breakdown">
+    The `pure` library function that decomposes the pool load into its three skews and
+    feeds `SwapPriced`.
+  </Step>
+</Steps>
+
+### 4.1 SwapPriced — the per-fill clearing-price record
+
+Emitted at the end of `_executePathA` / `_executePathB`:
+
+```solidity
+event SwapPriced(
+    uint256 indexed swapId,
+    uint8   path,            // 0 = cvAMM pool (A), 1 = MM (B)
+    uint256 fairPremium,     // the WAD baseline the load multiplies
+    uint256 baseLoadWad,     // pool load decomposition (Path A); 0 on Path B
+    uint256 utilSkewWad,     //   "
+    uint256 dispSkewWad,     //   "
+    uint256 totalLoadWad,    // Path A: clamped pool load; Path B: MM loadBps in WAD
+    uint256 sigmaRefWad,     // the σ_ref the swap was priced against
+    bool    cappedAtMaxIL    // true ⇒ premium hit the cap ⇒ ZERO load info
+);
+```
+
+This event records **all three primitives atomically** — the load decomposition, the
+σ_ref it was priced against, and (via the `tokenId` from `SwapCreated`) the hook for
+the geometry decode — **with no archive `eth_call`**:
+
+<ResponseField name="fairPremium" type="uint256 (WAD)">
+  The fair-value baseline the load multiplies. Added so the load can be **normalized**
+  against fair value — without it, neither the pool's realized-load fraction nor the
+  MM's load is normalizable.
+</ResponseField>
+<ResponseField name="baseLoadWad / utilSkewWad / dispSkewWad / totalLoadWad" type="uint256 (WAD)">
+  The **mechanical** Path-A load decomposition (the `loadComponents` output). On a
+  **Path-B fill** these fields describe the **pool quote the MM beat** — the
+  price-to-beat — which is exactly what [Signal 2's spread](/moat/five-signals) needs.
+</ResponseField>
+<ResponseField name="sigmaRefWad" type="uint256 (WAD)">
+  The σ_ref the swap was priced against. Emitted on **every** fill, so the subgraph
+  backfills the σ_ref series between `VolOracle.Poked` events (`poke` is a no-op
+  emitting nothing when `dt < minSampleInterval`).
+</ResponseField>
+<ResponseField name="cappedAtMaxIL" type="bool">
+  `true` ⇒ the premium hit the [MaxIL cap](/concepts/maxil) ⇒ the load was truncated
+  ⇒ **zero load information**. Added because deriving `premium == MaxIL` off-chain is
+  brittle (rounding); the explicit flag lets every consumer filter cap-bound fills
+  cheaply.
+</ResponseField>
+
+<Warning>
+**Cap-bound fills carry ZERO load information and MUST be excluded** from the load
+signals (1, 2, 3).
+
+- **Limit** — when `premium == MaxIL`, the number you observe is the *cap*, not the
+  actor's load. The load was truncated by [the cap](/concepts/maxil).
+- **Why** — at the cap, the I10 clamp (or the cap itself) has overwritten the actor's
+  choice; the observed value is geometry, not behavior.
+- **Mitigation** — filter `SwapPriced.cappedAtMaxIL == true` at every load-surface
+  consumer. The explicit boolean exists precisely so this filter is cheap and
+  unambiguous.
+</Warning>
+
+The 9-field breakdown is assembled into a memory-only `SwapPricing` struct and emitted
+via the split-out `_emitPriced` so the wide event does not inflate the create
+function's stack frames.
+
+### 4.2 QuoteFilled — the single non-circular load datum
+
+Emitted on every Path-B fill in `_executePathB`:
+
+```solidity
+event QuoteFilled(
+    uint256 indexed swapId,
+    address indexed mm,
+    bytes32 indexed quoteId,
+    uint256 nonce,
+    uint16  loadBps          // the MM's actor-chosen load, attributed to the exact quote
+);
+```
+
+This is **THE single non-circular load datum**: the MM's freely chosen `loadBps`,
+attributed to the exact quote and nonce. It is capped only by
+`loadParams.maxLoadBps` (I10) — the protocol does **not** compute it, which is the
+whole reason it is behavioral rather than circular (see
+[circular vs behavioral](/moat/circular-vs-behavioral)). It also closes the
+pre-redeploy "coarse fill attribution" gap: previously `SwapCreated` / `SwapRouted`
+carried no `quoteId` / `nonce`, and `isNonceUsed` was `true` on both fill **and**
+cancel, so a fill could not be cleanly attributed to a quote.
+
+<Note>
+**The subtraction is the point.** [Signal 2](/moat/five-signals) reports the *spread*
+`poolLoad − mmLoad` = `SwapPriced.totalLoadWad − QuoteFilled.loadBps`. The mechanical
+leg (Path A) and the behavioral leg (Path B) arrive in two joined events with no
+archive call; their **difference** isolates the MM's view relative to the transparent
+baseline, and the subtraction is exactly what removes the circular component. Path A is
+*never sold as a behavioral signal* — it is the transparent yardstick the MM load is
+subtracted from.
+</Note>
+
+### 4.3 CvammPricing.loadComponents — the on-chain breakdown
+
+The pool load decomposition that feeds `SwapPriced` is computed on-chain by:
+
+```solidity
+// PRE-clamp components; `total` is the I10-clamped sum
+function loadComponents(
+    uint256 sigmaRefWad,
+    uint256 utilWad,
+    uint256 concWad,
+    LoadParams memory p
+) external pure returns (
+    uint256 baseLoad,   // baseLoadWad(σ_ref) — regime band
+    uint256 utilSkew,   // utilSkewWad(u)
+    uint256 dispSkew,   // dispSkewWad(h)
+    uint256 total       // I10-clamped min(base+util+disp, maxLoad)
+);
+```
+
+It is called from `InflexionCore._pricePathAFromFair`. The returned components are
+**pre-clamp** — so `base + util + disp` may exceed `total` — while `total` is the
+I10-clamped sum.
+
+<Warning>
+**The deployed `CvammPricing` library is DELEGATECALL-ONLY** — a direct `eth_call` to
+it reverts.
+
+- **Limit** — you cannot `eth_call` `loadComponents` against the deployed library
+  address; Solidity guards deployed public-library functions, confirmed on the
+  2026-06-05 deploy. The library runs on-chain only via the core's `delegatecall`
+  during pricing.
+- **Why** — public library functions are not meant to be called externally; the
+  deployed bytecode rejects a top-level call.
+- **Mitigation** — the SDK **permanently** decomposes the two skews using a
+  parity-locked TypeScript port (the SDK `loadComponents`), asserted **byte-equal** to
+  the deployed Solidity in the SDK parity test. This is the **only** permitted
+  duplication: the SDK never reimplements the [`fairRate` Φ-sum](/math/fair-value-phi-sum)
+  (read from the on-chain `FairValueOracle`), but the load stack is an explicitly
+  deterministic `pure` transform of public inputs and may be re-evaluated client-side.
+</Warning>
+
+### 4.4 The supporting events the moat relies on
+
+`SwapPriced` and `QuoteFilled` are the two *new* moat events; they sit on top of the
+existing lifecycle events:
+
+| Event | Signature (abridged) | Role in the moat |
+| --- | --- | --- |
+| `SwapCreated` | `(swapId, lp, mm, tokenId, V0, maxIL, premium)` | carries the `tokenId` the **geometry decode** keys off |
+| `SwapSettled` | `(swapId, realisedIL, payout, settlementPrice)` | closes the active set ([Signal 5](/moat/five-signals) open-set membership) |
+| `SwapRouted` | `(swapId, pathB, premiumA, premiumB)` | routed-only convenience carrying both candidate premiums; **fires only from `createSwapRouted`**, so it biases win-rate toward routed entries — which is why `SwapPriced` is the canonical per-fill record |
+| `VolOracle.Poked` | the σ_ref series | backfilled between pokes from `SwapPriced.sigmaRefWad` |
+
+## 5. How the primitives compose into signals
+
+The three primitives recombine into the [five signals](/moat/five-signals) by a single
+template — behavioral leg, measured against the mechanical baseline:
+
+```text
+        BEHAVIORAL (the signal)               MECHANICAL (the baseline / price-to-beat)
+        ───────────────────────               ─────────────────────────────────────────
+Load:   QuoteFilled.loadBps  (Path B)    vs   SwapPriced.totalLoadWad  (Path A)
+Vol:    the MM's forward view (implied)  vs   SwapPriced.sigmaRefWad   (backward EWMA)
+Demand: which tokenId/duration LP picks  vs   (no mechanical counterpart — pure choice)
+```
+
+Read it as a table of which primitive each signal leans on:
+
+| Signal | Behavioral primitive | Baseline | Non-circular? |
+| --- | --- | --- | --- |
+| **1** — clearing load over σ_ref | `QuoteFilled.loadBps` | `SwapPriced.totalLoadWad`, normalized by `fairPremium` / `sigmaRefWad` | **Path B only** |
+| **2** — pool-vs-MM spread + win-rate | `loadBps` (winning MM) | `totalLoadWad` (losing pool quote) | **YES, as a spread** |
+| **3** — term structure (7/30/90d slope) | `loadBps` slope across durations | `fairRate(...,T)` term structure (Path-A load is **flat**) | **Path B only** |
+| **4** — demand skew by geometry | which `tokenId` / duration the LP picks | (none — pure choice) | **PARTIAL (realized half)** |
+| **5** — net gamma supply | Σ per-swap gamma × realized load | mechanical Path-A baseline leg | **YES, as a quantity** |
+
+The exact definitions, sourcing, and maturity of each live on the
+[five signals page](/moat/five-signals); the rigorous circularity reasoning — including
+*why inverting `fairRate` is circular and was deliberately dropped* — is on
+[circular vs behavioral](/moat/circular-vs-behavioral).
+
+## State and limits
+
+<Maturity />
+
+Two of the five signals also have halves that **can never be on-chain** by design: an
+LP who priced but did not buy, and an MM quote that lost or was withdrawn, leave **no
+on-chain trace**, because invariant [I7](/security/invariants) guarantees an *unchosen*
+quote touches no nonce and no capacity. Those latent and dynamic halves live in
+[off-chain engine telemetry](/moat/telemetry), captured from
+the very first interaction because they are unreconstructable retroactively. See
+[the state-and-limits page](/moat/state-and-limits) for the full inventory, and
+[the access map](/moat/access-map) for how a consumer reaches each primitive.
+
+<ClaimB />

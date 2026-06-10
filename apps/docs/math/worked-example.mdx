@@ -1,0 +1,237 @@
+---
+title: "Worked example end-to-end"
+description: "One 50k LP position, ±10% range, three durations and three terminal prices — computing MaxIL, fairRate, FairPremium, load, premium, and the settlement payout for each, then the real on-chain 2026-06-05 lifecycle numbers for both rails."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+
+This page takes the whole stack out for a drive. We start from a single concrete LP position, walk the [pricing stack](/protocol/pricing-stack) — [MaxIL](/math/maxil-derivation) → [fairRate / FairPremium](/math/fair-value-phi-sum) → [the load stack](/math/load-stack) → premium — for **three durations**, then settle the same position at **three terminal prices**. Every intermediate number is the verified output of the Monte-Carlo reference that the on-chain Stylus oracle matches to machine precision, and the page closes on the **real on-chain create→settle numbers** logged on 2026-06-05 for both rails.
+
+The single mental model to carry through it:
+
+$$
+\text{premium} \;=\; \underbrace{\text{fairRate}}_{\text{stochastics: how risky}} \;\cdot\; \underbrace{\mathrm{MaxIL}}_{\text{geometry: how much capital}} \;\cdot\; \underbrace{(1 + \text{load})}_{\text{inventory: how scarce}}
+$$
+
+<Note>
+This is the applied companion to the conceptual math pages. If a step is unfamiliar, jump to its home page: the [IL formula](/math/il-formula), the [MaxIL convexity proof](/math/maxil-derivation), the [Φ-sum](/math/fair-value-phi-sum), the [load stack](/math/load-stack), and the [no-bad-debt math](/math/no-bad-debt-math).
+</Note>
+
+## The position
+
+A Uniswap v3 LP holds an **ETH/USDC** position worth **$V_0 = 50{,}000$ USDC** at entry, with a **geometric-symmetric ±10% range** around the entry price. To make every figure concrete we pin the entry price at $P_0 = 3{,}000$ USDC/ETH; the dollar results scale with $V_0$ and are otherwise $P_0$-independent in the fair-rate sense.
+
+| Parameter | Value |
+| --- | --- |
+| Entry price $P_0$ | $3{,}000$ USDC/ETH |
+| Range width $w$ | $\pm 10\%$ (geometric) |
+| Lower bound $P_a = P_0/(1+w)$ | $2{,}727.27$ |
+| Upper bound $P_b = P_0\,(1+w)$ | $3{,}300.00$ |
+| Entry value $V_0$ | $50{,}000$ USDC |
+| In-range requirement | $P_a \le P_0 \le P_b$ ✓ (enforced at creation) |
+
+The in-range gate $P_a \le P_0 \le P_b$ is what makes this an [in-range convexity hedge](/concepts/in-range-convexity-hedge) rather than insurance — an out-of-range entry is rejected at `createSwap` because there is no in-range IL left to hedge.
+
+<Tip>
+Solving $V_{\text{hold}}(P_0) = 50{,}000$ for $L$ at $P_0 = 3{,}000$ gives the entry basket $a_0 = 8.3\overline{3}$ ETH and $a_1 = 25{,}000$ USDC — a 50/50 value split at entry, exactly as expected for a centered range. Everything below is derived from this $(P_a, P_b, P_0, L)$ tuple.
+</Tip>
+
+## Step 1 — MaxIL (pure geometry, one number for all three durations)
+
+[MaxIL](/concepts/maxil) is the maximum in-range IL, attained at a range boundary (the [convexity proof](/math/maxil-derivation)):
+
+$$
+\mathrm{MaxIL} \;=\; \max\!\big(\mathrm{IL}(P_a),\; \mathrm{IL}(P_b)\big)
+$$
+
+Computing both boundaries for this position:
+
+| Boundary | $\mathrm{IL}$ (USDC) | as % of $V_0$ |
+| --- | --- | --- |
+| $\mathrm{IL}(P_a = 2{,}727.27)$ | $1{,}163.44$ | $2.33\%$ |
+| $\mathrm{IL}(P_b = 3{,}300.00)$ | $\mathbf{1{,}279.78}$ | $\mathbf{2.56\%}$ |
+| **MaxIL** $= \max(\cdot)$ | $\mathbf{1{,}279.78 \approx 1{,}280}$ | $\mathbf{2.56\%}$ |
+
+Two facts to read off this table:
+
+1. **The upper boundary wins.** $\mathrm{IL}(P_b) > \mathrm{IL}(P_a)$ even though the range is ratio-symmetric — the structural upper-boundary asymmetry (affine $V_{\text{hold}}$ growing without bound vs. flattening $V_{\text{lp}}$, see the [derivation](/math/maxil-derivation)). $\mathrm{MaxIL} = \mathrm{IL}(P_b)$.
+2. **MaxIL/V0 = 2.56%** matches the reference magnitude for a ±10% geometric range exactly.
+
+<Warning>
+**MaxIL is frozen here, once, and it is identical for all three durations.** It is pure geometry — no $\sigma$, no $T$ enters it. The 7d, 30d, and 90d quotes below are **all backed by the same $1{,}280$ USDC of collateral**; only [fairRate](/math/fair-value-phi-sum) moves between them. This is precisely why MaxIL is the [unit of risk](/concepts/maxil) that makes positions fungible to an underwriter.
+</Warning>
+
+## Step 2 — fairRate and FairPremium (three durations)
+
+[fairRate](/math/fair-value-phi-sum) is the dimensionless fraction of MaxIL the capped claim is worth under the risk-neutral measure — an exact closed-form Φ-sum, an **S-curve in $\sigma^2 T$**:
+
+$$
+\text{fairRate} \;=\; \frac{E_Q[\min(\mathrm{IL}, \mathrm{MaxIL})]}{\mathrm{MaxIL}} \in [0, 1],
+\qquad
+\text{FairPremium} \;=\; \text{fairRate}\cdot \mathrm{MaxIL}
+$$
+
+Evaluating at $\sigma_{\text{ref}} = 60\%$ for the ±10% geometry across the three durations:
+
+| Duration | fairRate | FairPremium $= \text{fairRate}\cdot 1{,}280$ | as % of $V_0$ |
+| --- | --- | --- | --- |
+| 7d  | $44.9\%$ | $574.72 \approx \mathbf{574}$ USDC | $1.15\%$ |
+| 30d | $70.8\%$ | $906.24 \approx \mathbf{906}$ USDC | $1.81\%$ |
+| 90d | $82.9\%$ | $1{,}061.12 \approx \mathbf{1{,}061}$ USDC | $2.12\%$ |
+
+Read this as the S-curve walking up $\sigma^2 T$: over **7d** the ±10% band is rarely touched, so the claim is worth only **44.9%** of MaxIL (the most convexity value, the cheapest fraction); over **90d** the band is exited most of the time, so the claim is worth **82.9%** of MaxIL — you are pre-paying a near-certain loss. Over 90d the band is touched ~75% of the time vs. ~24% over 7d, and the S-curve does all the work.
+
+<Note>
+$\sigma_{\text{ref}}$ is the **only** stochastic input. It is the conservative `max(σ_short, σ_long, floor)` from the [VolOracle](/protocol/oracles); here we use the calibrated illustrative $60\%$. On the live deploy the oracle initialized to its $0.50$ floor (`fairRate ≈ 0.847` at floor vol). See [σ_ref](/math/sigma-ref).
+</Note>
+
+## Step 3 — the load stack → premium
+
+The published premium is FairPremium scaled by the [load stack](/math/load-stack), hard-capped by invariant **I10**:
+
+$$
+\text{premium} \;=\; \text{FairPremium}\cdot\big(1 + \underbrace{\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}}_{\text{clamped to maxLoad}}\big)
+$$
+
+For this walkthrough take a clean **+15% total load** (skews = 0, a normal-regime `baseLoad` example — the live calibrated `baseLoad` bands are 20/30/50% by σ regime). The premium the cvAMM publishes for the **same position** at each duration:
+
+| Duration | fairRate | FairPremium | cvAMM premium (@ +15% load) | as % of $V_0$ |
+| --- | --- | --- | --- | --- |
+| 7d  | $44.9\%$ | $574$ USDC   | $660.93 \approx \mathbf{661}$ USDC   | $1.32\%$ |
+| 30d | $70.8\%$ | $906$ USDC   | $1{,}041.78 \approx \mathbf{1{,}042}$ USDC | $2.08\%$ |
+| 90d | $82.9\%$ | $1{,}061$ USDC | $1{,}220.29 \approx \mathbf{1{,}221}$ USDC | $2.44\%$ |
+
+Load sensitivity on the 30d cell (the load is the only thing the pool's inventory state can move): at **+5%** load the 30d premium is $906 \times 1.05 = \mathbf{952}$ USDC; at **+30%** it is $906 \times 1.30 = \mathbf{1{,}178}$ USDC. The ceiling is $\text{FairPremium}\cdot(1+\text{maxLoad})$, enforced by the [I10 clamp](/security/invariants).
+
+<Info>
+**Both rails price off this same FairPremium.** Path A computes the load stack on-chain; Path B (a [market maker](/protocol/path-b-mm)) carries a single `loadBps` and the contract derives `premium = FairPremium·(1 + loadBps/1e4)`, requiring `loadBps ≤ maxLoadBps` (I10 on Path B). `createSwapRouted` gives the LP the **cheaper of `{pool, MM}`** and falls back to the pool if the MM quote is unusable — see [routing](/protocol/routing).
+</Info>
+
+## Step 4 — settlement at three terminal prices
+
+The LP buys the **30d** quote: premium **$1{,}042$ USDC**, collateral locked **$1{,}280$ USDC** (= MaxIL). At expiry the protocol pins the settlement price $P_T$ on-chain from the Chainlink round-at-expiry and pays the LP $\min(\text{realized\_IL}, \mathrm{MaxIL})$ from the underwriter's collateral:
+
+$$
+\text{realized\_IL} \;=\; \max\!\big(0,\; V_{\text{hold}}(P_T) - V_{\text{lp}}(P_T)\big),
+\qquad
+\text{payout} \;=\; \min(\text{realized\_IL}, \mathrm{MaxIL})
+$$
+
+We settle the same position at three representative terminal prices: one **inside** the range, one **at the upper boundary**, and one **beyond** the range where the cap binds hard.
+
+| Scenario | $P_T$ | $V_{\text{hold}}$ | $V_{\text{lp}}$ | realized IL | **payout** $=\min(\mathrm{IL},\mathrm{MaxIL})$ |
+| --- | --- | --- | --- | --- | --- |
+| **A — interior** ($-4\%$) | $2{,}880.00$ | $49{,}000.00$ | $48{,}780.71$ | $219.29$ | $\mathbf{219.29}$ (uncapped) |
+| **B — at boundary** ($+10\%$, $P_T = P_b$) | $3{,}300.00$ | $52{,}500.00$ | $51{,}220.22$ | $1{,}279.78$ | $\mathbf{1{,}279.78}$ (= MaxIL exactly) |
+| **C — beyond range** ($+25\%$) | $3{,}750.00$ | $56{,}250.00$ | $51{,}220.22$ | $5{,}029.78$ | $\mathbf{1{,}279.78}$ (**capped** — cap binds) |
+
+Three things this table shows, each load-bearing:
+
+<Steps>
+<Step title="A — interior: the payoff is exactly the realized IL">
+Inside the range the convex IL curve sits **below** its boundary endpoints (the [convexity proof](/math/maxil-derivation)), so realized IL ($219.29$) is well under MaxIL and the LP is paid it in full, uncapped. Net of the $1{,}042$ premium the LP's hedge cost this scenario is $1{,}042 - 219.29 = 822.71$ USDC — the price of the volatility protection in a calm outcome.
+</Step>
+
+<Step title="B — at the boundary: payout equals MaxIL by construction">
+At $P_T = P_b$ the realized IL **equals MaxIL** to the cent ($1{,}279.78$) — this is the definition of MaxIL, the maximum in-range IL attained at a boundary. The payout is the full collateral; the underwriter keeps $\text{collateral} - \text{payout} = 0$ residual on this swap.
+</Step>
+
+<Step title="C — beyond range: the cap is load-bearing, not a defect">
+At $+25\%$ the LP has fully rotated into USDC ($V_{\text{lp}}$ is flat above $P_b$), while $V_{\text{hold}}$ keeps growing — realized IL balloons to $5{,}029.78$, but the payout is **capped at $1{,}279.78$ = MaxIL**. The LP eats the $3{,}750.00$ of uncovered loss. That uncovered slice is **directional** loss — foregone spot upside the LP would have had holding ETH — **not** the *impermanent* loss the product set out to hedge. Capping at MaxIL is exactly what keeps the product fully collateralized and trustless.
+</Step>
+</Steps>
+
+<ClaimA />
+
+In **every** scenario above, $\text{payout} \le \text{collateral} = \mathrm{MaxIL} = 1{,}280$ — invariants **I1** (no bad debt) and **I2** (cap correctness), structurally and for any price path. The cap binding in scenario C is the *visible* form of the no-bad-debt guarantee: the protocol never owes more than it pre-locked. See [the no-bad-debt math](/math/no-bad-debt-math).
+
+<Warning>
+**Limit → Why → Mitigation.** Scenario C looks like the LP is "under-protected" by $3{,}750$. **Why:** beyond the range the loss is directional (held-asset opportunity cost), structurally distinct from in-range IL and **unbounded** — there is no finite collateral that could insure it. **Mitigation:** the cap is disclosed up front on every LP surface (payoff diagram + "in-range convexity hedge" label), so the truncated tail never surprises an LP, and the LP keeps the choice of a wider range (larger MaxIL, more coverage) at a higher premium. See [what this is not](/what-this-is-not).
+</Warning>
+
+## The whole stack on one position, one screen
+
+Collecting Steps 1–4 for the 30d quote, end to end:
+
+$$
+\underbrace{\mathrm{MaxIL} = 1{,}280}_{\text{geometry}}
+\;\xrightarrow{\;\times\,\text{fairRate}=0.708\;}\;
+\underbrace{\text{FairPremium} = 906}_{\text{stochastics}}
+\;\xrightarrow{\;\times\,(1+0.15)\;}\;
+\underbrace{\text{premium} = 1{,}042}_{\text{inventory}}
+$$
+
+$$
+\text{settle at } P_T = 3{,}750:\quad
+\text{realized\_IL} = 5{,}029.78
+\;\xrightarrow{\;\min(\cdot,\,\mathrm{MaxIL})\;}\;
+\text{payout} = 1{,}280 \;\le\; \text{collateral} = 1{,}280
+$$
+
+The only number that changed between the 7d / 30d / 90d quotes was fairRate ($0.449 \to 0.708 \to 0.829$); MaxIL, and therefore the collateral and the cap, was constant throughout.
+
+## The real on-chain lifecycle — 2026-06-05, both rails
+
+The illustrative numbers above are reproduced by a **live create→settle run** on the fresh stack, on a short (300s) fee-500 market, settled with no time-warp at the Chainlink round bracketing each expiry. Two swaps ran — one on each rail — demonstrating the floor-of-liquidity / ceiling-of-price [routing](/protocol/routing) end to end.
+
+<Tabs>
+<Tab title="Path A — cvAMM pool">
+
+The signature-free [cvAMM](/protocol/path-a-cvamm) underwrote swap #1 directly; settlement paid from the `ConvexityVault`.
+
+| Field | Value |
+| --- | --- |
+| swapId | `1` (LP tokenId 3220) |
+| $V_0$ | \$270,531.28 |
+| MaxIL (collateral locked) | \$1,669.24 |
+| **premium** | \$9.70 (**0.58% of MaxIL**) |
+| realized IL at settlement | \$148.64 |
+| **payout** | \$148.64 — paid from `ConvexityVault` |
+
+The premium being a tiny **0.58%** of MaxIL is the convexity hedge in the wild: a wide/short position has a low fairRate, so the protection is cheap relative to the worst-case cap. Realized IL (\$148.64) landed well inside the cap, so the full uncapped amount was paid and the pool kept \$1,669.24 − \$148.64 = \$1,520.60 residual collateral.
+
+</Tab>
+<Tab title="Path B — MM won the route">
+
+`createSwapRouted` for swap #2 priced **both rails off the same FairPremium** and chose the [market maker](/protocol/path-b-mm) because its firm signed quote **strictly beat** the pool. The MM's **own** collateral was locked and paid the settlement from the `UnderwriterVault`.
+
+| Field | Value |
+| --- | --- |
+| swapId | `2` (LP tokenId 3221) |
+| cvAMM price (`premiumA`) | \$13.80 |
+| **MM price (`premiumB`, won)** | \$8.93 (`loadBps = 1000`) |
+| chosen path | **B (MM)** — strictly beat the pool |
+| MaxIL (MM collateral locked) | \$3,215.65 |
+| realized IL at settlement | \$245.66 |
+| **payout** | \$245.66 — paid from MM collateral |
+
+The MM won by **\$4.87** (\$8.93 vs \$13.80). Because the route is "cheaper-of, ties to Path A," and only the executed rail mutates nonce / capacity / lock, the unchosen pool quote left zero trace (invariant **I7**). The LP got the better price; the MM's collateral — not the pool's — bore the \$245.66 payout. This is the ceiling-of-price rail working exactly as designed.
+
+</Tab>
+</Tabs>
+
+<ClaimB />
+
+In both live swaps, $\text{payout} \le \text{collateral} = \mathrm{MaxIL}$ held (I1/I2), and the rail that priced the swap is the rail whose collateral paid it — Path A from the pooled, dual-tranche `ConvexityVault`; Path B from the single MM's `UnderwriterVault`. The settlement core is **identical** regardless of which rail opened the swap.
+
+<Note>
+The live addresses for every contract referenced here are in the deployment registry. See [deployments](/reference/deployments) for the full table.
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+<Card title="MaxIL & the convexity proof" icon="compass-drafting" href="/math/maxil-derivation">
+The rigorous version of Step 1 — why the maximum in-range IL is always at a boundary.
+</Card>
+<Card title="FairValue — the Φ-sum" icon="sigma" href="/math/fair-value-phi-sum">
+The exact closed form behind Step 2's fairRate — a finite lognormal-moment sum, no Monte Carlo.
+</Card>
+<Card title="The load stack" icon="layer-group" href="/math/load-stack">
+baseLoad + the two skews + the I10 clamp — the inventory layer of Step 3.
+</Card>
+<Card title="No-bad-debt math" icon="shield-check" href="/math/no-bad-debt-math">
+The three-line proof that the cap binding in scenario C can never become bad debt.
+</Card>
+</CardGroup>

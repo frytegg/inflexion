@@ -1,0 +1,323 @@
+---
+title: "The IL formula — V_hold vs V_lp, three regimes"
+description: "The exact Uniswap v3 impermanent-loss math the protocol settles against: hold value vs LP value across the three price regimes, the guarded realized-IL subtraction (I3), entry-snapshot semantics, and the Q64.96 fixed-point implementation in the production ILMath contract."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+This is the settle-path math — the exact quantity the protocol computes at expiry to decide what the LP is owed. Everything else in the [pricing stack](/protocol/pricing-stack) (MaxIL, fairRate, the load stack) is layered *on top* of this formula, and the closed-form [Φ-sum pricer](/math/fair-value-phi-sum) is verified back against it so it can never drift from the number that actually settles.
+
+Impermanent loss is the gap between two valuations of the same entry basket: what you would have had if you simply **held** the tokens, versus what your **LP position** is actually worth at the settlement price. Inflexion settles the *capped* version of that gap.
+
+<Note>
+The one-line definition. Let $P$ be the price of token0 in token1 (e.g. ETH measured in USDC). For a position of liquidity $L$ over a tick range $[P_a, P_b]$, snapshotted at entry price $P_0$:
+
+$$
+\boxed{\;\text{realized\_IL} = \max\!\big(0,\; V_{\text{hold}}(P_T) - V_{\text{lp}}(P_T)\big)\;}
+$$
+
+where $P_T$ is the price pinned at expiry. The payout is then $\min(\text{realized\_IL},\, \text{MaxIL})$ — the cap is what makes the product [trustless and fully collateralized](/concepts/no-bad-debt).
+</Note>
+
+The production IL kernel is the Solidity `ILMath` contract, deployed on Arbitrum Sepolia — see [the deployments page](/reference/deployments).
+
+---
+
+## Setup and notation
+
+A v3 LP position is fully described by four entry quantities, and the protocol freezes all of them at swap creation:
+
+<ParamField path="P0" type="price (token1 per token0)">
+The **entry price** — the price of token0 measured in token1 at the instant the swap is created. Pinned to Chainlink on-chain via `oracle.getPrice`, **never caller-supplied**.
+</ParamField>
+
+<ParamField path="Pa, Pb" type="price bounds">
+The lower and upper bounds of the position's tick range, with $P_a \le P_b$. Derived on-chain from the NFT's `tickLower/tickUpper` via `TickMath.getSqrtRatioAtTick` — the LP cannot lie about the range.
+</ParamField>
+
+<ParamField path="L" type="liquidity">
+The position's liquidity. Read **once** at creation and **stored** in the `SwapRecord`. Settlement re-reads this stored value, never the live NFT (invariant [`I6`](/security/invariants)).
+</ParamField>
+
+<ParamField path="P_T" type="price at expiry">
+The **settlement price**, pinned on-chain to the Chainlink round active at expiry $T$ via `getSettlementPrice`. Also never caller-supplied — round-at-$T$ pinning kills the settle-timing game (see [oracles](/protocol/oracles)).
+</ParamField>
+
+The numeraire is token1 — on the live deploy that is `dUSDC` (6 decimals). Every value below is denominated in token1 wei.
+
+<Warning>
+**The in-range requirement is enforced at creation: $P_a \le P_0 \le P_b$.**
+
+- **Limit:** an out-of-range entry is rejected — on-chain the in-range gate reverts `PositionOutOfRange` (equivalently the Stylus gate `a ≥ 1e18 || b ≤ 1e18` reverts `OutOfRange`).
+- **Why:** beyond the range the position has fully rotated into one asset and the loss it bears is *directional* (foregone spot upside), not the *impermanent* loss this product hedges — and that tail is unbounded (see [the three regimes](#lp-value-mdash-three-regimes) below), so it could not be fully collateralized.
+- **Mitigation:** by construction every covered swap starts in range, where IL is bounded and the [cap at MaxIL](/concepts/maxil) is load-bearing. This is precisely why Inflexion is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), not "IL insurance."
+</Warning>
+
+---
+
+## Entry token amounts
+
+With $P_0$ in range, a v3 position holds a specific mix of both tokens. The standard v3 amounts at entry are:
+
+$$
+\texttt{amount0\_entry} = L\left(\frac{1}{\sqrt{P_0}} - \frac{1}{\sqrt{P_b}}\right)
+\qquad
+\texttt{amount1\_entry} = L\left(\sqrt{P_0} - \sqrt{P_a}\right)
+$$
+
+`amount0_entry` is the token0 leg (e.g. ETH); `amount1_entry` is the token1 leg (e.g. USDC). These two numbers are the **entry basket** — everything downstream is a comparison against holding exactly this basket. On-chain they are snapshotted by `SwapMath.entryAmounts` and stored in the `SwapRecord`.
+
+---
+
+## Hold value — affine in price
+
+$V_{\text{hold}}$ is the value of simply *holding* the entry basket to expiry — the benchmark the LP is measured against. It is a **straight line in $P_T$** because the basket is fixed and only token0 is re-priced:
+
+$$
+V_{\text{hold}}(P_T) = \texttt{amount0\_entry}\cdot P_T + \texttt{amount1\_entry}
+$$
+
+This is what the LP *would* have had if they had never provided liquidity. It is the line every regime of the LP value is compared against.
+
+---
+
+## LP value — three regimes
+
+The actual position value at settlement, $V_{\text{lp}}(P_T)$, is **piecewise in the settlement price**, split by the range bounds. As price moves, a v3 position rebalances — selling the appreciating asset and buying the depreciating one — and that rebalancing is exactly what creates the loss. The three arms:
+
+<Tabs>
+  <Tab title="In range — Pa ≤ P_T ≤ Pb">
+    $$
+    V_{\text{lp}}(P_T) = L\left(2\sqrt{P_T} - \frac{P_T}{\sqrt{P_b}} - \sqrt{P_a}\right)
+    $$
+
+    **Strictly concave in $P_T$.** The position holds a price-dependent mix of both tokens; the concavity *is* the LP's short-gamma exposure. The gap from the affine hold line opens up here — this is where impermanent loss lives. On-chain: $V_{\text{lp}} = \texttt{amount0}(P_T)\cdot P_T + \texttt{amount1}(P_T)$.
+  </Tab>
+  <Tab title="Below Pa — P_T < Pa">
+    $$
+    V_{\text{lp}}(P_T) = L\left(\frac{1}{\sqrt{P_a}} - \frac{1}{\sqrt{P_b}}\right)\cdot P_T
+    $$
+
+    **Linear in $P_T$.** Price has fallen out the bottom; the position has rotated **entirely into token0**. Value now scales linearly with price, just like holding pure token0. On-chain: $V_{\text{lp}} = \texttt{amount0}(P_a)\cdot P_T$.
+  </Tab>
+  <Tab title="Above Pb — P_T > Pb">
+    $$
+    V_{\text{lp}}(P_T) = L\left(\sqrt{P_b} - \sqrt{P_a}\right)
+    $$
+
+    **Constant in $P_T$.** Price has run out the top; the position has rotated **entirely into token1** (the numeraire). Value is now flat — completely insensitive to further price moves. On-chain: $V_{\text{lp}} = \texttt{amount1}(P_b)$.
+  </Tab>
+</Tabs>
+
+The intuition end to end: **inside** the range the position holds both tokens (concave value, the LP is short gamma); **below** $P_a$ it has rotated fully into token0 so value scales linearly with price; **above** $P_b$ it has rotated fully into token1 so value is *constant* — and that flat arm against an ever-rising hold line is what makes the beyond-range tail unbounded.
+
+---
+
+## Realized IL — the settled quantity
+
+Subtract the (piecewise concave/linear/flat) LP value from the (affine) hold value, and floor at zero:
+
+$$
+\text{realized\_IL} = \max\!\big(0,\; V_{\text{hold}}(P_T) - V_{\text{lp}}(P_T)\big) \quad\text{[token1 wei]}
+$$
+
+The on-chain form is written as a *guarded* subtraction, not an unchecked one:
+
+```solidity
+// invariant I3: guarded, never an unchecked underflow
+realisedIL = vHold > vLp ? vHold - vLp : 0;
+```
+
+Two of the protocol's [invariants](/security/invariants) are encoded right here:
+
+<CardGroup cols={2}>
+  <Card title="I3 — non-negativity / no underflow" icon="shield-halved">
+    The subtraction is **guarded**: `vHold > vLp ? vHold - vLp : 0`. It is never an unchecked subtraction, so it can never underflow into a wrapped, enormous "loss."
+  </Card>
+  <Card title="I4 — LP never profits from the swap" icon="ban">
+    If $V_{\text{lp}} \ge V_{\text{hold}}$ then realized IL is 0 and so is the payout. The product is a **hedge, not a lottery** — the LP cannot extract a positive payment from the swap itself.
+  </Card>
+</CardGroup>
+
+<Tip>
+**At $P_T = P_0$, IL is exactly zero.** No drift ⇒ no loss. $V_{\text{hold}}(P_0) = V_{\text{lp}}(P_0)$ by construction, so realized IL is 0. The on-chain test `il_in_range_at_entry_is_zero` asserts this holds within ≤100 wei. Because the swap is snapshotted at $P_0$, the protocol only ever owes the LP for drift that happens **after** creation.
+</Tip>
+
+### From realized IL to payout — the cap
+
+The settled quantity is `realized_IL`, but what the protocol actually *pays* is the **capped** payoff:
+
+$$
+\text{payout} = \min(\text{realized\_IL},\; \text{MaxIL})
+$$
+
+```solidity
+// invariants I1 + I2
+payout = realisedIL > maxIL ? maxIL : realisedIL;
+```
+
+[MaxIL](/concepts/maxil) is the maximum value `realized_IL` can take *while price stays in range* — pure geometry, $\max(\mathrm{IL}(P_a), \mathrm{IL}(P_b))$, derived in [the MaxIL derivation](/math/maxil-derivation). Because collateral is locked exactly equal to MaxIL and `payout ≤ MaxIL` by construction of the cap, FULL mode cannot produce bad debt under any price path. See [the no-bad-debt math](/math/no-bad-debt-math).
+
+<ClaimA />
+
+---
+
+## Entry-snapshot semantics
+
+This is load-bearing and easy to get wrong.
+
+<Steps>
+  <Step title="Everything is snapshotted at swap creation, not at the LP's original mint">
+    $P_0$ is the **oracle price at `createSwap`**, and the entry token amounts are the position's *current* amounts at that instant — not whatever they were when the LP first minted the NFT.
+  </Step>
+  <Step title="Coverage runs from creation onward">
+    The swap covers IL accruing **from creation onward**. Any IL the LP already bore between their original mint and the moment they buy coverage stays the LP's own — the protocol does not retroactively pay for drift that already happened.
+  </Step>
+  <Step title="L is read once and stored; settlement re-reads the stored value">
+    Liquidity $L$ is captured at creation and written into the `SwapRecord`. Settlement uses that **stored** $L$, never the live NFT — this is invariant [`I6`](/security/invariants).
+  </Step>
+</Steps>
+
+<Note>
+**Why I6 matters in practice.** Anyone can call `increaseLiquidity` on a v3 NFT — it is not owner-gated, and the NFT is in protocol custody while the swap is active. If settlement re-read $L$ from the NFT, a third party could inflate the payout above MaxIL by adding liquidity. Because settlement uses the **stored** $L$, the extra liquidity is simply returned with the NFT at expiry and **cannot inflate the payout**. See [the invariants](/security/invariants).
+</Note>
+
+---
+
+## Fixed-point implementation (Q64.96)
+
+The float formulas above are the Monte-Carlo reference. On-chain, everything is **integer math** in Uniswap's **Q64.96** fixed-point format.
+
+<AccordionGroup>
+  <Accordion title="The encoding — sqrtPriceX96 and Q96">
+    Prices are carried as square roots in Q64.96:
+
+    $$
+    \texttt{sqrtPriceX96} = \big\lfloor \sqrt{P}\cdot 2^{96} \big\rfloor
+    \qquad
+    Q96 = 2^{96}
+    $$
+
+    Working in $\sqrt{P}$ matches Uniswap's own tick math (`TickMath.getSqrtRatioAtTick`) so $P_a$, $P_b$, $P_0$, and $P_T$ all arrive in the same representation the AMM uses — no lossy round-trip through a decimal price.
+  </Accordion>
+  <Accordion title="The arithmetic — mulDiv with a 512-bit intermediate">
+    Every product is taken through
+
+    $$
+    \texttt{mulDiv}(a, b, d) = \left\lfloor \frac{a\cdot b}{d} \right\rfloor
+    $$
+
+    with a **512-bit intermediate**, because $L\cdot\sqrt{P}$ can reach $2^{288}$ and would overflow a 256-bit multiply. Square roots use `integer_sqrt` via Newton's method. **Floor rounding everywhere** makes the result fully deterministic and reproducible across implementations.
+  </Accordion>
+  <Accordion title="Why floor rounding and integer math, specifically">
+    Floored integer math is what lets two independent implementations agree **to the wei by construction** — there is no floating-point nondeterminism to reconcile. The Solidity `ILMath` and the (benchmark-only) Stylus `ILMath` port share the same `mulDiv` chain, so they produce bit-identical results. It also means the on-node integer MaxIL sits a handful of wei from the Python float anchor (1,691 wei on the canonical fixture, well inside the 10,000-wei float-vs-integer tolerance — see [the worked fixture](#worked-fixture) below).
+  </Accordion>
+</AccordionGroup>
+
+### ILMath is the production contract
+
+<Warning>
+**For the IL kernel, Solidity `ILMath` is production — the Stylus `ILMath` port is a rejected benchmark artifact.**
+
+- **Limit:** the headline "Stylus ~10× cheaper than Solidity" intuition was **inverted** for this specific kernel — the Stylus `ILMath` measured ~5.3× *more* expensive cached.
+- **Why:** `computeMaxIL` is too little compute to amortize Stylus's fixed per-call overhead — there simply is not enough arithmetic to pay back the fixed cost.
+- **Mitigation:** ship the Solidity `ILMath` as the production IL/MaxIL contract; keep the Stylus port only as a benchmark. **This is separate from the Stylus [`FairValueOracle`](/math/fair-value-phi-sum), which IS production** — there the Φ-sum has enough compute (and a hard floating-point ban) to make Stylus the right home.
+</Warning>
+
+The two `ILMath` implementations are not just "close" — they are exact to the wei by construction because they share the `mulDiv` chain. That is what lets the protocol settle on the cheaper Solidity contract while keeping a high-precision benchmark for verification.
+
+---
+
+## Worked regime walkthrough
+
+Take the canonical fixture: range $[P_a, P_0, P_b] = [80, 100, 125]$ with $L = 10^{18}$. This is a −20% / +25% range around an entry of 100. From the entry amounts:
+
+$$
+\texttt{amount0\_entry} = L\left(\frac{1}{\sqrt{100}} - \frac{1}{\sqrt{125}}\right) \approx 0.01055728
+\qquad
+\texttt{amount1\_entry} = L\left(\sqrt{100} - \sqrt{80}\right) \approx 1.05572809
+$$
+
+so $V_{\text{hold}}(P_T) = 0.01055728\,P_T + 1.05572809$. Now walk $P_T$ across the three regimes:
+
+| $P_T$ | regime | $V_{\text{hold}}$ | $V_{\text{lp}}$ | $\mathrm{IL} = \max(0, V_{\text{hold}} - V_{\text{lp}})$ | note |
+| ----- | ------ | ----------------- | --------------- | ------------------------------------------------------- | ---- |
+| **100** | in range | 2.11146 | 2.11146 | **0** | at entry: no drift ⇒ no loss (I4) |
+| **110** | in range | 2.21703 | 2.21646 | **≈ 0.00057** | small concave gap opens |
+| **125** ($=P_b$) | upper edge | 2.31537 | 2.17605 | **0.13932** | the upper-boundary maximum |
+| **80** ($=P_a$) | lower edge | 1.90031 | 1.78885 | **≈ 0.11146** | the lower-boundary value |
+| **160** | above $P_b$ | 2.74489 | 2.17605 | **0.56884** | $V_{\text{lp}}$ now flat — IL grows without bound |
+
+Two things to read off the table:
+
+1. **The maximum in-range IL is at an endpoint, and it is the *upper* edge.** $\mathrm{IL}(P_b{=}125) = 0.13932 > \mathrm{IL}(P_a{=}80) \approx 0.11146$, so $\text{MaxIL} = \mathrm{IL}(P_b) = 0.13932$. The IL curve is convex on $[P_a, P_b]$, and even for a ratio-symmetric range it leans toward the upper boundary — this is the asymmetry proved in [the MaxIL derivation](/math/maxil-derivation).
+
+2. **Beyond $P_b$, IL is unbounded.** At $P_T = 160$ the raw IL is already 0.569 — over 4× MaxIL — and it keeps growing linearly with price because $V_{\text{lp}}$ is flat above $P_b$. The protocol caps the *payout* at MaxIL = 0.13932, so even at $P_T = 160$ the LP receives only 0.13932 and the rest is uncovered directional loss. This is the cap doing its load-bearing job.
+
+### Worked fixture — verified to the wei {#worked-fixture}
+
+The exact integer values for $[80, 100, 125]$, $L = 10^{18}$, asserted by `amounts_fixture_matches_python` / `maxil_fixture_matches_python` and mirrored in `ILMath.t.sol`:
+
+| Quantity        | Value (token1 wei, integer)  | ≈ (× 1e18) |
+| --------------- | ---------------------------- | ---------- |
+| `amount0_entry` | `10_557_280_900_008_417`     | 0.01055728 |
+| `amount1_entry` | `1_055_728_090_000_841_200`  | 1.05572809 |
+| `V_hold(P0)`    | `2_111_456_180_001_682_900`  | 2.11145618 |
+| `IL(Pa = 80)`   | `≈ 1.11456e17`               | 0.111456   |
+| `IL(Pb = 125)`  | `139_320_225_002_101_320`    | 0.13932023 |
+| **MaxIL**       | `139_320_225_002_101_320`    | 0.13932023 |
+
+$\text{MaxIL} = \mathrm{IL}(P_b) > \mathrm{IL}(P_a)$ confirms the upper-boundary asymmetry, and $\text{MaxIL}/V_{\text{hold}}(P_0) \approx 6.6\%$. The on-node integer-floor MaxIL (`139_320_225_002_103_011`) sits 1,691 wei from the Python float anchor — inside the 10,000-wei float-vs-integer tolerance; Stylus ≡ Solidity is exact to the wei.
+
+### Live on-chain confirmation
+
+The 2026-06-05 create→settle lifecycle on the fresh Arbitrum Sepolia stack ran this exact settle-path math on both rails:
+
+- **Path A (cvAMM):** V0 = \$270,531.28, MaxIL = \$1,669.24, realized IL at settle = **\$148.64**, payout = \$148.64 ≤ MaxIL — under the cap, paid from the `ConvexityVault`.
+- **Path B (MM):** MaxIL = \$3,215.65, realized IL = **\$245.66**, payout = \$245.66 ≤ MaxIL — under the cap, paid from `UnderwriterVault`.
+
+Both payouts came in below their respective MaxIL caps — `realized_IL`, not the cap, was the binding quantity. The settle-path math (`computeIL` with the stored $L$) is identical regardless of which rail opened the swap.
+
+<AddressTable />
+
+---
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="Is realized IL measured from when the LP minted the position, or from when they bought coverage?">
+    From when they bought coverage. Every entry quantity — $P_0$, the token amounts, $L$ — is snapshotted **at swap creation**, and coverage runs from there onward. IL the LP already bore before buying coverage stays theirs.
+  </Accordion>
+  <Accordion title="What happens if the price ends up below the range instead of above it?">
+    The IL formula handles both edges symmetrically in *form*: below $P_a$, $V_{\text{lp}}$ is linear in price (fully token0); above $P_b$, it is constant (fully token1). The realized IL is $\max(0, V_{\text{hold}} - V_{\text{lp}})$ in either case, capped at MaxIL. Note the *magnitudes* are not symmetric — the convex IL curve leans toward the upper boundary, so for the same width $\mathrm{IL}(P_b) > \mathrm{IL}(P_a)$ typically.
+  </Accordion>
+  <Accordion title="Why is the subtraction written as a ternary instead of just vHold − vLp?">
+    To guarantee invariant I3. In Solidity an unchecked subtraction of unsigned integers underflows and wraps to a near-`2^256` value when $V_{\text{lp}} > V_{\text{hold}}$. Writing it as `vHold > vLp ? vHold - vLp : 0` makes the floor-at-zero explicit and impossible to skip — which is also exactly invariant I4 (LP never profits from the swap).
+  </Accordion>
+  <Accordion title="Can adding liquidity to the NFT after creation change the realized IL?">
+    No. Settlement uses the liquidity $L$ **stored at creation** in the `SwapRecord`, not the live NFT (invariant I6). Anyone can `increaseLiquidity` on the custodied NFT, but the extra liquidity is returned with the NFT at expiry and cannot inflate the payout above MaxIL.
+  </Accordion>
+  <Accordion title="Why fixed-point Q64.96 instead of just using decimals?">
+    Determinism. Floored integer math in Q64.96 lets independent implementations (Solidity vs the Stylus benchmark) agree **to the wei by construction**, with no floating-point nondeterminism to reconcile. It also matches Uniswap's own `sqrtPriceX96` representation, so the range bounds arrive in the exact format the AMM uses.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — the cap and unit of risk" icon="cubes" href="/concepts/maxil">
+    Why $\max(\mathrm{IL}(P_a), \mathrm{IL}(P_b))$ is both the payout cap and what makes positions fungible.
+  </Card>
+  <Card title="The MaxIL derivation" icon="square-root-variable" href="/math/maxil-derivation">
+    The convexity proof, the asymmetric-entry case, and the verified fixtures in full.
+  </Card>
+  <Card title="The Φ-sum fair value" icon="function" href="/math/fair-value-phi-sum">
+    The exact closed-form pricer for $E_Q[\min(\mathrm{IL}, \text{MaxIL})]$ — verified back against this formula.
+  </Card>
+  <Card title="No-bad-debt math" icon="shield-check" href="/math/no-bad-debt-math">
+    How $\text{payout} \le \text{collateral} = \text{MaxIL}$ becomes a construction, qualified correctly.
+  </Card>
+</CardGroup>

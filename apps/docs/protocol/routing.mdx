@@ -1,0 +1,324 @@
+---
+title: "createSwapRouted — cheapest wins, the LP is always served"
+description: "How createSwapRouted prices both rails off one FairPremium, strict-beats to take the MM (ties go to the pool), never reverts on a bad MM quote, and lets only the executed rail mutate nonce/capacity/lock (I7)."
+---
+
+`createSwapRouted` is the entry point an LP should
+almost always use. In a **single transaction** it prices both underwriting rails off
+the **same on-chain fair value**, gives the LP the **cheaper of the two**, and — this
+is the load-bearing property — **falls back to the always-on pool whenever the MM quote
+is not strictly better or not usable, without ever reverting on the MM's account.**
+
+It is the concrete expression of the [floor/ceiling framing](/concepts/two-rails): the
+[cvAMM pool (Path A)](/protocol/path-a-cvamm) is the **floor of liquidity** — always a
+code-capped price — and the [MM rail (Path B)](/protocol/path-b-mm) is the **ceiling of
+price** — a pure price-improvement layer that can only ever undercut the floor, never
+degrade it. The router is what wires those two facts together for the LP.
+
+<CardGroup cols={3}>
+  <Card title="One FairPremium" icon="equals">
+    Both rails priced off the same [`FairPremium`](/concepts/fair-value), single VolOracle poke.
+  </Card>
+  <Card title="Strict-beat, ties to A" icon="scale-balanced">
+    The MM wins **only if** `premiumB < premiumA`. A tie resolves to the pool.
+  </Card>
+  <Card title="Never reverts on the MM" icon="shield-check">
+    A bad / stale / absent MM quote silently falls back to the pool — zero trace (I7).
+  </Card>
+</CardGroup>
+
+## The one-line decision
+
+The entire routing rule is one boolean:
+
+```solidity
+bool useB = usableB && premiumB < premiumA;   // strict-beat; tie → Path A
+```
+
+Everything else on this page is the machinery that makes those three sub-expressions
+— `usableB`, `premiumB`, and `premiumA` — **honest, comparable, and side-effect-free
+until exactly one rail is executed.**
+
+<Note>
+The router emits `SwapRouted(swapId, pathB, premiumA, premiumB)`
+on every fill. The chosen rail, and **both** candidate
+prices it was choosing between, are written to the chain — the cheapest-wins decision
+is fully auditable after the fact, and feeds the [pool-vs-MM spread signal](/moat/five-signals)
+of the data moat.
+</Note>
+
+## Step 1 — both rails priced off the *same* FairPremium
+
+A fair comparison requires a common baseline. The router computes **one**
+[`FairPremium`](/concepts/fair-value) for the position and prices both rails on top of
+it, so the only thing that differs between `premiumA` and `premiumB` is the **load**,
+never the fair value underneath.
+
+$$
+\text{FairPremium} = \text{fairRate}\cdot\text{MaxIL},
+\qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\,\text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+The shared read prologue (`_prepareSwap`) and the
+fair-value read (`_fairPremium`) run once; the
+[VolOracle is poked exactly once](/protocol/oracles) to refresh `σ_ref`, and both rails
+read the result. The two candidate premiums are then the
+same `FairPremium` with two different loads layered on:
+
+$$
+\begin{aligned}
+\text{premium}_A &= \big\lceil\,\text{FairPremium}\cdot\big(1 + \min(\underbrace{\text{baseLoad} + \text{util\_skew} + \text{disp\_skew}}_{\text{totalLoad}},\ \text{maxLoad})\big)\big\rceil \\[4pt]
+\text{premium}_B &= \big\lceil\,\text{FairPremium}\cdot\big(1 + \text{loadBps}/10^4\big)\big\rceil,\qquad \text{loadBps} \le \text{maxLoadBps}
+\end{aligned}
+$$
+
+Both are additionally capped at `MaxIL` (never charge more than the maximum possible
+payout), and the Path-A load sum is hard-clamped
+by [invariant I10](/security/invariants), `min(..., maxLoad)`, **by construction in
+code**. Path A is computed by `_pricePathAFromFair`; Path B's price comes back from the
+usability mirror described next. See [the pricing stack](/protocol/pricing-stack) and
+[the load stack](/math/load-stack) for how each load is built.
+
+<Tip>
+Pricing both rails off the same `FairPremium` is also what makes the
+[clearing-load and pool-vs-MM spread signals](/moat/five-signals) non-circular: the
+fair value is a fixed, published reference, so the *load* the market clears at is an
+observable behavioral quantity, not a back-solved artifact.
+</Tip>
+
+## Step 2 — `usableB`: the non-reverting mirror of Path B
+
+This is the heart of the routing safety story. The router does **not** call the
+reverting Path-B gate. It calls `_quoteUsableAndPremiumB`,
+a **`view` function** that mirrors *every* Path-B check and returns `(usableB, premiumB)`
+— `(false, 0)` instead of reverting whenever any check fails.
+
+It returns `(false, 0)` if the MM quote is any of:
+
+<AccordionGroup>
+  <Accordion title="Absent, wrong-model, or dust" icon="circle-xmark">
+    No quote supplied, `model != FULL`, or the position/premium fails the
+    `MIN_POSITION_V0 = $100` / `MIN_PREMIUM = $1` dust floors.
+  </Accordion>
+  <Accordion title="Over-load (I10)" icon="circle-xmark">
+    `loadBps > maxLoadBps` — the same I10 ceiling the reverting path enforces, evaluated
+    as a boolean here instead of a revert.
+  </Accordion>
+  <Accordion title="Expired or out-of-validity-band" icon="circle-xmark">
+    `validUntil <= now`, or `secondsAhead` outside the `[5s, 15s]` window.
+  </Accordion>
+  <Accordion title="Bad price band or out-of-oracle-band (I9)" icon="circle-xmark">
+    `priceBandBps` outside `[25, 500]`, or the live oracle has drifted beyond the band:
+    `absBps(P_live, quotePrice) > priceBandBps` — see [price pinning](/security/price-pinning).
+  </Accordion>
+  <Accordion title="Out-of-ratio, over-capacity, or nonce-used (I7)" icon="circle-xmark">
+    The LP's `ratioBps = maxIL·1e4/V0` outside the quote's MaxIL-ratio band;
+    `consumedNotional[quoteId] + V0 > maxNotionalV0`; or the bitmap nonce already used.
+  </Accordion>
+  <Accordion title="Undercollateralized, zero-price, or bad signature" icon="circle-xmark">
+    `availableBalance(mm) < maxIL`; a zero `quotePrice`; or the EIP-712 / EIP-1271
+    signature failing verification (checked via STATICCALL).
+  </Accordion>
+</AccordionGroup>
+
+The critical property: `_quoteUsableAndPremiumB` is **`view`**. It *reads*
+`isNonceUsed`, `consumedNotional`, `availableBalance`, and the signature (via
+STATICCALL), but it **never calls `_useNonce`, never increments `consumedNotional`, and
+never locks collateral**. A quote that is evaluated but **not chosen** mutates no
+state whatsoever — it leaves **zero trace**.
+
+<Warning>
+**A bad / stale / absent MM quote falls back to the pool — it never reverts the LP's
+transaction.**
+
+- **Limit:** an MM quote passed to `createSwapRouted` can be absent, expired, stale,
+  out-of-band, over-load, over-capacity, undercollateralized, zero-priced,
+  wrong-model, or simply not cheaper than the pool.
+- **Why it cannot harm the LP:** the router evaluates the MM quote through a read-only
+  mirror (`_quoteUsableAndPremiumB`, `view`), so any failing condition merely sets
+  `usableB = false` — it cannot revert and cannot mutate state.
+- **Mitigation (by construction):** the swap silently routes to the always-on
+  [cvAMM pool](/protocol/path-a-cvamm). Only **protocol-level** failures revert (see
+  below). An LP using `createSwapRouted` is therefore **never worse off** than calling
+  [`createSwapPathA`](/protocol/path-a-cvamm) directly.
+</Warning>
+
+## Step 3 — the route: strict-beat, ties to Path A
+
+```solidity
+bool useB = usableB && premiumB < premiumA;   // strict-beat; tie → Path A
+```
+
+Two design choices are deliberate and load-bearing:
+
+<Steps>
+  <Step title="Strict-beat (< not ≤)">
+    The MM wins **only if it strictly undercuts** the pool. This is what makes the MM a
+    genuine price-improvement layer: it captures flow only when it offers the LP a real
+    saving, not when it merely matches.
+  </Step>
+  <Step title="Ties resolve to Path A">
+    When `premiumB == premiumA`, `useB` is `false` and the swap goes to the **pool** —
+    the dependency-free, always-on rail. An MM **cannot divert flow by matching** the
+    pool's price; it must beat it. This protects the floor: the rail with no relayer,
+    no validity clock, and no off-chain dependency is the default.
+  </Step>
+</Steps>
+
+The result is the LP always pays `min(premiumA, premiumB_if_usable)` and is *always*
+served — the pool floor guarantees a fillable price exists, and the MM ceiling can only
+push the LP's cost down.
+
+## Step 4 — only the executed rail mutates state (I7 preserved)
+
+After the boolean resolves, **exactly one** rail executes, and **only that rail mutates
+nonce, capacity, or lock**:
+
+<CodeGroup>
+```solidity useB == true (Path B)
+// _executePathB — the ONLY place Path-B state mutates
+consumedNotional[quote.quoteId] += g.V0;     // I7 capacity, atomic, before any call
+_useNonce(quote.mm, quote.nonce);            // I7 bitmap nonce consumed
+underwriterVault.lockCollateral(quote.mm, g.maxIL);
+// write SwapRecord{ mm: quote.mm, ... }; pull premium; take NFT; split 99% MM / 1% treasury
+```
+
+```solidity useB == false (Path A)
+// _executePathA — pool rail
+convexityVault.lockCollateral(marketId, g.maxIL);   // free + senior-protection check
+// write SwapRecord{ mm: address(convexityVault), ... }; pull premium; take NFT
+// split 99% into pool (tranche split via accruePremium) / 1% treasury
+```
+</CodeGroup>
+
+This is the router-level statement of **[invariant I7 — capacity authority](/security/invariants)**:
+
+> `consumedNotional[quoteId] ≤ maxNotionalV0`, and a cancelled bitmap-nonce bit can
+> never fill.
+
+Because the losing rail's usability is evaluated through a `view` mirror, a Path-B quote
+that loses the route consumes **no capacity**, burns **no nonce**, and locks **no
+collateral**. An MM's quote cannot be silently drained by an LP who ends up routing to
+the pool — the on-chain ledger only ever moves for the rail that actually filled.
+
+<Info>
+On Path A, the lock additionally passes the pool's structural checks — `free ≥ amount`
+and the senior-protection invariant `totalLocked ≤ juniorAssets`. So even the fallback rail enforces
+[depositor-protection](/concepts/tranches) at lock time; the router never bypasses it.
+</Info>
+
+## What *does* revert — and why those are correct
+
+The router does not revert on the MM. It **does** revert on **protocol-level**
+failures, because those are not "the MM quote was bad" — they are "this swap cannot
+exist at all":
+
+| Revert condition | Why it is a hard failure, not a fallback |
+| --- | --- |
+| Pool not wired / market not `cvammEnabled` | There is **no floor to fall back to** — the always-on rail is the precondition of the whole router. |
+| Not the position owner (`NotPositionOwner`) | The caller does not own the NFT being hedged — no rail can proceed. |
+| Market mismatch (`MarketMismatch`) | The position's `(token0, token1, fee)` does not match the requested `marketId`. |
+| Position out of range (`PositionOutOfRange`) | `Pa ≤ P0 ≤ Pb` fails — this is the [in-range convexity hedge](/concepts/in-range-convexity-hedge) gate; out-of-range entries are rejected on **both** rails. |
+| Dust (`MIN_POSITION_V0` / `MIN_PREMIUM`) | A protocol-wide floor that applies regardless of rail. |
+| Slippage (`PremiumExceedsSlippage`) | The cheaper of the two premiums still exceeds the LP's own `maxPremium` guard. |
+
+In every one of these cases, the swap is invalid for *both* rails — so reverting is the
+correct, honest outcome. The router's promise is narrow and precise: **a bad MM quote
+never reverts; an invalid swap always does.**
+
+## The LP-always-served guarantee, stated precisely
+
+Putting the pieces together, `createSwapRouted` gives the LP a guarantee that no
+single-counterparty design can:
+
+<Steps>
+  <Step title="A fillable price always exists">
+    The pool is the always-on floor. Whenever the swap is valid at all (owner, in-range,
+    market wired, above dust), the pool can fill it at a [code-capped (I10) price](/security/invariants).
+  </Step>
+  <Step title="The MM can only improve it">
+    The MM rail is a read-only price-improvement layer. It wins only by strictly beating
+    the floor; it can never make the LP pay more, and a tie keeps the LP on the pool.
+  </Step>
+  <Step title="A misbehaving MM is invisible to the LP">
+    Stale, leaked, undercollateralized, or absent MM quotes degrade to the pool with no
+    revert and no state change. The LP's experience is identical to the MM not existing.
+  </Step>
+  <Step title="The settlement core is the same either way">
+    Whichever rail filled, `settle` is the [single untouched core](/protocol/lifecycle):
+    pin the Chainlink round-at-T, compute IL with the **stored** `L` (I6), pay
+    `min(realized_IL, MaxIL)` (I1 + I2) from the rail's own vault, return the NFT.
+  </Step>
+</Steps>
+
+This is why the [no-bad-debt guarantee is independent of how the quote was
+discovered](/concepts/no-bad-debt) — routing decides *who underwrites and at what
+price*, never *whether the LP is paid*. That is enforced downstream at settlement
+against the chosen counterparty's own collateral.
+
+## Worked example — live on Arbitrum Sepolia
+
+The 2026-06-05 redeploy ran a real routed create→settle against one 300s market:
+
+<Tabs>
+  <Tab title="Routed swap #2 — MM won">
+    `createSwapRouted` priced both rails off one `FairPremium`:
+
+    - `premiumA_cvamm` = **\$13.80** (pool, with its on-chain load stack)
+    - `premiumB_mm` = **\$8.93** (MM, `loadBps` 1000)
+
+    Since `usableB == true` and `8.93 < 13.80`, `useB` was `true` → **the MM won**.
+    `MaxIL $3,215.65` was locked from the **MM's own** `UnderwriterVault` collateral,
+    realized IL came to **\$245.66**, payout **\$245.66**, settled from the MM's
+    collateral. The pool's nonce/capacity were untouched — only the executed rail moved.
+  </Tab>
+  <Tab title="Path A swap #1 — pool baseline">
+    For contrast, swap #1 went straight to the pool via
+    [`createSwapPathA`](/protocol/path-a-cvamm): V0 \$270,531.28, MaxIL \$1,669.24, premium
+    **\$9.70 (0.58% of MaxIL)**, realized IL \$148.64, payout \$148.64 — settled from the
+    `ConvexityVault`. Same settlement core, pool collateral.
+  </Tab>
+</Tabs>
+
+The `SwapRouted` event on swap #2 carries `(premiumA = 13.80, premiumB = 8.93, pathB =
+true)` — the entire routing decision, both candidate prices included, is on-chain and
+auditable.
+
+## The two separate claims
+
+Routing changes who underwrites and what the LP pays — it does **not** change which
+guarantees apply. The LP-facing guarantee is enforced identically at settlement for both
+rails:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to whoever the router put on the other side —
+the [pool's depositors](/concepts/tranches) on Path A, the market maker on Path B:
+
+<ClaimB />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The two rails" icon="code-branch" href="/concepts/two-rails">
+    The floor/ceiling framing and the one-settlement-core architecture in full.
+  </Card>
+  <Card title="Path A — the cvAMM" icon="layer-group" href="/protocol/path-a-cvamm">
+    The always-on pool: pricing, dual-tranche collateral, run defense.
+  </Card>
+  <Card title="Path B — the MM rail" icon="signature" href="/protocol/path-b-mm">
+    Firm EIP-712 quotes, no last-look, and the three on-chain protections.
+  </Card>
+  <Card title="The pricing stack" icon="sliders" href="/protocol/pricing-stack">
+    How FairPremium, the load stack, and the I10 cap compose into a premium.
+  </Card>
+  <Card title="Capacity authority (I7)" icon="shield-halved" href="/security/invariants">
+    Why only the executed rail mutates nonce/capacity/lock.
+  </Card>
+  <Card title="The full lifecycle" icon="timeline" href="/protocol/lifecycle">
+    Create → active → settle, identical regardless of which rail filled.
+  </Card>
+</CardGroup>

@@ -1,0 +1,751 @@
+---
+title: "The subgraph — the indexer behind the moat"
+description: "The Graph indexer that reconstructs Inflexion's on-chain event history into the non-circular moat store: its schema rules, eth_call enrichment, the redeploy start block, the entity catalogue, the event-order fix, bucketing classifiers, and GraphQL query recipes."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+The subgraph is the **deterministic memory of the protocol**. It is The Graph
+indexer that replays the contract event log from a fixed start block and
+materialises it into a queryable GraphQL store — the durable history layer that
+feeds the public [REST API](/integrate/api-overview) and, through it, the
+[data moat](/concepts/data-moat). It is the indexer *behind* the API, not a
+parallel public surface: in production nothing queries it directly except the API.
+
+<Note>
+**The subgraph indexes the canonical structural facts; the API joins them with
+off-chain telemetry and back-fills the derived/Greeks fields.** This split is the
+recurring pattern of the whole data architecture — several entity fields are
+intentionally left `null` for the API to fill, and they are documented per-field
+below. The subgraph owns only the *realized, on-chain* halves of the
+[five signals](/moat/five-signals); the *dynamic* halves (live quote competition,
+latent unfilled demand) are [engine telemetry](/integrate/engine) the API serves
+separately.
+</Note>
+
+## What it is, and what it is not
+
+The schema is explicitly mapped to the five data-moat signals, and every signal
+is reconstructable two ways: as a **current snapshot** (the latest aggregate row)
+and as a **historical series** (per-fill `Swap` rows plus time-bucketed
+snapshots).
+
+<CardGroup cols={2}>
+  <Card title="It IS" icon="circle-check">
+    The replay engine that turns the contract event log into bucketed,
+    queryable aggregates. The single source of *history* for the moat.
+  </Card>
+  <Card title="It is NOT" icon="circle-xmark">
+    A public-facing endpoint, and not a pricing engine. It never re-derives
+    fair value — it records what the chain already published.
+  </Card>
+</CardGroup>
+
+### The non-circular schema rules
+
+The honest-framing rules are written directly into the schema header. They are
+load-bearing for the moat's credibility — read
+[circular vs behavioral](/moat/circular-vs-behavioral) for the full proof, but the
+constraints the indexer enforces are:
+
+<AccordionGroup>
+  <Accordion title="1 — No impliedVol field anywhere (the circular idea, dropped)">
+    Inverting `fairRate` to back out an implied vol is **circular** — the fair rate
+    was computed *from* [σ_ref](/math/sigma-ref) in the first place, so the inversion
+    returns only the protocol's own published inputs. There is deliberately **no
+    `impliedVol` field** in the schema. This is the idea the moat
+    explicitly drops; see [the data moat](/concepts/data-moat) for why.
+  </Accordion>
+  <Accordion title="2 — MM loadBps is the single NON-CIRCULAR load datum">
+    The Path-B MM `loadBps` is an *actor's chosen* price of risk — not a mechanical
+    function of inputs. The Path-A pool `totalLoadWad` is the
+    **mechanical baseline / price-to-beat**, kept as the yardstick the behavioral MM
+    load is measured against, never sold as the signal itself.
+  </Accordion>
+  <Accordion title="3 — Cap-bound fills carry ZERO load information, and are excluded">
+    A fill where `cappedAtMaxIL == true` priced against the cap, not against the risk,
+    so it would poison a load mean. Cap-bound fills are
+    **excluded** from the load aggregates (Signals 1/2/3). They still count toward
+    *demand* (Signal 4) — demand is demand — which is why that lives in a separate
+    entity (below).
+  </Accordion>
+  <Accordion title="4 — The dynamic halves of Signals 2 & 4 are NOT subgraph entities">
+    Live quote competition and latent unfilled demand are **off-chain engine telemetry
+    served by the API**. The subgraph owns only the
+    *realized, on-chain* halves. The two coordinate systems are deliberately the same
+    so the API can join them (see [bucketing](/integrate/subgraph#the-bucketing-classifiers)).
+  </Accordion>
+  <Accordion title="5 — Signal 5 net-gamma Greeks are off-chain compute">
+    The Greeks fields on `NetGammaSnapshot` are **written back by the API/GreeksEngine**
+    over the active-swap set the subgraph tracks (`Swap.isActive`) — finite-difference
+    of the deployed [FairValueOracle](/concepts/fair-value), not the indexer.
+  </Accordion>
+</AccordionGroup>
+
+## Data sources & manifest
+
+`specVersion: 0.0.5`, `apiVersion: 0.0.7`, `language: wasm/assemblyscript`.
+Network `arbitrum-sepolia`, chainId **421614**. There
+are **three Ethereum data sources, all starting at the same block 274081134**:
+
+| Data source | Mapping file | Entities owned |
+| --- | --- | --- |
+| **InflexionCore** | `src/inflexion-core.ts` | Market, Swap, BucketAggregate, GeometryDemandBucket, NetGammaSnapshot, ProtocolState, MarketMaker, MarketStateSnapshot, SigmaPoint, Nonce |
+| **ConvexityVault** | `src/convexity-vault.ts` | Depositor, PoolState, PoolDaySnapshot, PoolHourSnapshot, Market, MarketStateSnapshot |
+| **VolOracle** | `src/vol-oracle.ts` | SigmaPoint |
+
+The three source addresses match the live registry exactly (`inflexionCore`,
+`convexityVault`, `volOracle`). For the concrete values, see
+[the deployments page](/reference/deployments).
+
+<Info>
+**Addresses are never hand-written into the manifest.** `subgraph.yaml` is
+auto-generated from the on-chain address registry — the *same* registry the
+[SDK's `addresses.ts`](/sdk/addresses-units) consumes. One registry, three
+consumers (contracts, SDK, subgraph), guaranteed in lockstep.
+</Info>
+
+### Enrichment eth_calls
+
+Two events carry too little data on their own, so the mapping does an **`eth_call`
+enrichment** — the canonical Graph pattern: bind the contract, use `try_*` so a
+revert degrades gracefully instead of failing the handler.
+
+<Tabs>
+  <Tab title="SwapCreated → positions() + swaps()">
+    On `SwapCreated` the mapping calls
+    `NonfungiblePositionManager.positions(tokenId)` to decode the range geometry
+    (`tickLower / tickUpper / liquidity / token0 / token1 / fee`), **and**
+    `InflexionCore.swaps(swapId)` to recover
+    `expiry`/`createdAt` → `durationSeconds`. This is
+    why `NonfungiblePositionManager` is a second ABI on the InflexionCore source.
+  </Tab>
+  <Tab title="CollateralLocked → lockedByMarket()">
+    On `CollateralLocked` the mapping calls
+    `ConvexityVault.lockedByMarket(marketId)` for the exact per-market locked, plus
+    `utilizationWad()` / `concentrationWad()`.
+  </Tab>
+</Tabs>
+
+The **NPM address is never hardcoded.** It is templated from the registry's
+`uniswap.nonfungiblePositionManager` into `src/generated-addresses.ts`. The
+AssemblyScript mapping cannot read the JSON at runtime, so the codegen step bakes
+it in.
+
+<Tip>
+The `abis/*.json` are **hand-written minimal ABIs** — events plus the `swaps`
+getter plus NPM `positions` — so `graph codegen` runs fully offline with no
+network fetch. That is what keeps CI green without a chain connection.
+</Tip>
+
+## The deploy story
+
+`subgraph.yaml` is **auto-generated — never hand-edited**. It is templated from
+the single on-chain address registry.
+
+### The start block — 274081134 — is the genesis of the dataset
+
+<Steps>
+  <Step title="The redeploy block is the moat genesis">
+    `startBlock = 274081134` on all three sources. This is
+    the **redeploy block** (`_deployBlock` in the on-chain address registry),
+    set via env: `SUBGRAPH_START_BLOCK=<deployBlock> pnpm prepare:manifest`.
+    **The moat dataset BEGINS there.**
+  </Step>
+  <Step title="Why the redeploy is the genesis">
+    The rich moat events (`QuoteFilled`, `SwapPriced`) were *coded but did not fire*
+    before the FULL-FRESH redeploy of 2026-06-05. Pre-redeploy their handlers are
+    simply idle / never invoked; the entities exist and are ready. Indexing from the
+    redeploy block means no wasted scan over blocks that emit none of the moat data.
+  </Step>
+  <Step title="The committed default is 0">
+    The committed default start block is `0` (index from genesis — safe but slow). CI
+    only runs `graph codegen`, which validates schema + ABIs + mappings *offline* and
+    needs no real start block; the full build/deploy plugs in the redeploy block.
+  </Step>
+</Steps>
+
+### Build / deploy scripts
+
+| Script | Command | Needs network? |
+| --- | --- | --- |
+| `prepare:manifest` | `node scripts/gen-manifest.mjs` — regenerate `subgraph.yaml` + `generated-addresses.ts` | No |
+| `codegen` / `build` | `graph codegen` — typegen from schema + ABIs (offline; this is why `build` is *just* codegen, so `pnpm -r build` stays green offline) | No |
+| `build:wasm` | `graph codegen && graph build` — full AssemblyScript → WASM compile | Yes (downloads `asc`) |
+| `deploy` | `graph deploy --node https://api.studio.thegraph.com/deploy/ inflexion-arb-sepolia` | Yes (IPFS) |
+| `deploy:local` / `create:local` | local Graph node at `:8020` / IPFS `:5001` | local |
+
+There is deliberately **no `test` script**, so `pnpm -r test` does not invoke
+matchstick (which would need a toolchain download).
+
+### The pending state
+
+<Warning>
+**The Studio deploy is pending until the Studio slug is created.**
+
+- **Limit:** until the deploy lands, the subgraph's *history* and *aggregate*
+  surfaces are not yet served from a hosted endpoint. The target slug is
+  `inflexion-arb-sepolia`.
+- **Why:** this is a **build gap, not a contract gap.** The contracts already emit
+  every event the moat needs since the 2026-06-05 redeploy; the schema and manifest
+  are finalised, the redeploy `startBlock` is known, and the mappings are CI-green
+  offline. What is missing is the hosted slug, nothing structural.
+- **Mitigation / path-forward:** until the slug exists, the API serves these
+  surfaces from a **typed `pending` state — never an error** — and the *current*
+  (non-historical) load surface is already served live via the
+  [SDK multicall](/sdk/data-client). The indexer is ready to go the moment the slug
+  is created; see [degradation](/sdk/degradation).
+</Warning>
+
+<Maturity />
+
+## The marketId join key
+
+`marketId` is the key that ties **subgraph ⇄ SDK ⇄ on-chain contract** together,
+so its byte layout is load-bearing. The full three-way parity treatment lives on
+[marketId parity](/integrate/marketid-parity); the subgraph-side facts are:
+
+$$
+\text{marketId} = \mathrm{keccak256}\big(\texttt{abi.encodePacked}(\text{token0},\ \text{token1},\ \text{fee},\ \text{durationSeconds})\big)
+$$
+
+- On-chain it is `keccak256(abi.encodePacked(address token0, address token1,
+  uint24 fee, uint32 durationSeconds))` — `abi.encodePacked` is **TIGHT packing,
+  no 32-byte padding** — so the preimage is exactly **20 + 20 + 3 + 4 = 47 bytes**.
+- The subgraph replicates it in `deriveMarketId`:
+  concatenate the raw big-endian bytes at each field's on-chain width (address →
+  20 bytes, `uint24 fee` → 3 BE bytes, `uint32 durationSeconds` → 4 BE bytes), then
+  `crypto.keccak256`. It uses a hand-rolled `uintBytesBE`,
+  **not `ethereum.encode`**, because `ethereum.encode` ABI-pads every operand to 32
+  bytes and would produce a *different, non-matching* hash.
+
+<Note>
+**Sign-safety subtlety.** `durationSeconds` is a `uint32` on-chain but arrives in
+AssemblyScript as an `i32`; a value ≥ 2³¹ arrives **negative** after
+`BigInt.toI32()` and sign-extends to `i64`. Because `uintBytesBE` only emits the
+low `width` bytes and masks each with `& 0xff`, the sign bits (which live *above*
+`width`) are never written — the uint32 preimage stays bit-for-bit correct across
+the full on-chain domain.
+</Note>
+
+The 47-byte preimage is **test-pinned** identical across contract, SDK, and
+subgraph to the live marketId
+`0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69` (dWETH,
+dUSDC, fee **500**, **604800s** = 7d) by two parity tests. That marketId
+matches the `marketId_fee500_7d` entry in the on-chain address registry.
+
+**Recovering the marketId from a `SwapCreated`:** `SwapRecord` carries no marketId.
+The mapping recovers it by (1) reading
+`token0/token1/fee` from the NPM `positions()` decode, (2) reading
+`expiry`/`createdAt` from `InflexionCore.swaps()` to compute `durationSeconds`,
+then (3) calling `deriveMarketId` — **reusing the NPM bind, not re-binding**.
+Both the geometry decode and the swap-record read must succeed.
+
+## The entity catalogue
+
+All entities are `@entity(immutable: false)` (mutable, get-or-create + update)
+**except `SigmaPoint`** which is `@entity(immutable: true)` (append-only).
+
+<AccordionGroup>
+  <Accordion title="Market — the market directory">
+    The directory of tradeable markets, written from `MarketRegistered` plus cvAMM
+    config events. `id` = `marketId` hex.
+
+    - **Directory facts:** `token0`, `token1`, `fee` (Int), `durationSeconds`,
+      `durationBucket` (hour|day|week|month|longer), `oracleToken`, `active`,
+      `cvammEnabled` (nullable Boolean — the Path-A rail flag, null until first set).
+    - **Denormalised lifetime counters** (so directory reads are cheap, no scan over
+      `Swap`): `totalSwaps`, `totalSettled`, `totalV0`, `totalPremium`,
+      `totalPayout`, `pathBFills`, plus
+      `swaps: [Swap!]! @derivedFrom(field: "market")`.
+
+    **Two write paths, order-independent by design:** the directory fields are owned
+    by `handleMarketRegistered`; the counters are bumped
+    in `handleSwapCreated`. A Market created by a swap
+    *before* its `MarketRegistered` lands is back-filled by that handler, which
+    **preserves the counters** on the existing entity.
+  </Accordion>
+
+  <Accordion title="Swap — the atomic per-fill lifecycle record">
+    The central entity — every per-fill signal joins on it. Reconstructs the full
+    lifecycle **SwapCreated → QuoteFilled → SwapPriced → SwapSettled**. Enums:
+    `SwapStatus {ACTIVE, SETTLED}`, `SwapPath {UNKNOWN, POOL_A, MM_B}`. `id` =
+    `swapId` decimal string.
+
+    | Source event | Fields written |
+    | --- | --- |
+    | `SwapCreated` | `lp`, `mm` (**ConvexityVault on Path A, MM EOA on Path B**), `tokenId`, `v0`, `maxIL`, `premium`, `createdAt*`, `expiryTimestamp`, `durationSeconds` (null until derivable) |
+    | geometry decode | `tickLower`, `tickUpper`, `liquidity`, `widthBucket`, `distanceBucket`, `durationBucket`, `geometryDecoded` |
+    | `SwapPriced` | `path`, `priced`, `fairPremium`, `baseLoadWad`, `utilSkewWad`, `dispSkewWad`, `poolLoadWad` (**for Path B this on-chain field is the MM load in WAD**), `sigmaRefWad`, `cappedAtMaxIL` |
+    | `QuoteFilled` (Path B) | `quoteId`, `nonce`, **`mmLoadBps`** — *the single non-circular load datum* |
+    | `SwapRouted` (routed) | `routed`, `routedPathB`, `premiumA`, `premiumB` — both candidate premiums |
+    | derived (Signal 2) | `spreadWad` = `poolLoadWad − mmLoadBps(WAD)`, non-null only on a Path-B win; `winDepth` = `premiumA − premiumB` on a routed Path-B win |
+    | `SwapSettled` | `realisedIL`, `payout`, `settlementPrice`, `settledAt*`, `pnlForMm` = `premium − payout` |
+
+    `isActive` is the open-set membership flag for Signal 5 (true between Created and
+    Settled).
+  </Accordion>
+
+  <Accordion title="BucketAggregate — Signals 1 (clearing load) & 3 (term structure)">
+    The core moat aggregate, keyed by the **(width × distance × duration)** triple,
+    **non-capped fills only**. The 7/30/90d rows of one (width, distance) pair give
+    the term-structure slope (Signal 3). `id` = `` `${widthBucket}-${distanceBucket}-${durationBucket}` ``.
+
+    - **Counts:** `countPoolFills` (Path-A baseline), `countMMFills` (Path-B
+      behavioral), `countMMWins` (`path == MM_B`), `totalNonCappedFills`. The
+      win-rate `countMMWins / (countPoolFills + countMMFills)` is computed by the API;
+      the counts are canonical here.
+    - **Running sums** over non-capped fills → API derives means/medians (the store
+      has no median operator): `sumMMLoadBps`, `sumPoolLoadWad`, `sumSpreadWad`,
+      `sumSigmaRefWad` (Signal 1 normalises load over σ_ref), `sigmaRefFloor` (regime
+      floor), `v0Volume`, plus `lastFillTimestamp`, `lastFillSwap`.
+
+    **Why sums not means:** the store cannot compute a median, and means must be
+    volume/time-windowed by the API — so the subgraph keeps *canonical running sums
+    and counts*, and the API does the division and windowing.
+  </Accordion>
+
+  <Accordion title="GeometryDemandBucket — realized half of Signal 4 (demand skew)">
+    The realized (filled) half of moneyness/demand-skew, same geometry triple, fed
+    from `SwapCreated` + geometry decode. The latent half (unfilled interest) is
+    [off-chain telemetry](/integrate/engine) served by the API. Fields: `id` (same
+    `bucketId`), the three buckets, `realizedFillCount`, `realizedV0`, `firstSeen`,
+    `lastSeen`.
+
+    **Why separate from BucketAggregate:** demand skew counts *every* create
+    (including capped fills — demand is demand), whereas `BucketAggregate` excludes
+    capped fills (load info only). Different inclusion rules → different entity.
+  </Accordion>
+
+  <Accordion title="NetGammaSnapshot — Signal 5 (net convexity / gamma supply)">
+    Protocol-wide, per time bucket. The subgraph maintains counts/sums over the
+    active-swap set; the **Greeks fields are written back by the API/GreeksEngine**.
+    `id` = `` `${bucketStart}` ``; fields `bucketStart`, `activeSwapCount`,
+    `totalV0`, `totalMaxIL`, `aggGammaWad`/`aggVegaWad` (**null until computed**),
+    `volumeWeightedLoadWad` = `Σ(per-swap load × V0) / Σ V0` (API-populated).
+
+    <Warning>
+    - **Limit:** the schema reserves this entity and the manifest lists it under
+      InflexionCore, but **no mapping handler currently writes a
+      `NetGammaSnapshot` row**.
+    - **Why:** the live active-set counters are maintained on `ProtocolState` (below)
+      instead; `ProtocolState.nextNetGammaBucket` exists to drive a future bucket
+      roll. The Greeks themselves are off-chain compute by design.
+    - **Mitigation / path-forward:** treat `NetGammaSnapshot` as a **schema-ready,
+      API-populated** surface, not an indexer-populated one. The current snapshot is
+      always available live via `ProtocolState`.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="ProtocolState — singleton live active-set counters">
+    Singleton (`id = 'global'`) holding the current snapshot of the active-swap set
+    (Signal 5 current snapshot): `activeSwapCount`, `totalActiveV0`,
+    `totalActiveMaxIL`, `cumulativeSwaps`, `cumulativeSettled`, `nextNetGammaBucket`.
+    Bumped on `SwapCreated` (add to active set, increment cumulative) and decremented
+    on `SwapSettled` (remove, with floor-at-zero guards). Created with all fields
+    zeroed by `getProtocolState`.
+  </Accordion>
+
+  <Accordion title="Depositor — per (address, tranche) vault flow">
+    ConvexityVault deposit/withdraw flow; carries the **capital-not-guaranteed**
+    framing for both tranches. `id` = `` `${address}-${tranche}` `` (**tranche 0 =
+    senior, 1 = junior**). Fields: `address`, `tranche`, `shares`, `totalDeposited`,
+    `totalWithdrawn` (running, for realized-yield reconstruction),
+    `pendingWithdrawShares`, `pendingUnlockAt`, `firstSeen`, `lastUpdated`. Written by
+    `handleDeposited` / `handleWithdrawRequested` / `handleWithdrawn`. See
+    [the tranches](/concepts/tranches) for the
+    junior-first-loss / senior-systemic-tail model.
+
+    <Note>
+    Implementation note: `getDepositor` is keyed by the composite `${address}-${tranche}`
+    id, but its internal `Depositor.load(addrHex)` is passed the *id* string while the
+    local var is named `addrHex`. The id is
+    correct (it is the composite), so per-tranche separation holds — the variable name
+    is just misleading, no correctness issue.
+    </Note>
+  </Accordion>
+
+  <Accordion title="MarketMaker — Signal 2 per-MM win-rate + PnL">
+    Per-MM aggregate. `id` = MM address. Fields: `fills`, `exposureV0`,
+    `exposureMaxIL`, `cumulativePremium`, `cumulativePayout`, `pnl` (= premium −
+    payout), `cumulativeWinCount` (Path-B wins: a `SwapPriced` with `path == MM_B`
+    and this mm), `cumulativeQuoteFillCount` (total quotes via `QuoteFilled`),
+    `firstSeen`, `lastSeen`.
+
+    **NOTE on "MM" for Path A:** `handleSwapCreated` bumps the counterparty's
+    `MarketMaker` row for *every* swap, and on Path A the counterparty is the
+    **ConvexityVault**. So the ConvexityVault address
+    appears as a `MarketMaker` with `fills`/`exposure`/`premium` — the API should
+    distinguish it. `cumulativeWinCount` and `cumulativeQuoteFillCount` only increment
+    for genuine Path-B MMs.
+  </Accordion>
+
+  <Accordion title="SigmaPoint — the σ_ref series, immutable">
+    Per-(token, Poked) σ_ref EWMA series with `SwapPriced` backfill — the only
+    `@entity(immutable: true)`. Enum `SigmaSource {POKE, INITIALIZED,
+    SWAP_PRICED_BACKFILL}`. `id` = `` `${blockNumber}-${logIndex}` `` (the `eventUid`)
+    — **globally unique across all three data sources**, so the
+    InflexionCore backfill points never collide with the VolOracle poke points. Fields:
+    `token`, `timestamp`, `blockNumber`, `priceWad`, `dtSeconds`, `sigmaShortWad`,
+    `sigmaLongWad`, **`sigmaRefWad`** (carried forward), `source`.
+
+    **Why the gap-fill is load-bearing:** `poke()` is a **no-op (emits no `Poked`)**
+    when `dt < minSampleInterval`, so on quiet feeds the series has holes.
+    The InflexionCore mapping fills them: every `SwapPriced`
+    with a positive `sigmaRefWad` writes a `SigmaPoint` with `source =
+    SWAP_PRICED_BACKFILL`, so consumers see a
+    **continuous series**. σ_ref reconstruction: from a `Poked`, `sigmaRefWad =
+    max(sigmaShortWad, sigmaLongWad)` ("max window binds" EWMA);
+    at `Initialized` both windows seed at the floor, so `sigmaRefWad = floorWad`.
+    See [σ_ref](/math/sigma-ref).
+  </Accordion>
+
+  <Accordion title="Pool snapshots — PoolDaySnapshot / PoolHourSnapshot / PoolState">
+    NAV / util / premium time series (claim B). `PoolDaySnapshot` `id` = day index
+    (`timestamp / 86400`); `PoolHourSnapshot` `id` = hour index (`timestamp / 3600`).
+    Both carry `seniorAssets`, `juniorAssets`, `totalLocked`, **`utilWad`** (=
+    `totalLocked / (seniorAssets + juniorAssets)`), `concWad`, `premiumAccrued`,
+    `payouts`, `juniorLoss`, `seniorLoss`. `PoolState` is the singleton (`id =
+    'global'`) running NAV the snapshots checkpoint.
+
+    **NAV reconstruction:** deposits/withdrawals
+    move principal per tranche; `PremiumAccrued` credits each tranche
+    (`toSenior`/`toJunior`); **`JuniorLoss` debits junior first, then senior** — the
+    on-chain encoding of the junior-first-loss /
+    senior-systemic-tail model. Every flow calls `checkpoint(ts)` to write running
+    state into the current day + hour snapshots and `addFlow(...)` to accumulate
+    per-bucket deltas.
+  </Accordion>
+
+  <Accordion title="MarketStateSnapshot — per (market × day) load surface">
+    The per-market load surface + volume/share, keyed `` `${marketId}-${dayStart}` ``.
+    Fields: `market` (ref), `dayStart`, `lockedByMarket`, nullable `utilWad`/`concWad`,
+    `sigmaRefWad`, `baseLoadWad`, `utilSkewWad`, `dispSkewWad`, `totalLoadWad`,
+    `fillCount`, `v0Volume`, `pathBFills`.
+
+    **Two writers, by design:** the *vault* writes
+    `lockedByMarket`/`utilWad`/`concWad`/`fillCount` on `CollateralLocked` (the only
+    ConvexityVault event carrying a marketId). The
+    *load-component* fields originate from `SwapPriced` (InflexionCore), not the vault
+    — they are left null and the **API joins them by (market, day)**.
+  </Accordion>
+
+  <Accordion title="Nonce — (mm, nonce) fill/cancel state">
+    Precise fill detection. `id` = `` `${mm}-${nonce}` ``. Fields: `mm`, `nonce`,
+    `filled`, `cancelled`, `swap` (the swap that consumed it), `updatedAt`.
+
+    **Why it exists / the disambiguation:** on-chain `isNonceUsed` returns true on
+    **both** fill and cancel — the subgraph disambiguates: `QuoteFilled` sets `filled
+    = true`, while `NoncesCancelled` sets `cancelled =
+    true` **only if the nonce was not already filled**. This preserves
+    [invariant I7](/security/invariants) (capacity
+    authority: a cancelled bitmap-nonce bit cannot fill) in the indexed view.
+  </Accordion>
+</AccordionGroup>
+
+## The event-order fix
+
+This is the single most important mapping subtlety — the heart of Signal 2.
+
+<Warning>
+**On-chain, `QuoteFilled` fires BEFORE `SwapPriced` on every Path-B create.**
+`_executePathB` emits `SwapCreated` + `QuoteFilled`, *then* `_emitPriced` emits
+`SwapPriced`. The `emit QuoteFilled(...)` lives inside `_executePathB`, and
+`_emitPriced` is called from both `createSwap` and `createSwapRouted` — both
+*after* the `_executePathB` call.
+</Warning>
+
+**Consequence + fix:** the spread (Signal 2) and the non-circular MM-load
+`BucketAggregate` accumulation are done in **`handleSwapPriced`** (the *later* of
+the pair), because only there are all three needed values available
+simultaneously:
+
+1. the pool `totalLoadWad` (on the `SwapPriced` event itself),
+2. the authoritative `cappedAtMaxIL` (on the `SwapPriced` event),
+3. the swap's persisted `mmLoadBps` (written by the *earlier* `QuoteFilled`).
+
+`handleQuoteFilled` therefore **only** persists the per-swap MM fields
+(`quoteId/nonce/mmLoadBps`) and the Nonce / MM-count — it must **not** read
+`poolLoadWad`/`cappedAtMaxIL`, which `handleSwapPriced` has not written yet.
+Doing the accumulation in `handleQuoteFilled` would
+read a not-yet-written `poolLoadWad`/`cappedAtMaxIL` → **spread always null, capped
+fills miscounted**.
+
+The spread + MM-load math: on a Path-B fill, convert
+`mmLoadBps` → WAD as
+
+$$
+\text{mmLoadWad} = \text{loadBps} \times 10^{14} \quad\Big(\text{since } \tfrac{\text{loadBps}}{10000}\times 10^{18} = \text{loadBps}\times 10^{14}\Big)
+$$
+
+then $\text{spreadWad} = \text{totalLoadWad} - \text{mmLoadWad}$; persist it on the
+Swap and add to `sumMMLoadBps` / `sumSpreadWad`.
+
+<Note>
+**Phantom-zero guard.** The whole spread block is skipped if `s.mm == address(0)`
+— the defensive-create branch where a `SwapPriced` was indexed without its
+`SwapCreated`/`QuoteFilled` (a re-org/replay artefact) — so a phantom 0 cannot
+poison the aggregates. A *real* fill (even a legit 0-load one) always carries a
+non-zero `mm` from `SwapCreated`, so genuine data is never dropped.
+More broadly, `handleSwapPriced` and the other
+lifecycle handlers tolerate out-of-order arrival by get-or-create with zeroed
+defaults.
+</Note>
+
+### Event → entity map
+
+| Event | Handler | What it writes |
+| --- | --- | --- |
+| `MarketRegistered` | `handleMarketRegistered` | Market directory; preserves counters |
+| `MarketDeactivated` | `handleMarketDeactivated` | `Market.active = false` |
+| `CvammEnabledSet` | `handleCvammEnabledSet` | `Market.cvammEnabled` |
+| `SwapCreated` | `handleSwapCreated` | new Swap + geometry decode + marketId recovery + Market counters + GeometryDemandBucket + MarketMaker exposure + ProtocolState active-set |
+| `SwapPriced` | `handleSwapPriced` | Swap pricing fields; SigmaPoint backfill; **BucketAggregate** (non-capped only); per-MM win count; per-market `pathBFills` |
+| `QuoteFilled` | `handleQuoteFilled` | Swap MM fields; Nonce.filled; per-MM `cumulativeQuoteFillCount` |
+| `SwapRouted` | `handleSwapRouted` | Swap `routed/routedPathB/premiumA/premiumB/winDepth` |
+| `SwapSettled` | `handleSwapSettled` | Swap settlement + `pnlForMm`; per-MM payout/PnL; Market `totalSettled/totalPayout`; ProtocolState decrement |
+| `NoncesCancelled` | `handleNoncesCancelled` | Nonce.cancelled (only if not filled) |
+| `Deposited` / `WithdrawRequested` / `Withdrawn` | vault handlers | Depositor + PoolState per-tranche; checkpoint |
+| `PremiumAccrued` | `handlePremiumAccrued` | PoolState tranche credit; checkpoint; addFlow |
+| `CollateralLocked` | `handleCollateralLocked` | PoolState totalLocked; checkpoint; MarketStateSnapshot |
+| `SettlementReleased` | `handleSettlementReleased` | PoolState unlock + cumulativePayouts; addFlow |
+| `JuniorLoss` | `handleJuniorLoss` | PoolState junior-then-senior debit; addFlow |
+| `Poked` / `Initialized` | vol-oracle handlers | SigmaPoint (source POKE / INITIALIZED) |
+
+`TreasurySet` / `CvammConfigured` / `CvammFrozen` / `LoadParamsSet` are indexed
+for completeness via no-op handlers — they touch no entity.
+
+## The bucketing classifiers
+
+The aggregates key on a **(width × distance × duration)** triple chosen to mirror
+the off-chain engine telemetry buckets, so the realized (on-chain) and latent
+(off-chain) halves of Signals 2/4 **share one coordinate system the API can join
+on**.
+
+| Axis | Bands |
+| --- | --- |
+| **Duration** | `≤0 → unknown`, `≤3600 → hour`, `≤86400 → day`, `≤604800 → week`, `≤2592000 → month`, else `longer` |
+| **Width** (from tick span `tickUpper − tickLower`; 1 tick ≈ 1bp price ratio, monotone in $\log(P_b/P_a)$) | `≤0 → unknown`, `≤600 → tight (~±3%)`, `≤2000 → medium (~±10%)`, `≤10000 → wide (~±65%)`, else `full` |
+| **Distance** | on-chain reports `mid` for a well-formed range (`unknown` for a degenerate one) |
+
+<Warning>
+- **Limit:** the on-chain distance axis is effectively `mid | unknown` today, not
+  the full `at-edge / near / deep` classification.
+- **Why:** without an oracle $P_0$ in the handler, ticks alone only give the
+  *geometric centre* of the range — the precise distance-to-edge needs the live price.
+- **Mitigation / path-forward:** the precise `at-edge / near / deep` classification
+  is **computed by the API** from $P_0$ vs $(P_a, P_b)$; the on-chain `mid|unknown`
+  proxy is flagged as a known coarse approximation in the code comment.
+</Warning>
+
+## GraphQL query examples
+
+<Info>
+**Endpoint (once the Studio slug is live):**
+`https://api.studio.thegraph.com/query/<id>/inflexion-arb-sepolia/<version>`.
+Pending until the slug `inflexion-arb-sepolia` is created; until
+then the API serves these surfaces from a typed `pending` state — never an error.
+Prefer the [REST API](/integrate/api-endpoints) in production; query the subgraph
+directly only for exploration.
+</Info>
+
+### A market's swaps — the per-fill lifecycle
+
+```graphql
+query MarketSwaps {
+  market(id: "0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69") {
+    fee
+    durationSeconds
+    active
+    cvammEnabled
+    totalSwaps
+    totalSettled
+    pathBFills
+    totalV0
+    totalPremium
+    totalPayout
+    swaps(orderBy: createdAtTimestamp, orderDirection: desc, first: 50) {
+      id
+      status
+      path                # POOL_A | MM_B | UNKNOWN
+      lp
+      mm                  # ConvexityVault on Path A, MM EOA on Path B
+      v0
+      maxIL
+      premium
+      widthBucket
+      distanceBucket
+      durationBucket
+      cappedAtMaxIL
+      mmLoadBps           # non-null only on Path B
+      poolLoadWad
+      spreadWad           # poolLoad − mmLoad(WAD); non-null only on a Path-B win
+      premiumA
+      premiumB
+      winDepth
+      realisedIL
+      payout
+      pnlForMm
+    }
+  }
+}
+```
+
+### The load surface — Signal 1 (clearing load) + Signal 3 (term structure)
+
+The clearing load over σ_ref, bucketed by geometry, lives in `BucketAggregate`.
+The API derives means as `sum / count` and the term-structure slope by comparing
+the `…-week` / `…-month` / `…-longer` rows of one (width, distance) pair.
+
+<CodeGroup>
+```graphql Load surface (Signal 1)
+query LoadSurface {
+  bucketAggregates(orderBy: v0Volume, orderDirection: desc) {
+    id                    # `${width}-${distance}-${duration}`
+    widthBucket
+    distanceBucket
+    durationBucket
+    totalNonCappedFills
+    countPoolFills
+    countMMFills
+    countMMWins           # API: win-rate = countMMWins / (countPool+countMM)
+    sumMMLoadBps          # API: meanMMLoad = sumMMLoadBps / countMMFills
+    sumPoolLoadWad        # mechanical baseline (price-to-beat)
+    sumSpreadWad          # Signal 2 realized spread accumulator
+    sumSigmaRefWad        # Signal 1: normalise load over σ_ref
+    sigmaRefFloor         # regime floor
+    v0Volume
+    lastFillTimestamp
+  }
+}
+```
+
+```graphql Term structure (Signal 3)
+query TermStructure {
+  bucketAggregates(where: { widthBucket: "tight", distanceBucket: "mid" }) {
+    durationBucket        # day | week | month | longer
+    sumMMLoadBps
+    countMMFills
+    sumSigmaRefWad
+    totalNonCappedFills
+  }
+}
+```
+</CodeGroup>
+
+### Net gamma / active-swap set — Signal 5
+
+<CodeGroup>
+```graphql Current snapshot (indexer-maintained)
+query NetGammaNow {
+  protocolState(id: "global") {
+    activeSwapCount
+    totalActiveV0
+    totalActiveMaxIL
+    cumulativeSwaps
+    cumulativeSettled
+  }
+}
+```
+
+```graphql Greeks series (API-populated)
+query NetGammaSeries {
+  netGammaSnapshots(orderBy: bucketStart, orderDirection: asc) {
+    bucketStart
+    activeSwapCount
+    totalV0
+    totalMaxIL
+    aggGammaWad           # null until API back-fills
+    aggVegaWad            # null until API back-fills
+    volumeWeightedLoadWad
+  }
+}
+```
+</CodeGroup>
+
+### Pool / depositor — claim B (capital not guaranteed)
+
+```graphql
+query PoolHealth {
+  poolState(id: "global") {
+    seniorAssets
+    juniorAssets
+    totalLocked          # utilWad = totalLocked / (senior+junior)
+    cumulativePremiumAccrued
+    cumulativePayouts
+    cumulativeJuniorLoss
+    cumulativeSeniorLoss
+  }
+  poolDaySnapshots(orderBy: dayStart, orderDirection: desc, first: 30) {
+    dayStart
+    seniorAssets
+    juniorAssets
+    utilWad
+    premiumAccrued
+    payouts
+    juniorLoss           # first-loss debited here before senior
+    seniorLoss
+  }
+}
+```
+
+### σ_ref series — continuous, gap-filled
+
+```graphql
+query SigmaSeries {
+  sigmaPoints(orderBy: timestamp, orderDirection: asc, first: 200) {
+    timestamp
+    token
+    sigmaShortWad
+    sigmaLongWad
+    sigmaRefWad
+    source               # POKE | INITIALIZED | SWAP_PRICED_BACKFILL
+  }
+}
+```
+
+### Per-MM leaderboard — Signal 2 per-MM
+
+```graphql
+query MMLeaderboard {
+  marketMakers(orderBy: pnl, orderDirection: desc) {
+    id                   # NOTE: ConvexityVault address also appears (Path-A counterparty)
+    fills
+    exposureV0
+    exposureMaxIL
+    cumulativePremium
+    cumulativePayout
+    pnl
+    cumulativeWinCount        # genuine Path-B wins only
+    cumulativeQuoteFillCount  # genuine Path-B quotes only
+  }
+}
+```
+
+## Where it sits
+
+<AddressTable />
+
+## Go deeper
+
+<CardGroup cols={2}>
+  <Card title="marketId parity" icon="key" href="/integrate/marketid-parity">
+    The full three-way (contract / SDK / subgraph) tight-packed keccak parity proof.
+  </Card>
+  <Card title="The REST API" icon="server" href="/integrate/api-overview">
+    The public surface that reads the subgraph and joins it with off-chain telemetry.
+  </Card>
+  <Card title="The engine" icon="satellite-dish" href="/integrate/engine">
+    The off-chain telemetry that supplies the dynamic halves of Signals 2 & 4.
+  </Card>
+  <Card title="The data moat" icon="bullseye" href="/concepts/data-moat">
+    Why the indexed flow is a defensible dataset, and the five non-circular signals.
+  </Card>
+  <Card title="The data client" icon="chart-line" href="/sdk/data-client">
+    Reading the load surface live via SDK multicall while the subgraph is pending.
+  </Card>
+  <Card title="Degradation" icon="circle-info" href="/sdk/degradation">
+    How the typed `pending` state surfaces while the Studio slug is not yet live.
+  </Card>
+</CardGroup>

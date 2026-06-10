@@ -1,0 +1,269 @@
+---
+title: "The 9 markets"
+description: "The reference grid — 3 fee tiers x 3 durations over one fungible-capital ConvexityVault, the tight-packed keccak marketId, why duration is baked into market identity, and the canonical example marketId."
+---
+
+import AddressTable from '/snippets/address-table.mdx';
+import Maturity from '/snippets/maturity-disclaimer.mdx';
+
+The dWETH/dUSDC deploy registers exactly **9 markets** — a clean cross of **3 fee
+tiers** and **3 durations** — all underwritten by a single
+[`ConvexityVault`](/protocol/vaults) with fungible USDC capital. This page is the
+flat reference grid: every cell, every axis value, the exact `marketId` formula, and
+the one live example `marketId` you can copy into any query.
+
+For the *why* — fungible capital, the S-curve, the three-way join key — see the
+[markets model](/protocol/markets) and [marketId parity](/integrate/marketid-parity).
+This page is the lookup table.
+
+<Note>
+**9 product lines, one treasury.** The duration is folded into the `marketId`, so the
+*same* position geometry prices differently in the 7d, 30d and 90d markets — all of
+the vol/time dependence lives in [fairRate](/concepts/fair-value), while
+[MaxIL](/concepts/maxil) (pure geometry, frozen at creation) is identical across all
+three. One pair, one pool of collateral, three prices for the same risk.
+</Note>
+
+## The axes
+
+The grid is `FEES x DURATIONS`. The two
+axes are the two things that change the *risk* of underwriting a position without
+changing its *geometry*:
+
+| Axis | Type | Values |
+| --- | --- | --- |
+| **Fee tier** | `uint24` | `500` (0.05%), `3000` (0.30%), `10000` (1.00%) |
+| **Duration** | `uint32` (seconds) | `7d` = `604800`, `30d` = `2592000`, `90d` = `7776000` |
+
+- **Fee tier** selects which Uniswap v3 pool the LP's position lives in. Different
+  tiers have different tick spacing and liquidity profiles, so they are genuinely
+  different markets even for the same pair.
+- **Duration** is the contract maturity. A longer maturity gives the price more time
+  to diffuse, so the same range is more likely to realize a larger fraction of its
+  [MaxIL](/concepts/maxil) — which is exactly why the cvAMM publishes **three prices
+  for the same position**.
+
+## The 9 markets grid
+
+The frontend builds the grid as `FEES.flatMap(fee => DURATIONS.map(...))`, iterating
+**fee-outer, duration-inner**. That fixes the index
+layout of `MARKETS[0..8]`:
+
+| | **7d** (`604800` s) | **30d** (`2592000` s) | **90d** (`7776000` s) |
+| --- | --- | --- | --- |
+| **fee 500** (0.05%) | `MARKETS[0]` — example `0x67c4…9d69` | `MARKETS[1]` | `MARKETS[2]` |
+| **fee 3000** (0.30%) | `MARKETS[3]` | `MARKETS[4]` | `MARKETS[5]` |
+| **fee 10000** (1.00%) | `MARKETS[6]` | `MARKETS[7]` | `MARKETS[8]` |
+
+The index of any cell is therefore `3 * feeIndex + durationIndex`, with
+`feeIndex ∈ {0:500, 1:3000, 2:10000}` and `durationIndex ∈ {0:7d, 1:30d, 2:90d}`.
+
+`MARKETS[0]` is the live, three-way-parity-pinned market — `(dWETH, dUSDC, fee
+500, 604800 s)` — with `marketId`
+`0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69`. It matches the
+on-chain address registry under `marketId_fee500_7d`, and
+`DEMO_MARKET_ID = demo.marketId_fee500_7d` sanity-checks against `MARKETS[0]`.
+
+<Tip>
+**Adding a pair multiplies the grid.** Each new token pair gets its **own**
+`ConvexityVault` and its **own** 9-market grid. dWETH/dUSDC is the live pair; the
+registry architecture (`registerMarket`) generalizes to any oracle-priced numéraire
+pair.
+</Tip>
+
+### One vault, fungible capital
+
+All 9 markets are backed by the **same** `ConvexityVault`, with **fungible** USDC.
+One vault per pair behaves like a single insurer's
+treasury backing nine product lines: capital flows wherever demand is, and intra-pair
+diversification (different fees, different durations) lowers the pool's aggregate
+tail. The per-market locked amount is tracked in `lockedByMarket[marketId]`, but the
+**free** capital that backs new fills is shared.
+
+<Warning>
+**The short 300s lifecycle market is NOT one of the 9.** The live create→settle
+lifecycle ran on a *separate, extra* market — `marketId`
+`0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2`,
+`(dWETH, dUSDC, fee 500, 300 s)`. **Why** it
+exists: the smallest grid duration is 7d, so a same-session settle is impossible
+without an extra short-clock market. **Mitigation:** the 300s market shares the exact
+same code path and settlement core as the grid — it is the 9-market product run at a
+fast clock, not a different product. Do not count it among the 9.
+</Warning>
+
+## The marketId formula
+
+`marketId` is the join key that ties the **contract**, the **SDK**, and the
+**subgraph** into one coordinate, so its byte layout is **load-bearing**:
+
+$$
+\texttt{marketId} = \mathrm{keccak256}\!\Big(\texttt{abi.encodePacked}(\,\text{token0},\ \text{token1},\ \text{fee},\ \text{durationSeconds}\,)\Big)
+$$
+
+with on-chain types `(address, address, uint24, uint32)` and `token0 < token1` by
+address (so for the example pair `token0 = dWETH`, `token1 = dUSDC`, the numéraire). The
+key word is **`abi.encodePacked`**: this is **tight** packing — no 32-byte ABI word
+padding. Each operand contributes exactly its on-chain width in big-endian bytes:
+
+| Field | On-chain type | Bytes |
+| --- | --- | --- |
+| `token0` | `address` | 20 |
+| `token1` | `address` | 20 |
+| `fee` | `uint24` | 3 |
+| `durationSeconds` | `uint32` | 4 |
+| **Pre-image total** | | **47** |
+
+The same 47-byte pre-image is reproduced identically on-chain and in the SDK:
+
+<CodeGroup>
+```solidity registerMarket
+// Owner registers each market; marketId is DERIVED, never supplied.
+bytes32 marketId = keccak256(
+    abi.encodePacked(cfg.token0, cfg.token1, cfg.fee, cfg.durationSeconds)
+);
+```
+
+```ts SDK / frontend mirror
+import { encodePacked, keccak256 } from "viem";
+
+function computeMarketId(
+  token0: `0x${string}`,
+  token1: `0x${string}`,
+  fee: number,            // uint24
+  durationSeconds: number // uint32
+): `0x${string}` {
+  return keccak256(
+    encodePacked(
+      ["address", "address", "uint24", "uint32"],
+      [token0, token1, fee, durationSeconds]
+    )
+  );
+}
+```
+</CodeGroup>
+
+<Warning>
+**Limit → Why → Mitigation.** The pre-image has no self-describing structure (it is
+raw concatenated bytes), so a field-width mistake produces a *valid-looking but wrong*
+32-byte hash — failure is **silent**, not a revert. **Why it matters:** a wrong id
+doesn't error, it just joins to nothing, so the Swap↔Market link goes quietly empty.
+**Mitigation:** the width contract is pinned by three-way parity tests — including an
+explicit `packed.length == 47` assertion on-chain — so any drift fails CI before it
+ships. See [marketId parity](/integrate/marketid-parity).
+</Warning>
+
+## Why duration is baked into the identity
+
+Folding `durationSeconds` into the hash is a deliberate design choice, and it is what
+makes the grid a *grid* instead of three side parameters on one market.
+
+The same geometry `(token0, token1, fee)` yields a **different `marketId` per
+duration**, and therefore a different price. All three share the **same MaxIL** (pure
+geometry, frozen at creation, [L-independent in the fair-rate
+sense](/math/maxil-derivation)) but a **different `fairRate`**:
+
+$$
+\text{FairPremium}(T) = \text{fairRate}\!\left(\sigma_{\text{ref}}^2\, T\right)\cdot \text{MaxIL},
+\qquad
+\text{fairRate} = \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(IL,\ \text{MaxIL})\right]}{\text{MaxIL}}
+$$
+
+`fairRate` is an **S-curve in $\sigma_{\text{ref}}^2\, T$** — it carries *all* of the
+volatility and time dependence: $\approx 0$ for a calm/short market, $\to 1$ for a
+violent/long one. MaxIL carries none of it. The 7d / 30d
+/ 90d markets are exactly the three points
+$T \in \{604800,\ 2592000,\ 7776000\}$ on that one curve.
+
+Three concrete consequences of putting duration *inside* the id:
+
+<Steps>
+<Step title="Each (geometry, duration) pair is a first-class market">
+It has its own price, its own capacity, its own per-market locked accounting
+(`lockedByMarket[marketId]`), and its own row in every aggregate — instead of being a
+mutable parameter on a shared row.
+</Step>
+<Step title="The data moat reads a clean term structure">
+The 7d / 30d / 90d rows of one geometry are three distinct `marketId`s the
+[subgraph](/integrate/subgraph) keys on directly. The duration axis of this grid
+**is** the [convexity term structure](/concepts/data-moat) the moat publishes as
+Signal 3 — and because the Path-A load is duration-independent and mechanical, the
+slope of the MM `loadBps` across these three points is the behavioral read.
+</Step>
+<Step title="Re-registering a duration can never re-price an active swap">
+The price config is immutable once set, and settlement uses the `L` and terms stored
+at creation (invariant [I6](/security/invariants)), so adding or touching a market
+cannot mutate one already in flight.
+</Step>
+</Steps>
+
+## The example marketId
+
+The canonical example id used throughout these docs is the fee-500 / 7d cell —
+`MARKETS[0]`:
+
+| Field | Value |
+| --- | --- |
+| **token0** (`dWETH`) | `0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D` (18 dec) |
+| **token1** (`dUSDC`, numéraire) | `0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d` (6 dec) |
+| **fee** | `500` (0.05%) |
+| **durationSeconds** | `604800` (7d) |
+| **marketId** | `0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69` |
+
+This exact value appears in three places that must agree: the deployment registry,
+the on-chain and SDK parity tests, and every
+GraphQL query against the subgraph. Use it to verify your own `computeMarketId`
+output, or as the `where` filter in a market query:
+
+```graphql Market directory + swaps, keyed by the example marketId
+query MarketSwaps {
+  market(id: "0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69") {
+    fee
+    durationSeconds
+    active
+    cvammEnabled
+    totalSwaps
+    pathBFills
+  }
+}
+```
+
+<Info>
+Only `MARKETS[0]` (the fee-500 / 7d example cell) has its `marketId` materialized in the
+deployment registry as `marketId_fee500_7d`. The other eight cells are derived on
+demand from the same formula — `computeMarketId(dWETH, dUSDC, fee, durationSeconds)`
+— and are byte-identical to what `registerMarket` stored on-chain. There is nothing
+special about cell 0 beyond being the seeded preview and lifecycle market.
+</Info>
+
+## Live registry
+
+<AddressTable />
+
+<Maturity />
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="The markets model" icon="layer-group" href="/protocol/markets">
+    Why a market is a (pair, fee, duration) tuple, one fungible-capital vault, and the
+    full downstream lifecycle of a marketId.
+  </Card>
+  <Card title="marketId parity (integrators)" icon="equals" href="/integrate/marketid-parity">
+    The 47-byte pre-image, the uint32 sign-safety subtlety, and the three-way
+    test-pinned parity for reproducing the id in any language.
+  </Card>
+  <Card title="MaxIL — the fungible unit" icon="ruler" href="/concepts/maxil">
+    Why MaxIL frozen-at-creation is identical across all three durations and is what
+    makes a per-market (not per-NFT) quote possible.
+  </Card>
+  <Card title="Fair value &amp; the S-curve" icon="chart-line" href="/concepts/fair-value">
+    Why the same geometry prices differently per duration — the S-curve in σ²·T.
+  </Card>
+  <Card title="The vaults" icon="vault" href="/protocol/vaults">
+    One ConvexityVault per pair, fungible capital across all 9 markets, dual-tranche.
+  </Card>
+  <Card title="Deployments" icon="server" href="/reference/deployments">
+    The live Arbitrum Sepolia registry — the single source of truth the grid is read
+    from.
+  </Card>
+</CardGroup>

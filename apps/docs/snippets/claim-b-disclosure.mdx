@@ -1,0 +1,10 @@
+<Warning>
+**Depositor capital is NOT guaranteed: the junior tranche is first-loss; the senior tranche is structurally protected from underwriting loss only, not systemic tail.**
+
+Underwriting capital — whether supplied to the pooled cvAMM vault (Path A) or posted directly by a market maker (Path B) — is **at risk**:
+
+- **Junior tranche — first-loss.** Junior depositors absorb underwriting losses first and buffer the senior tranche.
+- **Senior tranche — protected from underwriting loss, exposed to the systemic tail.** The senior tranche is structurally shielded from ordinary underwriting loss while junior capital buffers, but it still takes the systemic tail once the junior buffer is exhausted.
+
+No-bad-debt is a guarantee to the **LP being paid** (see the FULL-mode payout clause), **not** a guarantee that depositor or MM capital is preserved.
+</Warning>

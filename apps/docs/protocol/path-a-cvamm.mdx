@@ -1,0 +1,289 @@
+---
+title: "Path A — the cvAMM"
+description: "createSwapPathA: the pooled, signature-free, always-on underwriter. The on-chain load stack, the 99/1 premium split, and why the cvAMM is the floor of liquidity that removes cold-start."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+Path A is the **cvAMM** — a pooled, passive, always-quoting underwriter that lives
+entirely on-chain. An LP calls `createSwapPathA` and is
+priced and protected in a single transaction with **no market maker, no signed quote,
+no validity clock, and no relayer**. The counterparty is the dual-tranche
+[`ConvexityVault`](/protocol/vaults), which locks USDC collateral equal to
+[MaxIL](/concepts/maxil) and is paid the premium for taking the risk.
+
+This is **Pillar 2** of the [three pillars](/concepts/three-pillars): the cvAMM is the
+**floor of liquidity**. Because it always quotes a code-capped fair price with no MM
+present, there is no cold-start problem — an LP can always be priced and protected.
+Path B (the [MM rail](/protocol/path-b-mm)) is the ceiling of price; it can only ever
+undercut this floor, never replace it.
+
+<CardGroup cols={3}>
+  <Card title="Signature-free" icon="key" >
+    No EIP-712 quote, no nonce, no `validUntil`, no off-chain engine. Pure on-chain
+    call.
+  </Card>
+  <Card title="Always available" icon="infinity">
+    The pool quotes for any in-range position in any enabled market — solves cold-start.
+  </Card>
+  <Card title="Code-capped price" icon="lock">
+    The load stack is hard-clamped by [invariant I10](/security/invariants), then
+    capped at MaxIL. The pool cannot overcharge.
+  </Card>
+</CardGroup>
+
+## What `createSwapPathA` does
+
+`createSwapPathA` is one of three entry points into a single settlement core (the
+others are [`createSwap`](/protocol/path-b-mm) and
+[`createSwapRouted`](/protocol/routing)). It shares the same `view` read prologue
+(`_prepareSwap`) as the other two, prices the swap on the
+pool's own state, then locks, pays, and custodies in one Checks-Effects-Interactions
+sweep.
+
+<Steps>
+  <Step title="Wiring & market gate">
+    Requires the cvAMM is wired (`convexityVault != 0`) and the market is both `active`
+    and `cvammEnabled` — Path A markets must be explicitly opted in via `setCvammEnabled`.
+    This is the on/off switch for the pool rail per market.
+  </Step>
+  <Step title="Shared read prologue (in-range gate)">
+    `_prepareSwap` verifies `ownerOf(tokenId) == msg.sender`, derives the `marketId` from
+    the live on-chain `token0/token1/fee`, reads `[Pa, Pb]` from the position ticks, pins
+    `P0` to Chainlink **on-chain** (never caller-supplied), and enforces the convexity
+    gate `Pa ≤ P0 ≤ Pb` else `PositionOutOfRange`. It
+    computes `MaxIL`, snapshots the entry amounts `(a0, a1)`, and the position value
+    `V0`. The liquidity `L` is captured here (`g.liquidity`) and
+    stored at execution — settlement uses the **stored** `L`, never a re-read
+    ([I6](/security/invariants)).
+  </Step>
+  <Step title="Fair value (one poke, one Φ-sum)">
+    `_fairPremium` converts geometry to ratios
+    `a = Pa/P0`, `b = Pb/P0`, **pokes the [VolOracle](/protocol/oracles)** to refresh
+    `σ_ref` (permissionless, no-op if too soon), and reads
+    `FairValueOracle.fairPremium(...)` → `(FairPremium, fairRateWad, sigmaRefWad)`. This
+    is the [exact closed-form Φ-sum](/math/fair-value-phi-sum) — the production Stylus
+    pricer, never reimplemented off-chain.
+  </Step>
+  <Step title="Price = FairPremium + the on-chain load stack">
+    `_pricePathA` applies the I10-clamped
+    [load stack](/math/load-stack) on top of `FairPremium`, then caps the charged premium
+    at MaxIL.
+  </Step>
+  <Step title="Dust guards & slippage">
+    Like all three entry points, Path A enforces `MIN_POSITION_V0 = $100` and
+    `MIN_PREMIUM = $1` (block dust swaps that grief capacity and close the integer-division
+    free-coverage edge), plus a final `maxPremium` LP slippage
+    guard.
+  </Step>
+  <Step title="Execute — lock, pay, custody (CEI)">
+    `_executePathA` performs all state changes and external
+    calls. See the next section.
+  </Step>
+</Steps>
+
+## Execution: `_executePathA`
+
+This is the only place Path-A state mutates. It follows strict Checks-Effects-Interactions
+([CEI](/security/cei-reentrancy)):
+
+1. **Lock collateral.** `convexityVault.lockCollateral(marketId, maxIL)` — the pool checks
+   that `free ≥ maxIL` (`InsufficientFree`) **and** that the senior tranche stays protected,
+   `totalLocked + maxIL ≤ juniorAssets` (`SeniorProtectionBreached`). Collateral locked is
+   **exactly MaxIL** (FULL mode).
+2. **Allocate the swap id.** `nextSwapId++`.
+3. **Write the record.** `SwapRecord{ mm: address(convexityVault), collateral: maxIL,
+   liquidity: g.liquidity (stored once — I6), ... }`. The counterparty field is named `mm`
+   and is set to the vault address; `settle` later infers the rail from
+   `s.mm == address(convexityVault)`.
+4. **Pull the premium** in USDC from the LP.
+5. **Take the NFT** into the [`ILVault`](/protocol/vaults) for custody.
+6. **Split the premium** (next section).
+
+There is **no keeper, no signed quote, no validity clock, no relayer** anywhere in this
+path. Everything is synchronous and on-chain.
+
+## The on-chain load stack
+
+Path A computes its load **on-chain** from the pool's own state (Path B carries a single
+`loadBps` instead). The premium is `FairPremium` scaled up by a load that is the sum of
+three components, then hard-clamped:
+
+$$
+\text{premium}_A \;=\; \left\lceil\, \text{FairPremium}\cdot\bigl(1 + \text{totalLoad}\bigr) \,\right\rceil,
+\qquad
+\text{totalLoad} \;=\; \min\!\bigl(\underbrace{\text{baseLoad} + \text{util\_skew} + \text{disp\_skew}}_{\text{raw load}},\ \text{maxLoad}\bigr)
+$$
+
+The outer `min(..., maxLoad)` is the [I10 clamp](/security/invariants)
+(`CvammPricing.totalLoadWad`); the round-up is F-#8
+(`CvammPricing.premiumFromLoad`). All quantities are
+WAD-scaled — `1e18 = 1.0 = 100% load`, `1 bps = 1e14 WAD`.
+
+<AccordionGroup>
+  <Accordion title="baseLoad — the structural volatility-risk premium" icon="layer-group">
+    The structural premium over fair value, keyed by the `σ_ref` regime (calm / normal /
+    stressed bands) — `CvammPricing.baseLoadWad`. It is
+    motivated by the lone-writer CVaR gap (~91–100% of MaxIL for a single writer) that
+    diversification collapses (~78.7% per-contract as N→100). **That gap is the pool's
+    reason to exist.**
+  </Accordion>
+  <Accordion title="util_skew(u) — capacity pricing, u = locked / total" icon="gauge-high">
+    Flat below a knee, convex above, capped — `CvammPricing.utilSkewWad`.
+    It rises as the pool nears full commitment, pricing
+    marginal capacity **up before over-commitment**. This wires directly into the
+    [run defense](/protocol/vaults): the same locked/free accounting that prices capacity
+    also blocks a withdrawal run.
+  </Accordion>
+  <Accordion title="disp_skew(h) — concentration pricing, h = coverage HHI" icon="diagram-project">
+    The honest single-pair concentration analogue: many positions bunched at one range edge
+    all hit MaxIL together. Convex, capped — `CvammPricing.dispSkewWad`.
+    The Herfindahl `h` is computed **O(1)** from an incremental
+    `Σ lockedByMarket²` accumulator (`ConvexityVault.concentrationWad`) — no loop over
+    positions.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+**No primitive is hardcoded.** The `baseLoad` regimes, both skew curves
+(knee / slope / power / cap), and `maxLoadBps` are read from the calibrated risk-parameter
+set (cvAMM block) via `LoadParams` (set by the owner through
+`InflexionCore.setLoadParams`). `fairRate` itself has **no**
+calibrated coefficients — it is the exact closed form. Hardcoding any load / skew / σ
+primitive is the exact failure the external audit flagged.
+</Note>
+
+### The I10 cap is by construction
+
+<Warning>
+**Limit → Why → Mitigation: can the pool overcharge?**
+
+- **Limit (apparent):** a pooled algorithmic underwriter that quotes itself could, in
+  principle, mark the price arbitrarily high.
+- **Why it cannot here:** the raw load is `baseLoad + util_skew + disp_skew`, but the
+  charged load is `min(raw, maxLoad)`. The clamp is a deterministic arithmetic operation
+  in the pricing (READ) phase, strictly **upstream of `settle`** — not a policy or a trust
+  assumption.
+- **Mitigation (in code):** `premium ≤ FairPremium · (1 + maxLoad)`
+  ([I10](/security/invariants)), and both paths additionally cap
+  the charged premium at MaxIL — *never charge more than the maximum possible payout*.
+  I10 is orthogonal to the [no-bad-debt](/concepts/no-bad-debt)
+  invariant I1: it never touches `settle`, the MaxIL formula, or the payout cap.
+</Warning>
+
+## The premium split — 99% to the pool, 1% to the treasury
+
+When the premium lands, `_executePathA` splits it:
+
+| Cut | Share | Destination |
+| --- | --- | --- |
+| `poolCut` | **99%** | accrued into the `ConvexityVault` via `accruePremium` |
+| `treasuryCut` | **1%** | transferred to the protocol treasury |
+
+The 99% pool cut is then split **across tranches** inside the vault by
+`accruePremium`:
+
+$$
+\text{toSenior} = \text{poolCut}\cdot\frac{\text{seniorPremiumShareBps}}{10^4},
+\qquad
+\text{toJunior} = \text{poolCut} - \text{toSenior}
+$$
+
+So the senior tranche behaves like a low-yield "convexity savings account" and the junior
+tranche is the high-APY vol-seller. `seniorPremiumShareBps` is immutable, sourced from
+the calibrated risk-parameter set. This tranche split is **unique to
+Path A** — Path B's split is a flat 99% to the MM / 1% to the treasury, with no tranche
+allocation.
+
+<Tip>
+The premium split is **not** part of the settlement guarantee. Neither the tranche split
+nor the `totalLocked ≤ juniorAssets` senior-protection constraint affects I10 or
+[`settle`](/protocol/lifecycle) semantics. The premium is the underwriter's
+reward; the [no-bad-debt clause](/concepts/no-bad-debt) concerns only the LP's payout, paid
+from locked collateral.
+</Tip>
+
+## Signature-free, always available — the floor of liquidity
+
+Path A is the answer to three cold-start failure modes that kill quote-driven markets:
+
+<CardGroup cols={2}>
+  <Card title="No price (cold-start)" icon="snowflake">
+    A pure MM market has **no price until an MM shows up**. The cvAMM always quotes a
+    code-capped fair price for any in-range position in any enabled market.
+  </Card>
+  <Card title="Overcharge" icon="circle-dollar-to-slot">
+    A monopolist early MM could mark prices up. The pool's price is **clamped in code** by
+    I10 — it cannot exceed `FairPremium · (1 + maxLoad)`.
+  </Card>
+  <Card title="Liveness dependency" icon="plug-circle-xmark">
+    Path A needs **no off-chain engine**. The engine [cannot censor Path A at all](/security/trust-model)
+    because Path A does not use it — there is nothing to censor.
+  </Card>
+  <Card title="Depositor viability" icon="users">
+    The dual-tranche design gives depositors a choice: a senior "savings account" or a
+    junior vol-seller. See [tranches](/concepts/tranches).
+  </Card>
+</CardGroup>
+
+This is what "floor of liquidity" means precisely: **an LP can always get a code-capped
+fair quote on Path A**, regardless of whether any MM is online, whether the off-chain
+quote book is live, or whether the [subgraph](/integrate/subgraph) is deployed. The MM
+rail is a *price-improvement layer* on top of this floor — through
+[`createSwapRouted`](/protocol/routing), an MM wins only by **strictly beating** the
+pool, and a bad MM quote silently falls back to Path A without ever reverting.
+
+## Proven live
+
+The 2026-06-05 redeploy ran a real create→settle on Path A against a 300s market:
+
+- **Path A (swap #1):** V0 **\$270,531.28**, MaxIL **\$1,669.24**, premium **\$9.70 (0.58% of
+  MaxIL)**, realized IL **\$148.64**, payout **\$148.64** — locked and settled entirely from
+  the `ConvexityVault`. The LP received the payout; the pool kept `collateral − payout`
+  (the residual MaxIL) as profit on top of the premium.
+
+In the same lifecycle, `createSwapRouted` (swap #2) compared `premiumA_cvamm $13.80`
+against an MM's `premiumB_mm $8.93` and routed to the MM — the pool is the floor and the
+MM the ceiling. See [routing](/protocol/routing) for that path.
+
+## The two separate claims
+
+The settlement core enforces the LP-facing guarantee identically regardless of rail. On
+Path A the counterparty is the pool rather than a single MM, but the guarantee is the same:
+
+<ClaimA />
+
+And the capital-at-risk disclosure applies to the pool's depositors — both tranches:
+
+<ClaimB />
+
+<Maturity />
+
+<AddressTable />
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The ConvexityVault" icon="vault" href="/protocol/vaults">
+    Dual-tranche accounting, the senior-protection invariant, run defense, and premium
+    accrual.
+  </Card>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    baseLoad, util_skew, disp_skew, and the I10 clamp — the full math.
+  </Card>
+  <Card title="Path B — the MM rail" icon="signature" href="/protocol/path-b-mm">
+    Firm EIP-712 signed quotes, no last-look — the ceiling of price.
+  </Card>
+  <Card title="Routing" icon="route" href="/protocol/routing">
+    `createSwapRouted`: the cheaper of `{pool, MM}`, with non-reverting fallback to Path A.
+  </Card>
+  <Card title="MaxIL — the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why MaxIL is both the load-bearing cap and the fungible collateral unit.
+  </Card>
+  <Card title="The full lifecycle" icon="timeline" href="/protocol/lifecycle">
+    Create → active → settle, from `registerMarket` to NFT return.
+  </Card>
+</CardGroup>

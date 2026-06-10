@@ -1,0 +1,353 @@
+---
+title: "The oracles"
+description: "How OracleManager pins entry P0 and the settlement round-at-T, the sequencer + grace + staleness + lone-spike guards and the Fork-1 liveness backstop, and how VolOracle produces sigma_ref — the only stochastic pricing input."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion reads the outside world through exactly **two oracle contracts**, and they
+do two very different jobs. `OracleManager` answers the question *"what is the price?"*
+— at entry, and again at expiry. `VolOracle` answers the question *"how volatile has
+the price been?"* — producing $\sigma_{\text{ref}}$, the **only stochastic input** to
+the [fair-value Φ-sum](/math/fair-value-phi-sum). Everything else in the protocol is
+geometry, arithmetic, and accounting.
+
+The split matters because the two oracles sit on opposite sides of the
+[no-bad-debt](/concepts/no-bad-debt) line:
+
+<CardGroup cols={2}>
+  <Card title="OracleManager — the price" icon="tower-broadcast">
+    Pins $P_0$ at entry and $P_T$ at settlement, both **on-chain from Chainlink**,
+    never caller-supplied. Liveness of this oracle is part of the
+    [no-bad-debt clause](/concepts/no-bad-debt) — settlement must eventually succeed.
+  </Card>
+  <Card title="VolOracle — the volatility" icon="wave-square">
+    Produces $\sigma_{\text{ref}}$ for pricing. It is **solvency-load-bearing**
+    (it sets the load and depositor NAV) but **not** structural: a wrong
+    $\sigma_{\text{ref}}$ can cost depositors, never the LP.
+  </Card>
+</CardGroup>
+
+Live addresses for both contracts are in [the deployments registry](/reference/deployments).
+
+---
+
+## OracleManager — price at entry and at expiry
+
+`OracleManager` (`0x2c18147B…`) is the single
+gate between Chainlink and the protocol. It exposes two read paths with deliberately
+different behavior, because entry and settlement have different threat models.
+
+<Tabs>
+  <Tab title="Entry — getPrice">
+    **`getPrice(token)`** reads the **current** Chainlink `latestRoundData`,
+    health-gated (sequencer up + grace, not stale). There is **no** lone-spike check —
+    it *is* the current price, and the LP picks their own entry block. The result pins
+    $P_0$ **on-chain**, never from calldata. The same
+    read is reused as `g.livePrice` for the Path-B oracle band check
+    ([I9](/security/forks)), so the band costs zero extra oracle calls.
+  </Tab>
+  <Tab title="Settlement — getSettlementPrice">
+    **`getSettlementPrice(token, expiry, hintRoundId)`** pins the price to the
+    Chainlink round **active at expiry T** (`updatedAt ≤ expiry < nextUpdatedAt`), so
+    no party can pick a favorable instant by timing `settle`. It is gated by sequencer
+    uptime + grace, max-staleness, **and a lone-spike sanity check**, with a 24-hour
+    liveness backstop behind it. This is the path the [Fork-1 fix](/security/forks)
+    lives in.
+  </Tab>
+</Tabs>
+
+### Why both prices are pinned on-chain
+
+A review found that an earlier `createSwap`/`settle` once accepted a **caller-supplied**
+sqrt price. `settle` computed payout from the caller's `sqrtP_T`, so any permissionless
+settler could set the payout anywhere in $[0, \text{MaxIL}]$; and `createSwap` let an
+LP pick the entry that sets MaxIL / premium / V0.
+
+<Warning>
+**Limit → Why → Mitigation.** *Limit:* a caller-supplied price would hand a
+permissionless settler full control of the payout, and an LP control of their own
+entry. *Why it's dangerous:* it breaks [I2](/security/invariants) (cap correctness) and
+[I4](/security/invariants) (LP never profits from the swap) — the payout would no longer
+reflect the true price. *Mitigation:* **both** prices are now derived on-chain from
+Chainlink via `_oracleSqrtPriceX96` at settle and at entry,
+decimal- and orientation-aware, with `MarketConfig` decimals **read on-chain
+at `registerMarket`** and the oracle orientation **frozen across
+re-registration**. A single wrong decimal would mis-scale every price ~10×,
+so decimals are never trusted from calldata.
+</Warning>
+
+The settlement price is therefore reproducible by anyone, and the only freedom left to a
+settler is *which block* they call `settle` in — which the round-at-T pin renders moot,
+because the price is fixed to the round bracketing $T$ regardless.
+
+### The settlement guard stack
+
+`getSettlementPrice` walks four guards, in order, before it returns the round-at-T price.
+Each one fails *closed* (reverts and is retryable) except the last, which is the backstop
+that guarantees the call eventually *succeeds*.
+
+<Steps>
+  <Step title="Sequencer uptime + grace">
+    On Arbitrum, a Chainlink L2 **Sequencer Uptime Feed** must report the sequencer up,
+    and at least `GRACE_PERIOD = 3600s` (1h) must have elapsed since it came back. The
+    check fails closed on a future `updatedAt`. This stops anyone settling on a stale
+    price formed while the sequencer was down and users could not react.
+  </Step>
+  <Step title="Max-staleness">
+    The round-at-T must be fresh enough: `MAX_STALENESS = 90,000s` (the 86,400s
+    heartbeat + a 1h buffer). The same value is used on testnet and mainnet so the
+    constant does not change across deploys.
+  </Step>
+  <Step title="Lone-spike sanity check">
+    A glitched single print is rejected: the round-at-T is a "lone spike" only if it
+    differs from **both** of its immediate neighbours by ≥ `LONE_SPIKE_BPS = 500` (5%).
+    A *real* fast move is sustained, so the next round confirms it and the check passes;
+    only a one-round glitch with two normal neighbours is deferred.
+  </Step>
+  <Step title="Liveness backstop (Fork-1)">
+    If the lone-spike check defers, `settle` is retried. Past
+    `LIVENESS_WINDOW = 86,400s` (24h) the Chainlink round-at-T is accepted
+    **unconditionally** — funds can **never** lock
+    indefinitely. This is [invariant I8](/security/invariants).
+  </Step>
+</Steps>
+
+The Uniswap v3 TWAP is **advisory only** — emitted as an event, never a revert
+condition. That is the whole point of the
+[Fork-1 redesign](/security/forks): the old hard-TWAP gate could deadlock forever, so it
+was demoted to telemetry.
+
+### The settlement constants
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `GRACE_PERIOD` | `3600s` (1h) | min time after sequencer recovery before settle is allowed |
+| `MAX_STALENESS` | `90,000s` | 86,400 heartbeat + 1h buffer; per-token, same on testnet/mainnet |
+| `LONE_SPIKE_BPS` | `500` (5%) | a round is a glitch only if it differs from **both** neighbours by ≥ this |
+| `LIVENESS_WINDOW` | `86,400s` (24h) | after this, the round-at-T is accepted unconditionally |
+| `TWAP_WINDOW` | `1800s` | the advisory Uniswap TWAP window (never reverts) |
+| `MAX_DEVIATION_BPS` | `200` (2%, advisory) | the advisory TWAP-vs-Chainlink deviation, emitted only |
+
+### The Fork-1 liveness backstop, precisely
+
+[Invariant I8](/security/invariants) states that `settle()` always succeeds within
+`expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`. The lone-spike check can never
+permanently lock funds: a glitched print defers settlement, but only until
+`block.timestamp ≥ expiry + LIVENESS_WINDOW`, after which the backstop accepts the round
+unconditionally. A missing neighbour round across a Chainlink `phaseId` boundary is read
+**tolerantly** via `_tryRound` (a try/catch that returns `ok=false` instead of reverting),
+so even a phase gap degrades to the backstop rather than a permanent lock.
+
+<Warning>
+**Documented design observation (a known boundary, not a bug). Limit → Why →
+Mitigation.** *Limit:* the spec-literal staleness `require` fires **before** the backstop
+can recover the round, so the *actual* usable settle window via the round-at-T is
+`[expiry + LIVENESS_WINDOW, expiry + MAX_STALENESS)` — about **1 hour wide**
+($90{,}000 - 86{,}400 = 3{,}600\text{s}$), not the full additive sum the I8 wording
+suggests. *Why it's acceptable:* the window is **symmetric** for LP and MM (it preserves
+fairness — neither side can exploit it), and past `expiry + MAX_STALENESS` funds can
+still settle via a **newer** Chainlink round (Arbitrum majors tick frequently), just not
+via the round-at-T. *Mitigation / path-forward:* the behavior is surfaced explicitly in
+NatSpec and pinned by a dedicated boundary test — it is documented, not papered over.
+</Warning>
+
+I8 is verified by five fuzz tests, ~1,280 runs:
+`testFuzz_I8_settleSucceedsAnywhereInBackstopWindow`,
+`testFuzz_I8_sustainedMoveSettlesImmediately`,
+`testFuzz_I8_loneSpikeDefersBeforeBackstop`,
+`testFuzz_I8_sequencerRecoveryRespectsGrace`, and
+`test_I8_revertsPastStaleness_boundary`.
+
+### `hintRoundId` — supplied, then verified
+
+`settle(swapId, hintRoundId)` takes a `hintRoundId` from the keeper, but the oracle does
+not trust it. `getSettlementPrice` **verifies** that the hinted round actually brackets
+expiry ($\text{updatedAt} \le \text{expiry} < \text{nextUpdatedAt}$) before using it.
+The hint is a gas optimization — it tells the oracle *where
+to look* in Chainlink's round history — not an input it has to believe. The
+round-at-T pin is what kills the settle-timing game; the hint just makes finding that
+round cheap.
+
+---
+
+## The Chainlink feeds
+
+`OracleManager` reads canonical Chainlink USD price feeds (8-decimal). On Arbitrum
+Sepolia these are verified against the Chainlink reference-data directory
+(verified 2026-05-28):
+
+| Feed | Address | Heartbeat (Sepolia) |
+| --- | --- | --- |
+| ETH / USD | `0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165` | ~120s |
+| BTC / USD | `0x56a43EB56Da12C0dc1D972ACb089c06a5dEF8e69` | ~120s |
+| ARB / USD | `0xD1092a65338d049DB68D7Be6bD89d17a0929945e` | 86,400s |
+| USDC / USD | `0x0153002d20B96532C639313c2d54c3dA09109309` | 86,400s |
+| **Sequencer Uptime** | **`null`** (none on Sepolia) | — |
+
+<Info>
+The `dWETH` token is **oracle-priced via the real Chainlink ETH/USD feed**,
+so the live testnet markets move with actual
+ETH. All four feeds, plus the full address registry, are listed in
+[the deployments reference](/reference/deployments).
+</Info>
+
+<Note>
+**Mainnet feeds differ.** The Arbitrum One values for the eventual
+mainnet — ETH/USD `0x639Fe6ab…`, the real Sequencer Uptime Feed `0xFdB631F5…`, etc.
+— are **migration references**, not the live testnet deployment. Do not
+conflate them with the Sepolia registry.
+</Note>
+
+### The Sepolia sequencer caveat
+
+<Warning>
+**Limit → Why → Mitigation.** *Limit:* there is **no Chainlink L2 Sequencer Uptime Feed
+on Arbitrum Sepolia** — the `Sequencer Uptime` row above is `null`. *Why:* Sepolia is a
+testnet with no SLA, so Chainlink does not publish a sequencer feed there. *Mitigation:*
+`OracleManager` treats `sequencerFeed == address(0)` as **skip-the-sequencer-check** —
+safe on testnet, where a brief sequencer wobble carries no real funds risk. The sequencer
+gate is fully implemented and ready; it simply has no feed to read on Sepolia. **It MUST
+be set before any mainnet deploy** — this is flagged in the registry's `_sequencerNote`,
+and is tracked as a named mainnet-TODO.
+</Warning>
+
+A second deliberate choice worth knowing: testnet feeds tick faster (~120s for
+ETH/BTC) than mainnet (86,400s heartbeat), but `MAX_STALENESS` is fixed at **90,000s**
+so the *same* constant is correct on either chain — no per-network re-tuning of the
+staleness gate.
+
+---
+
+## VolOracle — sigma_ref, the only stochastic input
+
+`VolOracle` (`0xfdEafBB3…`) produces a single
+number, $\sigma_{\text{ref}}$, that feeds the [Φ-sum pricer](/math/fair-value-phi-sum).
+It is the **only stochastic input** to fair value — everything else
+($a = P_a/P_0$, $b = P_b/P_0$, $T$, MaxIL) is geometry and time.
+
+### The construction
+
+$$
+\sigma_{\text{ref}} = \max\!\bigl(\sigma_{\text{short}},\ \sigma_{\text{long}},\ \text{floor}\bigr)
+$$
+
+The `_sigmaRef` computation drives this. $\sigma_{\text{short}}$ and
+$\sigma_{\text{long}}$ are **time-aware EWMAs of Chainlink log-returns** over two
+halflives. Each poke folds the latest price into a
+per-second variance, annualizes over a **365-day year**
+($\text{SECONDS\_PER\_YEAR} = 31{,}536{,}000$), and takes the
+conservative `max` against a hard `floor`.
+
+<Warning>
+**Mandatory conservatism — never price off raw realized σ. Limit → Why → Mitigation.**
+*Limit:* a naïve volatility oracle would read the raw realized σ, which **understates**
+risk right before a regime change — the stale-σ jump is exactly where a vol-seller's book
+bleeds. *Why it's dangerous:* under-pricing the load at the worst possible moment
+compresses depositor NAV (a depositor-money risk; see [tranches](/concepts/tranches)).
+*Mitigation:* the `max(σ_short, σ_long, floor)` construction **cannot collapse** to a
+deceptively calm number before a jump — it can never fall below the slower estimate or
+the floor. This conservatism is required by design, not a tuning choice.
+</Warning>
+
+### Poke mechanics
+
+`σ_ref` is kept fresh by a **permissionless `poke`** rather than a dedicated keeper. The
+poke is folded directly into `createSwap`, so the vol estimate
+refreshes on the same transaction that prices a swap — no separate cron job, and the
+router pokes exactly once before pricing both rails off the resulting FairPremium.
+
+- **No-op when too soon.** `poke` is a no-op (and emits no event) when
+  `dt < minSampleInterval`, so it is safe to fold into every create without
+  micro-samples blowing up the $r^2/dt$ ratio.
+- **`dt` is clamped** to `[minSampleInterval, maxSampleInterval]`, so one huge gap can
+  neither divide by a tiny `dt` nor over-weight a single sample.
+- **First poke seeds both windows at the floor**, so the very first reads are
+  conservative rather than wild.
+- **`sigmaComponents.binding`** reports which input bound $\sigma_{\text{ref}}$:
+  `0 = σ_short`, `1 = σ_long`, `2 = floor` — distinct from the *load* regime.
+
+All windows, floor, and cadence come from the calibrated risk-parameter set (the cvAMM
+block) — **none is hardcoded**. Hardcoding any σ primitive is the exact
+failure the [audit flagged](/security/audits).
+
+<Note>
+On the fresh 2026-06-05 deploy, $\sigma_{\text{ref}}$ was initialized to the **0.5e18
+floor**, which gives $\text{fairRate} \approx 0.847$ at floor vol. Real dynamics accrue as
+the VolOracle is poked over time; until then, the floor is the conservative starting point.
+</Note>
+
+### Load-bearing scope — precisely what σ can and cannot break
+
+This is the single most important thing to state correctly about `VolOracle`, because it
+sits on exactly one side of the [no-bad-debt line](/concepts/no-bad-debt).
+
+<AccordionGroup>
+  <Accordion title="What σ_ref IS load-bearing for: the I10 cap and depositor solvency">
+    A wrong or too-low $\sigma_{\text{ref}}$ makes the pool **under-charge load** — the
+    [load stack](/math/load-stack) prices off $\sigma_{\text{ref}}$, so a low reading
+    compresses NAV. Any resulting underwriting loss hits the
+    [tranche waterfall](/concepts/tranches) **junior-first**. So a vol-oracle fault can
+    cost **depositors** money. This is why the conservatism above is mandatory.
+  </Accordion>
+  <Accordion title="What σ_ref is NOT load-bearing for: the FULL no-bad-debt invariant (I1)">
+    [I1](/security/invariants) is **structural and oracle-independent**. In FULL mode
+    `collateral = MaxIL ≥ payout` for **any** $\sigma_{\text{ref}}$ — the cap and the
+    collateral are equal by construction, and $\sigma_{\text{ref}}$ never enters the
+    settlement math. So a wrong σ **cannot violate I1**. A vol-oracle fault can cost
+    depositors, but it can **never** create LP bad debt in FULL.
+  </Accordion>
+</AccordionGroup>
+
+The crisp version: the **price oracle** (`OracleManager`) liveness *is* part of the
+no-bad-debt clause — if settlement can never run, funds lock — which is precisely why the
+[Fork-1 backstop](/security/forks) exists. The **vol oracle** (`VolOracle`) is *not* in
+that clause at all; it governs pricing and depositor returns, never the LP guarantee.
+
+<ClaimA />
+
+---
+
+## The two oracles, side by side
+
+| | **OracleManager** | **VolOracle** |
+| --- | --- | --- |
+| Answers | "what is the price?" ($P_0$ at entry, $P_T$ at expiry) | "how volatile?" ($\sigma_{\text{ref}}$) |
+| Source | Chainlink `latestRoundData` / round-at-T | EWMA of Chainlink log-returns |
+| Refresh | per read (entry / settle) | permissionless `poke`, folded into create |
+| Guards | sequencer + grace + staleness + lone-spike + backstop | `max(short, long, floor)`, clamped `dt`, no-op when too soon |
+| Caller-supplied? | **never** — on-chain only | n/a |
+| In the no-bad-debt clause? | **yes** (liveness) | **no** (solvency/pricing only) |
+| Breaking it costs | locked funds if liveness fails (bounded by I8) | depositor NAV — never LP bad debt in FULL |
+| Invariants | [I8](/security/invariants), feeds [I9](/security/forks) band | feeds [I10](/security/invariants) cap |
+| Address | `0x2c18147B…` | `0xfdEafBB3…` |
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The two architectural forks" icon="code-branch" href="/security/forks">
+    Fork-1 (the settlement-liveness backstop, I8) and Fork-2 (the oracle-anchored price
+    band, I9) in full, with the audit history behind each.
+  </Card>
+  <Card title="Price pinning" icon="lock" href="/security/price-pinning">
+    Why both $P_0$ and $P_T$ are derived on-chain, and the trust hole that closed.
+  </Card>
+  <Card title="The fair-value Φ-sum" icon="function" href="/math/fair-value-phi-sum">
+    Where $\sigma_{\text{ref}}$ enters: the exact closed-form pricer it is the only
+    stochastic input to.
+  </Card>
+  <Card title="sigma_ref, in depth" icon="wave-square" href="/math/sigma-ref">
+    The EWMA construction, the floor, and the conservatism argument worked through.
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    I8 (settlement liveness) and I10 (price cap), and exactly where each is enforced.
+  </Card>
+  <Card title="The deployment registry" icon="server" href="/reference/deployments">
+    Every live address — both oracles, all four Chainlink feeds, and the sequencer note.
+  </Card>
+</CardGroup>
+
+<Maturity />

@@ -1,0 +1,13 @@
+<Warning>
+**LPs are always paid with no bad debt in FULL mode — qualified: capped payoff + solvent USDC + oracle/settlement liveness.**
+
+The no-bad-debt guarantee is **exact only** under the full clause:
+
+- **FULL collateralization** — the underwriter has posted exactly `MaxIL` per swap, locked for the life of the position.
+- **Capped payoff** — the payout is `min(realized_IL, MaxIL)`. The cap is load-bearing: it is what makes `payout ≤ collateral` hold by construction.
+- **Solvent USDC** — the collateral numeraire (`dUSDC`) holds its peg and remains redeemable.
+- **Oracle / settlement liveness** — the price oracle stays live and `settle()` runs within the protocol's settlement window.
+- **No rehypothecation breach** — locked collateral stays instantly liquid; it is never routed to utilization-gated venues.
+
+Stated without these qualifiers, the guarantee is **not** correct.
+</Warning>

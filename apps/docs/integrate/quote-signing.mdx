@@ -1,0 +1,335 @@
+---
+title: "Signing a SignedQuote (cross-language)"
+description: "The definitive EIP-712 reference for Inflexion Path-B quotes — domain, the 13 fields in order, the typehash pre-image, the bigint→string wire codec, key-based vs browser signing, and exactly what the chain re-checks at fill."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+<Info>
+A `SignedQuote` is the firm, EIP-712-signed unit a Path-B market maker streams to the [engine](/integrate/engine) so it can compete on price against the always-on cvAMM pool. This page is the **authoritative, language-agnostic** definition: get the domain, field order, types, and the typehash pre-image byte-identical, and a quote signed in any language verifies on-chain. Get any of them wrong and `createSwap` / `createSwapRouted` rejects the signature.
+</Info>
+
+The single source of truth is re-exported through `@inflexion/sdk` and `@inflexion/sdk/quote`. The TS field order, types, and domain **must match `InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly** — and the engine's `SIGNED_QUOTE_TYPE_STRING` is byte-identical to it.
+
+A quote is **per-market, never per-NFT** — the `SignedQuote` carries no `tokenId`. That is load-bearing for the whole model and is explained in [the two rails](/concepts/two-rails) and on [Path B](/protocol/path-b-mm); the short version is repeated in [Why per-market](#why-the-quote-carries-no-tokenid) below.
+
+---
+
+## The EIP-712 domain
+
+The domain is fixed and the four fields are non-negotiable:
+
+```ts
+const domain = {
+  name: 'Inflexion',
+  version: '1',
+  chainId: 421614n,                          // Arbitrum Sepolia — the live chain
+  verifyingContract: core.inflexionCore,     // = InflexionCore, NOT a vault
+}
+```
+
+<ParamField path="name" type="string" required>
+  Literal `"Inflexion"`. Hashed into the domain separator.
+</ParamField>
+<ParamField path="version" type="string" required>
+  Literal `"1"`. The protocol's signing version, not the package version.
+</ParamField>
+<ParamField path="chainId" type="uint256" required>
+  `421614` (Arbitrum Sepolia). In TS this is the `bigint` `421614n`. The SDK reads it from `CHAIN_ID`; the engine defaults it from the deployment registry, never hardcoded.
+</ParamField>
+<ParamField path="verifyingContract" type="address" required>
+  **`InflexionCore`** — the state machine that calls `_hashTypedDataV4`, *not* a vault. The engine defaults it from the registry (`VERIFYING_CONTRACT`); see [/reference/deployments](/reference/deployments) for the live address.
+</ParamField>
+
+<Warning>
+**Limit:** a stale or wrong `verifyingContract` is the single most common cause of "every Path-B fill is rejected." **Why:** the contract recomputes the same digest with its own deployed address; if your domain points at a dead core, the recovered signer is meaningless and on-chain verification fails for *every* quote. **Mitigation:** never hardcode the core address — load it from `@inflexion/sdk` (`core.inflexionCore`) or, in the engine, from the deployment registry. Use [`<AddressTable />`](/reference/deployments) as the canonical source.
+</Warning>
+
+<AddressTable />
+
+---
+
+## The 13 fields, in order
+
+**Struct order = field order = signing order.** EIP-712 hashes the struct field-by-field in declaration order, so this list is the canonical wire order an implementation in any language must reproduce (`SignedQuoteTypes`):
+
+| # | Field | Solidity type | TS type | Meaning |
+| --- | --- | --- | --- | --- |
+| 1 | `mm` | `address` | `Address` (`0x…40`) | MM signer; the recovered signer **must equal** this |
+| 2 | `marketId` | `bytes32` | `Hex` | the market this quote is for — **per-market, never per-NFT** |
+| 3 | `loadBps` | `uint16` | `number` | spread over the on-chain FairPremium; `≤ loadParams.maxLoadBps` (I10) |
+| 4 | `minMaxILRatioBps` | `uint16` | `number` | lower bound of the accepted MaxIL-ratio band |
+| 5 | `maxMaxILRatioBps` | `uint16` | `number` | upper bound of the accepted MaxIL-ratio band |
+| 6 | `quotePrice` | `uint128` | `bigint` | oracle price the MM signed against — anchors the Fork-2 band check |
+| 7 | `priceBandBps` | `uint16` | `number` | ± band around `quotePrice` the MM tolerates |
+| 8 | `model` | `uint8` | `number` | `CollateralModel`: `FULL=0`, `PARTIAL=1` |
+| 9 | `partialRatioBps` | `uint16` | `number` | PARTIAL only; `0` in FULL |
+| 10 | `maxNotionalV0` | `uint128` | `bigint` | capacity ceiling — notional V0 the MM will fill against this quote (I7) |
+| 11 | `validUntil` | `uint64` | `bigint` | absolute GTD expiry timestamp; on-chain bound to `now + [5,15] s` |
+| 12 | `quoteId` | `bytes32` | `Hex` | the MM's logical quote identifier |
+| 13 | `nonce` | `uint256` | `bigint` | bitmap nonce `(word<<8)\|bit`; a cancelled bit cannot fill (I7) |
+
+<Note>
+**The TS-type split matters for serialization.** Four fields are `bigint` — `quotePrice`, `maxNotionalV0`, `validUntil`, `nonce` (the `uint128/uint64/uint256` fields). The rest (`loadBps`, every `*Bps`, `model`) stay plain `number` because they are `uint16/uint8` and always `< 2^53`, so they are JSON-safe as-is. This is exactly the boundary the [wire codec](#the-wire-codec) crosses.
+</Note>
+
+### CollateralModel
+
+`CollateralModel = { FULL: 0, PARTIAL: 1 }`. **FULL (`0`) is the only supported mode in v1** — set `model: 0` and `partialRatioBps: 0`. PARTIAL is reserved for a future, quant-gated collateral model (see [collateral models](/protocol/collateral-models)); every PARTIAL parameter is read from the calibrated risk-parameter set, never hardcoded.
+
+---
+
+## The typehash pre-image
+
+The EIP-712 `typeHash` is `keccak256` of this exact ASCII string, with **no spaces** between fields and the field order above. It is exported as `SIGNED_QUOTE_TYPE_STRING` and is byte-identical to the contract's `SIGNED_QUOTE_TYPEHASH` pre-image:
+
+```text
+SignedQuote(address mm,bytes32 marketId,uint16 loadBps,uint16 minMaxILRatioBps,uint16 maxMaxILRatioBps,uint128 quotePrice,uint16 priceBandBps,uint8 model,uint16 partialRatioBps,uint128 maxNotionalV0,uint64 validUntil,bytes32 quoteId,uint256 nonce)
+```
+
+The full digest the contract computes (and that you must reproduce to verify off-chain) is the standard EIP-712 construction:
+
+$$
+\text{typeHash} = \mathrm{keccak256}\big(\texttt{"SignedQuote(address mm,...,uint256 nonce)"}\big)
+$$
+
+$$
+\text{structHash} = \mathrm{keccak256}\big(\text{typeHash} \,\|\, \texttt{mm} \,\|\, \texttt{marketId} \,\|\, \dots \,\|\, \texttt{nonce}\big)
+$$
+
+$$
+\text{domainSeparator} = \mathrm{keccak256}\big(\mathrm{keccak256}(\texttt{"EIP712Domain(...)"}) \,\|\, \mathrm{keccak256}(\texttt{"Inflexion"}) \,\|\, \mathrm{keccak256}(\texttt{"1"}) \,\|\, \texttt{chainId} \,\|\, \texttt{verifyingContract}\big)
+$$
+
+$$
+\text{digest} = \mathrm{keccak256}\big(\texttt{0x1901} \,\|\, \text{domainSeparator} \,\|\, \text{structHash}\big)
+$$
+
+Each value is ABI-encoded to 32 bytes: dynamic types (`address`, `bytes32`, the integers) are left-padded; there are no dynamic-length members, so there is no nested `keccak256` of a string/bytes member. The exported helper `quoteDigest(quote, chainId, verifyingContract): Hex` returns exactly this digest via viem's `hashTypedData` — use it as your cross-language conformance oracle.
+
+<Tip>
+**Conformance check for a new language port.** Hash a fixed test quote in your implementation and compare the digest byte-for-byte against `quoteDigest(...)`. If the digests match, your domain, field order, and ABI encoding are all correct and the signature will verify on-chain. The definitive Stylus ≡ Solidity ≡ off-chain digest cross-check is itself a project integration test.
+</Tip>
+
+---
+
+## The wire codec
+
+A `bigint` is not JSON-serializable, so the WS protocol, the `POST /quote` body, and the JSONL telemetry logs encode every `uint128/uint64/uint256` field as a **decimal string** (`QuoteWire`). The `uint16/uint8` fields stay as JS numbers.
+
+<CodeGroup>
+```ts SignedQuote (in-memory)
+{
+  mm: '0xe632B215120dD43A719458487bA3e03638fec953',
+  marketId: '0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2',
+  loadBps: 500,                 // number
+  minMaxILRatioBps: 0,          // number
+  maxMaxILRatioBps: 10000,      // number
+  quotePrice: 0n,               // bigint
+  priceBandBps: 100,            // number
+  model: 0,                     // number (FULL)
+  partialRatioBps: 0,           // number
+  maxNotionalV0: 340282366920938463463374607431768211455n,  // bigint (2^128-1)
+  validUntil: 1900000010n,      // bigint
+  quoteId: '0x...',             // Hex
+  nonce: 0n,                    // bigint
+}
+```
+
+```json QuoteWire (on the wire)
+{
+  "mm": "0xe632B215120dD43A719458487bA3e03638fec953",
+  "marketId": "0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2",
+  "loadBps": 500,
+  "minMaxILRatioBps": 0,
+  "maxMaxILRatioBps": 10000,
+  "quotePrice": "0",
+  "priceBandBps": 100,
+  "model": 0,
+  "partialRatioBps": 0,
+  "maxNotionalV0": "340282366920938463463374607431768211455",
+  "validUntil": "1900000010",
+  "quoteId": "0x...",
+  "nonce": "0"
+}
+```
+</CodeGroup>
+
+The helpers are `encodeQuote(q): QuoteWire` (bigints → decimal strings) and `decodeQuote(w): SignedQuote` (strings → bigints).
+
+<Warning>
+**Limit:** signing the *wire* form (strings) instead of the typed form (bigints) silently produces a wrong digest. **Why:** EIP-712 hashes the integer fields as 32-byte numbers; a string member would hash as a dynamic `string`, changing the struct hash. **Mitigation:** always `decodeQuote` a wire payload back to bigints **before** re-signing or verifying it, and sign the typed object. The codec exists precisely so the transport layer and the signing layer never confuse their representations.
+</Warning>
+
+---
+
+## Signing the quote
+
+There are two paths. The split is the same one that runs through the whole [SDK](/sdk/mm-client): a **key-based** server path that builds a viem account from a raw private key, and a **browser** path that signs with the connected wallet and never touches a raw key.
+
+<Tabs>
+<Tab title="Key-based (server)">
+
+The SDK method `mm.signQuote(privateKey, quote, opts?)` delegates to the engine signer (never reimplemented) and additionally enforces the two MM guards before returning:
+
+1. **I10** — `loadBps ≤ loadParams.maxLoadBps`, else `MmQuoteError('i10-exceeded')`.
+2. **below-pool** — `loadBps < live pool-load-bps` (from `getPoolLoadToBeat`), else `MmQuoteError('not-below-pool')`. If the pool load is unreadable the check is skipped (and reported) unless you pass `requirePoolCheck: true` (→ `'pool-load-unreadable'`).
+
+```ts mm-quote.ts
+import { createInflexionSdk, encodeNonce } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ rpcUrl, privateKey: MM_KEY }) // funded write client
+const mm = sdk.mm
+
+// Per-MARKET quote (NOT per-NFT). loadBps must beat the live pool floor.
+const tick = await mm.getPoolLoadToBeat(marketId)            // PoolLoadTick
+const quote = {
+  mm: MM_ADDRESS,
+  marketId,
+  loadBps: Number(tick.totalLoadBps) - 50,                   // undercut the pool by 50 bps
+  minMaxILRatioBps: 0,
+  maxMaxILRatioBps: 10_000,
+  quotePrice: liveOraclePrice,                               // bigint — the Fork-2 band anchor
+  priceBandBps: 50,                                          // inside on-chain [25, 500]
+  model: 0,                                                  // FULL
+  partialRatioBps: 0,
+  maxNotionalV0: 1_000_000_000_000n,                         // capacity (numeraire raw)
+  validUntil: BigInt(Math.floor(Date.now() / 1000) + 10),   // GTD; on-chain bounds to now+[5,15]s
+  quoteId: ('0x' + 'ab'.repeat(32)) as `0x${string}`,
+  nonce: encodeNonce(0n, 0),                                 // (word<<8)|bit
+}
+
+const signed = await mm.signQuote(MM_KEY, quote)             // throws on I10 / below-pool
+// → publish signed.envelope to the engine (WS or POST /quote), or hand to an LP for createSwap
+```
+
+The raw engine helper underneath is `signQuote(privateKey, quote, chainId, verifyingContract): Promise<QuoteEnvelope>` — **positional args**, builds the account from the raw key. It is server-only; **never use the raw-key path in the browser**.
+
+</Tab>
+<Tab title="Browser (wagmi)">
+
+No private key in the browser. Sign with the connected wallet via `signTypedData`, and enforce the I10 + below-pool guards **yourself** — mirroring what `mm.signQuote` does server-side:
+
+```ts use-sign-quote.ts
+import { SignedQuoteTypes, quoteDomain, core, CHAIN_ID } from '@inflexion/sdk'
+
+// 1. Enforce I10 + below-pool BEFORE signing (the guards mm.signQuote applies for you).
+const params = await mm.getLoadParams()
+if (quote.loadBps > params.maxLoadBps) throw new Error('i10-exceeded')
+const pool = await mm.getPoolLoadToBeat(quote.marketId)
+if (pool.available && quote.loadBps >= Number(pool.totalLoadBps)) throw new Error('not-below-pool')
+
+// 2. Sign via the wagmi walletClient (EIP-712).
+const signature = await walletClient.signTypedData({
+  account: walletClient.account,
+  domain: quoteDomain(CHAIN_ID, core.inflexionCore),   // { 'Inflexion', '1', 421614, core }
+  types: SignedQuoteTypes,
+  primaryType: 'SignedQuote',
+  message: quote,                                       // typed: bigints for uint128/64/256
+})
+const envelope = { quote, signature }                  // → publish, or hand to LP buyProtection
+```
+
+`quoteDomain(chainId, verifyingContract)` returns the exact `{ name, version, chainId, verifyingContract }` object; `SignedQuoteTypes` is the field list above; `primaryType` is `'SignedQuote'`. The `message` must be the **typed** quote (bigints), not the wire form.
+
+</Tab>
+<Tab title="Any other language">
+
+Reproduce the four primitives and the digest will match `quoteDigest(...)`:
+
+1. **Domain** — `name="Inflexion"`, `version="1"`, `chainId=421614`, `verifyingContract=InflexionCore`.
+2. **Type-string** — the exact `SignedQuote(...)` ASCII from [the typehash pre-image](#the-typehash-pre-image), no spaces, fields in order.
+3. **structHash** — `keccak256(typeHash ‖ field_1 ‖ … ‖ field_13)`, each field ABI-encoded to 32 bytes (addresses/integers left-padded; `bytes32` as-is).
+4. **digest** — `keccak256(0x1901 ‖ domainSeparator ‖ structHash)`, then `ecsign` with the MM's key (recoverable `{r, s, v}`, 65-byte signature).
+
+Verify your port by hashing a fixed quote and diffing against `quoteDigest(quote, 421614, core)`. Any standard EIP-712 library (ethers, viem, web3.py / eth-account, ethers-rs / alloy, go-ethereum) reproduces this given the domain and types above.
+
+</Tab>
+</Tabs>
+
+### Verifying off-chain
+
+`verifyQuote(envelope, chainId, verifyingContract): Promise<boolean>` returns `true` iff the signature recovers (case-insensitively) to `quote.mm`; `recoverQuoteSigner(...)` returns the EOA. This is the **EOA path** — EIP-1271 contract signers are verified **on-chain only**. The engine runs exactly this verify in its WS / `POST /quote` accept path before storing a quote.
+
+---
+
+## What the chain re-checks at fill
+
+Off-chain verification (and the engine's freshness gate) is **non-authoritative** — the relayer only drops obvious junk to keep its store clean. The chain re-checks everything at `createSwap` / `createSwapRouted`, and a quote that fails any of these either reverts (forced Path B) or, under routing, **falls back to Path A without reverting**:
+
+<Steps>
+<Step title="Signature & signer">
+  The contract recomputes the digest with its own domain and recovers the signer; it must equal `quote.mm` (EOA via `ecrecover`, or EIP-1271 for a contract signer). A mismatched domain, field order, or wire-vs-typed signing surfaces here.
+</Step>
+<Step title="Validity window — I8/freshness">
+  `validUntil − block.timestamp ∈ [5, 15] s` (`VALIDITY_MIN_S = 5`, `VALIDITY_MAX_S = 15`). This is the **no-last-look** design: firm GTD quotes with a tiny TTL that simply void themselves — the MM cannot pick off a stale price. The reference bot uses `TTL = 10s`, re-issuing every 5s, comfortably inside the window.
+</Step>
+<Step title="Price band — I9 / Fork 2">
+  `priceBandBps ∈ [25, 500] bps` (0.25%–5%), and the fill reverts iff `absBps(P_live, quotePrice) > priceBandBps`. Crucially the band check **reuses the same oracle read that pinned `P0`**, so it is non-circular — see [price pinning](/security/price-pinning) and [the forks](/security/forks).
+</Step>
+<Step title="Capacity — I7">
+  `consumedNotional[quoteId] ≤ maxNotionalV0`. The SDK previews this with `capacityRemaining(quoteId, maxNotionalV0)` → `remaining = max(0, maxNotionalV0 − consumedNotional)`.
+</Step>
+<Step title="Nonce — I7">
+  The bitmap bit `(word, bit)` decoded from `nonce` must be unspent. A **cancelled** bit cannot fill — the MM cancels by `cancelNonces(...)` on-chain, or simply by not refreshing the quote (the oracle band voids the stale one).
+</Step>
+<Step title="Load cap — I10">
+  `loadBps ≤ loadParams.maxLoadBps`. On a Path-B fill the final premium is derived on-chain as $\text{premium} = \lceil \text{FairPremium} \cdot (1 + \text{loadBps}/10000) \rceil$, capped at MaxIL — the relayer returns a *load*, never a dollar premium.
+</Step>
+</Steps>
+
+<Note>
+Under `createSwapRouted`, an expired, over-band, under-collateralised, or otherwise invalid MM quote does **not** revert the LP's transaction — the router falls back to the always-on cvAMM pool, so the LP always clears at the cheaper of `{pool, valid MM quote}`. Only the **executed** rail mutates nonce / capacity / lock. See [routing](/protocol/routing).
+</Note>
+
+---
+
+## Why the quote carries no `tokenId`
+
+MaxIL is both the load-bearing payout cap **and** the unit of risk: pure geometry, frozen at creation, L-independent in the fair-rate sense — which makes positions **fungible** to an underwriter within a market (see [MaxIL](/concepts/maxil)). So a `SignedQuote` prices a *market*, not a position: a single `loadBps` over the on-chain FairPremium, a `[minMaxILRatioBps, maxMaxILRatioBps]` band, and `maxNotionalV0` capacity. The geometry-independent "load to beat" is itself a first-class streamable signal — `getPoolLoadToBeat` / `streamPoolLoadToBeat` give the pure pool floor an MM must undercut with no position geometry at all. This is also why fill attribution is **per-quote** (`quoteId` / `nonce`), not per-NFT — the precise `QuoteFilled` event carries `(swapId, mm, quoteId, nonce, loadBps)`.
+
+<ClaimA />
+
+---
+
+## Field cheat-sheet for a fresh quote
+
+A minimal, valid FULL-mode quote for the live deployment:
+
+| Field | Typical value | Why |
+| --- | --- | --- |
+| `mm` | your MM address | recovered signer must equal it |
+| `marketId` | from [`/reference/markets-grid`](/reference/markets-grid) | per-market |
+| `loadBps` | `Number(poolLoad) − k` | must beat the pool floor (I10 + below-pool) |
+| `minMaxILRatioBps` / `maxMaxILRatioBps` | `0` / `10000` | accept any MaxIL ratio |
+| `quotePrice` | live oracle price (`bigint`) | Fork-2 band anchor |
+| `priceBandBps` | `100` | 1%, inside on-chain `[25, 500]` |
+| `model` / `partialRatioBps` | `0` / `0` | FULL is the only v1 mode |
+| `maxNotionalV0` | capacity (numeraire raw, 6-dec) | I7 ceiling |
+| `validUntil` | `now + 10s` (`bigint`) | GTD; chain bounds to `now + [5,15]s` |
+| `quoteId` | `bytes32` | logical quote id, drives capacity + `QuoteFilled` |
+| `nonce` | `encodeNonce(word, bit)` | bitmap; cancellable, single-fill |
+
+<Tip>
+`encodeNonce(word, bit) = (word << 8) | bit` with `bit ∈ [0, 255]`; `decodeNonce(nonce) = { word: nonce >> 8, bit: nonce & 0xff }`; `wadToBps(wad) = floor(wad · 10000 / 1e18)` — all exported from `@inflexion/sdk`.
+</Tip>
+
+---
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Engine — the Path-B relayer" icon="server" href="/integrate/engine">
+    Where you publish the signed envelope: the WS protocol, `POST /quote`, freshness gate, and the day-one telemetry sinks.
+  </Card>
+  <Card title="MM client" icon="signature" href="/sdk/mm-client">
+    `signQuote`, `getPoolLoadToBeat`, `quoteStream`, `capacityRemaining`, and the I10 + below-pool guards in code.
+  </Card>
+  <Card title="marketId parity" icon="equals" href="/integrate/marketid-parity">
+    How `marketId` is derived from `(token0, token1, fee, durationSeconds)` and stays consistent across chain, SDK, and engine.
+  </Card>
+  <Card title="The forks (I8 / I9)" icon="shield" href="/security/forks">
+    Why the validity window and the oracle-anchored price band make Path B a no-last-look design.
+  </Card>
+</CardGroup>

@@ -1,0 +1,280 @@
+---
+title: "The cvamm math port"
+description: "Why the deterministic load stack is the ONLY off-chain duplication the architecture permits — the deployed CvammPricing library is delegatecall-only and cannot be eth_call'd — and how the parity-locked cvamm TS port stays byte-equal to the contract."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+<Info>
+`@inflexion/sdk` exports the deterministic cvAMM **load** math as a namespaced port, `cvamm`. It is the **single duplication the architecture permits**, and it exists because the deployed `CvammPricing` library is **delegatecall-only** — a direct `eth_call` reverts. The port is kept **byte-equal** to the deployed Solidity by a parity-locked test. The [`fairRate` Φ-sum is NEVER duplicated](/concepts/fair-value) — it is always read from the on-chain [`FairValueOracle`](/protocol/oracles).
+</Info>
+
+The SDK's prime directive is **one pricing implementation**. The expensive, load-bearing part of a premium — the closed-form [Φ-sum fair value](/math/fair-value-phi-sum) — lives on-chain in the Stylus `FairValueOracle` and is only ever **read**, never re-derived. So why does the SDK carry an off-chain copy of *any* pricing math at all?
+
+Because the cheap, deterministic part — the dealer **load** stack that marks the fair value up to a charged premium — physically cannot be read on-chain. The contract that computes it is a Solidity library, and deployed libraries refuse direct calls. This page is the full account of that one exception: what it is, why it is forced, and how it is prevented from ever drifting.
+
+---
+
+## The load stack vs the Φ-sum — what gets duplicated and what never does
+
+Every premium in the protocol factors cleanly into two parts:
+
+$$
+\text{premium} \;=\; \underbrace{\text{FairPremium}(a, b, \sigma_{\text{ref}}, T, \text{MaxIL})}_{\text{Pillar 1 — on-chain, READ only}} \;\times\; \underbrace{\bigl(1 + \text{totalLoad}(\sigma_{\text{ref}}, u, h)\bigr)}_{\text{the load — deterministic, may be re-evaluated}}
+$$
+
+The two factors have opposite duplication policies, and the distinction is the whole point of this page.
+
+<CardGroup cols={2}>
+  <Card title="FairPremium — the Φ-sum" icon="lock">
+    A closed-form sum of $\Phi$ terms, computed by the Stylus [`FairValueOracle`](/protocol/oracles) (`fairPremium` / `fairRate`). It is **never reimplemented off-chain** — there is exactly one implementation, and it lives on-chain. The SDK reads it via `eth_call`. See [the Φ-sum](/math/fair-value-phi-sum).
+  </Card>
+  <Card title="totalLoad — the load stack" icon="calculator">
+    A deterministic `pure` transform of three public scalars ($\sigma_{\text{ref}}$, utilisation $u$, concentration $h$) plus the public `loadParams`. It is computed on-chain by `CvammPricing` — but that library **cannot be `eth_call`'d**, so the SDK mirrors it in the `cvamm` TS port, kept byte-equal by a parity test.
+  </Card>
+</CardGroup>
+
+The asymmetry is principled, not arbitrary: the Φ-sum is a genuinely hard computation with a single canonical answer (so one implementation, on-chain), while the load stack is an explicitly deterministic `pure` transform of *public* inputs — the kind of thing a client may legitimately re-evaluate, provided it provably agrees with the chain. The [access-layer architecture](/integrate/architecture) sanctions exactly this and nothing more.
+
+---
+
+## Limit → Why → Mitigation — the one permitted duplication
+
+A naked "we duplicated some pricing math off-chain" would be a defect. It is not — because the duplication is **forced** by the EVM and **bounded** by a parity lock. Here is the full chain.
+
+<Warning>
+**Limit — the SDK carries an off-chain copy of the cvAMM load stack.**
+
+**Why — the deployed `CvammPricing` library is DELEGATECALL-ONLY.** It *is* deployed (with `totalLoadWad` / `loadComponents`), but Solidity guards deployed library functions: a direct `eth_call` to `libs.cvammPricing` **reverts** (confirmed on the 2026-06-05 deploy). The library runs on-chain only via `InflexionCore`'s `delegatecall` during pricing — there is no callable surface for a client to read the load from. The SDK therefore *cannot* read it the way it reads the Φ-sum.
+
+**Mitigation — the port is PARITY-LOCKED byte-equal to the deployed Solidity.** `cvamm` is asserted equal to the deployed `CvammPricing` in `math.parity.test.ts`. It is a **permanent** mirror — not a temporary stopgap — precisely because the delegatecall-only property is permanent. Any divergence fails CI before it ships. This is the **only** duplication the architecture permits; the `fairRate` Φ-sum is never duplicated.
+</Warning>
+
+<Note>
+The reason this is *safe* to duplicate where the Φ-sum is not: the load stack is a deterministic, `pure` function of **public** inputs (`σ_ref`, `util`, `conc`, `loadParams`) — every one of which is readable from a public getter. A client re-evaluating it reaches the same answer the chain would, and the parity test proves it. The Φ-sum, by contrast, has exactly one canonical implementation and is left there. See [the access-layer architecture](/integrate/architecture).
+</Note>
+
+### Why delegatecall-only forces a port — and where the on-chain copy still runs
+
+On-chain, the load decomposition that backs the live `SwapPriced` event is computed by `CvammPricing.loadComponents(σ_ref, util, conc, loadParams)`, called from `InflexionCore._pricePathAFromFair` during a create — purely through `delegatecall`. There is no path for an external reader to invoke it. The SDK's job is to reproduce that same `pure` transform from the same public inputs, so a client preview matches what the create call will charge to within a few wei.
+
+<Steps>
+  <Step title="On-chain: the contract delegatecalls the library">
+    `InflexionCore._pricePathAFromFair` delegatecalls `CvammPricing.loadComponents(...)` and `premiumFromLoad(...)` to mark the read Φ-sum up to the Path-A pool premium. This is the canonical implementation — the one the create actually uses.
+  </Step>
+  <Step title="The library refuses a direct read">
+    A standalone `eth_call` to `libs.cvammPricing` reverts. Deployed Solidity libraries are guarded against being called as ordinary contracts; they only execute in a caller's storage context via `delegatecall`. So the SDK has no `readContract` it can point at the load math.
+  </Step>
+  <Step title="Off-chain: the cvamm port reproduces the same pure transform">
+    `cvamm.loadComponents(...)` / `cvamm.totalLoadWad(...)` compute the identical result from the public `σ_ref`, `util`, `conc`, and `loadParams`. The SDK then applies `cvamm.premiumFromLoad(fairPremium, totalLoad)` to the **read** fair value.
+  </Step>
+  <Step title="The parity test pins them together forever">
+    `math.parity.test.ts` asserts the port agrees with the deployed Solidity byte-for-byte (within a small absolute tolerance on the WAD `pow`/`exp` helpers). Drift is a CI failure, so the two can never silently diverge.
+  </Step>
+</Steps>
+
+---
+
+## What the `cvamm` namespace contains
+
+The port is exported **namespaced** as `cvamm` — not flat — specifically to avoid clobbering type names like `WAD`, `LoadParams`, and `Regime`. Import it from the package root:
+
+```ts
+import { cvamm } from '@inflexion/sdk'
+```
+
+All arithmetic is `bigint` at **WAD = 1e18** precision. The helpers mirror solady's `FixedPointMathLib` closely enough that `totalLoadWad` agrees with the on-chain library to within a few wei.
+
+### The load stack
+
+The load is a clamped sum of three components, exactly as deployed in `CvammPricing.sol`:
+
+$$
+\text{totalLoad} \;=\; \min\!\Bigl(\,\text{baseLoad}(\sigma_{\text{ref}}) + \text{utilSkew}(u) + \text{dispSkew}(h),\;\; \text{maxLoadBps}\cdot 10^{14}\Bigr)
+$$
+
+The outer `min` is invariant [**I10**](/security/invariants) **by construction** — the load sum is clamped so that `premium ≤ FairPremium·(1 + maxLoad)` holds for *any* inputs, on both rails, upstream of `settle`. It never touches `settle` / `MaxIL` / [I1–I9](/security/invariants).
+
+<AccordionGroup>
+  <Accordion title="baseLoad(σ_ref) — a regime BAND, not a continuous curve">
+    `cvamm.baseLoadWad(σ_ref, params)` returns one of three flat values selected by which **regime band** $\sigma_{\text{ref}}$ falls into — it is **not** a continuous function of $\sigma_{\text{ref}}$:
+
+    $$
+    \text{baseLoad} = \begin{cases}
+      \text{baseLoadCalmBps}      & \sigma_{\text{ref}} < \text{regimeCalmBelowWad} \\
+      \text{baseLoadStressedBps}  & \sigma_{\text{ref}} \ge \text{regimeStressedAtWad} \\
+      \text{baseLoadNormalBps}    & \text{otherwise}
+    \end{cases}
+    $$
+
+    This is why a Path-A "term structure of load" is a **flat line**: `baseLoad` is duration-independent. See [the load stack](/math/load-stack).
+  </Accordion>
+  <Accordion title="utilSkew(u) — flat below a knee, convex above, capped">
+    `cvamm.utilSkewWad(u, params)`, where $u = \text{locked}/\text{total}$:
+
+    $$
+    \text{utilSkew}(u) = \begin{cases}
+      0 & u \le \text{utilKnee} \\
+      \min\!\Bigl(\text{utilCap},\; \text{utilSlope}\cdot\bigl(\tfrac{u-\text{knee}}{1-\text{knee}}\bigr)^{\text{utilPower}}\Bigr) & u > \text{utilKnee}
+    \end{cases}
+    $$
+
+    The convex term uses the WAD `powWad` helper.
+  </Accordion>
+  <Accordion title="dispSkew(h) — HHI dispersion, capped">
+    `cvamm.dispSkewWad(h, params)`, where $h$ is the normalised coverage HHI (concentration):
+
+    $$
+    \text{dispSkew}(h) = \min\!\bigl(\text{dispCap},\; \text{dispSlope}\cdot h^{\text{dispPower}}\bigr)
+    $$
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+**No load primitive is hardcoded.** Every curve parameter (`baseLoad*Bps`, `utilKnee/Slope/Power/Cap`, `dispSlope/Power/Cap`, `maxLoadBps`, the regime bands) comes from the calibrated risk-parameter set and is mirrored on-chain by `InflexionCore.loadParams()` — which the SDK reads and passes into the port. Hardcoding any of these is the exact failure the audit flagged. See [PARTIAL parameters](/protocol/collateral-models).
+</Note>
+
+### Key functions
+
+| Function | Signature | What it computes |
+| --- | --- | --- |
+| `loadComponents` | `(σ_ref, u, h, params) → LoadBreakdown` | The three components **PRE-clamp** + the I10-clamped `totalLoadWad`. Mirrors `CvammPricing.loadComponents`. |
+| `totalLoadWad` | `(σ_ref, u, h, params) → bigint` | `min(baseLoad + util + disp, maxLoad)` — the clamped load (I10). |
+| `premiumFromLoad` | `(fairPremium, totalLoad) → bigint` | `ceil(fairPremium · (1 + totalLoad))` — the Path-A pool premium from the **read** fair value. |
+| `pathBPremium` | `(fairPremium, loadBps, maxIL) → bigint` | `ceil(fairPremium · (1 + loadBps/BPS))` **capped at MaxIL** — the Path-B premium from an MM's signed `loadBps`. |
+| `baseLoadWad` / `utilSkewWad` / `dispSkewWad` | `(…, params) → bigint` | The individual load components. |
+| `powWad` | `(xWad, yWad) → bigint` | `x^y` for WAD `x ∈ [0,1]`, `y ≥ 0`; mirrors `CvammPricing._powWad`. |
+| `regimeOf` | `(σ_ref, params) → Regime` | The **load** regime band `'calm' \| 'normal' \| 'stressed'`. |
+| `abFromSqrt` | `(sqrtP0, sqrtPa, sqrtPb) → {aWad, bWad}` | The pricing-input geometry: $a = (\text{sqrtPa}/\text{sqrtP0})^2$, $b = (\text{sqrtPb}/\text{sqrtP0})^2$ (WAD). |
+| `WAD` / `mulWad` / `divWad` / `ceilDiv` | — | WAD constant + fixed-point helpers matching solady rounding. |
+
+<Warning>
+`regimeOf` returns the **load regime** (calm / normal / stressed — the σ_ref band that selects `baseLoad`). This is **not** the σ_ref `binding` (which-EWMA-window) reported by `VolOracle.sigmaComponents`. Do not conflate the two.
+</Warning>
+
+---
+
+## How the port is used — finishing the premium client-side
+
+The port never prices a premium on its own — it **finishes** a premium whose fair-value half was read on-chain. Both rails follow the same shape, and this is precisely `_pricePathAFromFair` / the Path-B markup reproduced off-chain.
+
+<Tabs>
+  <Tab title="Path A — the pool premium">
+    ```ts
+    import { cvamm } from '@inflexion/sdk'
+
+    // 1. READ the Φ-sum on-chain (never reimplemented).
+    const [fairPremium, fairRateWad, sigmaRefWad] =
+      await fairValueOracle.read.fairPremium([token, aWad, bWad, durationSeconds, maxIL])
+
+    // 2. READ the public pool state + load params.
+    const { util, conc } = await convexityVault.read.inventory() // (total, locked, free, util, conc)
+    const params = await lp.getLoadParams()                      // InflexionCore.loadParams()
+
+    // 3. FINISH the load stack client-side via the parity-locked port.
+    const totalLoad = cvamm.totalLoadWad(sigmaRefWad, util, conc, params)
+    const premiumA  = cvamm.premiumFromLoad(fairPremium, totalLoad) // = _pricePathAFromFair on-chain
+    ```
+  </Tab>
+  <Tab title="Path B — the MM premium">
+    ```ts
+    import { cvamm } from '@inflexion/sdk'
+
+    // fairPremium read on-chain as above; loadBps is the MM's signed actor choice.
+    const premiumB = cvamm.pathBPremium(fairPremium, quote.loadBps, maxIL)
+    //             = ceil(fairPremium · (1 + loadBps/BPS)), capped at the SAME MaxIL.
+    ```
+  </Tab>
+</Tabs>
+
+This is the engine behind `lp.previewPremium`, `mm.getMarketPricing`, `mm.getPoolLoadToBeat`, and `data.getCurrentLoadSurface` — every one of them reads the Φ-sum on-chain and finishes the load via the port. The pool's geometry-independent "load to beat" — the floor an MM must undercut — is the same `totalLoadWad` evaluated geometry-free.
+
+<Tip>
+The **load percentage is geometry-independent** — `totalLoadWad` takes only `σ_ref`, `util`, `conc`. Only the **dollar** premium scales with the position's `a`/`b`/`maxIL` (through `fairPremium`). This is why `getCurrentLoadSurface` can return a meaningful load for a market even with no specific position geometry — it falls back to a neutral reference geometry for the dollar figure while the load % is exact.
+</Tip>
+
+---
+
+## `resolveMarket` / `computeMarketId` — recovering the market off-chain
+
+The foundation re-exports two more helpers in the same spirit as the load port: deterministic functions that reproduce an exact on-chain derivation a client can't otherwise read. A `SwapRecord` carries **no `marketId`** — it is kept compact on-chain — so the SDK recovers it by reproducing the contract's `_marketIdForSwap`.
+
+<ResponseField name="computeMarketId(token0, token1, fee, durationSeconds)" type="Hex">
+The standalone, pure derivation — the exact `keccak256(abi.encodePacked(...))` the contract uses at registration:
+
+$$
+\text{marketId} = \text{keccak256}\bigl(\text{abi.encodePacked}(\text{token0}, \text{token1}, \text{fee}, \text{uint32}(\text{durationSeconds}))\bigr)
+$$
+
+```ts
+import { computeMarketId } from '@inflexion/sdk'
+
+const marketId = computeMarketId(token0, token1, fee, 604_800) // 7d in seconds
+```
+</ResponseField>
+
+<ResponseField name="resolveMarket(client, swap, opts?)" type="Promise<ResolvedMarket>">
+The async recovery from a decoded swap record. It reads `NPM.positions(swap.tokenId)` for `(token0, token1, fee)`, derives `durationSeconds = expiry − createdAt`, computes the `marketId`, and reads back `InflexionCore.markets(marketId)` for the config.
+
+<Expandable title="ResolvedMarket">
+<ResponseField name="marketId" type="Hex">The recovered market id.</ResponseField>
+<ResponseField name="config" type="MarketConfig">The decoded `markets(marketId)` config.</ResponseField>
+<ResponseField name="token0 / token1" type="0x${string}">The pool tokens read from the position (the marketId pre-image).</ResponseField>
+<ResponseField name="fee" type="number">The pool fee tier.</ResponseField>
+<ResponseField name="durationSeconds" type="number">`expiry − createdAt`.</ResponseField>
+</Expandable>
+
+```ts
+import { resolveMarket } from '@inflexion/sdk'
+
+// swap: a decoded SwapRecord (carries tokenId, expiry, createdAt — but no marketId)
+const { marketId, config, durationSeconds } = await resolveMarket(publicClient, swap)
+```
+</ResponseField>
+
+<Note>
+`computeMarketId` is itself parity-locked against the contract derivation in `marketid.parity.test.ts` — the same discipline as the load port. Reproducing an on-chain `keccak256` off-chain is safe only because it is pinned to the chain by a test, never guessed. Every LP/MM surface row that starts from a `swapId` uses `resolveMarket` to recover its market.
+</Note>
+
+---
+
+## The foundation re-exports, in one glance
+
+`@inflexion/sdk` re-exports the whole foundation flat — `addresses`, `abis`, `client`, `types`, `decode`, `resolveMarket`, the [quote helpers](/integrate/quote-signing) from `./quote.js` — plus the load math **namespaced** as `cvamm`:
+
+```ts
+import {
+  // flat foundation
+  core, stylus, libs, tokens, demo, chainlink, npm, CHAIN_ID, // addresses
+  resolveMarket, computeMarketId,                              // market recovery
+  // namespaced load port (avoids clobbering WAD / LoadParams / Regime)
+  cvamm,
+} from '@inflexion/sdk'
+```
+
+---
+
+## Summary
+
+- **One pricing implementation.** The Φ-sum is read on-chain and never reimplemented; only the deterministic load stack is mirrored off-chain.
+- **The duplication is forced, not a shortcut.** `CvammPricing` is delegatecall-only — there is no callable surface to read the load from, so a parity-locked port is the *only* way to preview a premium client-side.
+- **It cannot drift.** `math.parity.test.ts` asserts byte-equality with the deployed Solidity; divergence fails CI.
+- **It is permanent, not temporary.** The delegatecall-only property is permanent, so the mirror is too — and it is the *only* permitted duplication.
+- **I10 is structural.** The load clamp lives entirely upstream of `settle` and never touches `MaxIL` or [I1–I9](/security/invariants) — the [no-bad-debt guarantee](/concepts/no-bad-debt) is independent of the load math.
+
+<ClaimA />
+
+<CardGroup cols={2}>
+  <Card title="The Φ-sum fair value" icon="lock" href="/math/fair-value-phi-sum">
+    The on-chain closed form the port multiplies — read, never reimplemented.
+  </Card>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    The full derivation of baseLoad / utilSkew / dispSkew and the I10 clamp.
+  </Card>
+  <Card title="The pricing stack" icon="sitemap" href="/protocol/pricing-stack">
+    How fair value + load combine across the two rails.
+  </Card>
+  <Card title="marketId parity" icon="fingerprint" href="/integrate/marketid-parity">
+    The off-chain marketId derivation and its parity lock.
+  </Card>
+</CardGroup>

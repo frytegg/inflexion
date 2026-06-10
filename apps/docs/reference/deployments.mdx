@@ -1,0 +1,258 @@
+---
+title: "Deployment addresses"
+description: "The complete live Arbitrum Sepolia address registry — core, Stylus FairValueOracle, libraries, oracles, Uniswap, Chainlink feeds, the demo pair, and the on-chain create→settle lifecycle — sourced verbatim from the on-chain address registry."
+---
+
+Inflexion is live on **Arbitrum Sepolia** (`chainId 421614`), a full-fresh redeploy dated **2026-06-05**. Every address on this page is read out of a single source of truth — the per-network address registry — which the SDK loads at runtime and **hardcodes nothing**. The table below is auto-generated from that same registry via the shared `<AddressTable />` snippet, so the docs can never drift from the deployed reality.
+
+<Info>
+**One file, one truth.** The contracts, the SDK, the frontend, the engine, and these docs all resolve addresses through the per-network address registry. If you are integrating, read that registry rather than copy-pasting from here — it is the canonical source. See [Addresses & units](/sdk/addresses-units) for how the SDK consumes it.
+</Info>
+
+## The deployment metadata
+
+| Field | Value | Notes |
+| --- | --- | --- |
+| **Network** | Arbitrum Sepolia | testnet, no SLA |
+| **chainId** | `421614` | |
+| **Deploy block** | `274081134` | the subgraph `startBlock` — the on-chain moat dataset begins here |
+| **Deployed** | 2026-06-05 | full-fresh redeploy; replaced the 2026-06-03 stack |
+| **Deployer / treasury** | `0x96455C9b00D530BD0629b71B674298440328b1Dd` | one EOA on this testnet |
+| **Numéraire** | `dUSDC`, **6 decimals** | all premiums, MaxIL, V0, payouts are 6-dec raw integers |
+
+<Note>
+**Why a fresh redeploy on 2026-06-05?** The Stylus `FairValueOracle` carries a **set-once `init()`** that binds it to one `VolOracle`. The prior FVO had already been `init()`-bound to the old VolOracle, so reusing it would have orphaned the new vol's `σ_ref`. The clean fix was to deploy a fresh FVO and `init()` it to the fresh VolOracle — which in turn meant a full-fresh stack so every contract points at the right neighbour. The same redeploy lowered `optimizer_runs` to 1500 and extracted the public libraries as delegatecall code, bringing `InflexionCore` to **23,934 B — under the 24,576 B EIP-170 limit**.
+</Note>
+
+## The live registry
+
+<AddressTable />
+
+<Tip>
+Every contract above is **immutable** — there is no upgradability and no admin path to redirect a vault's `core` after the one-shot `setCore` + `freezeCore` wiring. See [Immutability & custody](/security/immutability-custody) for the freeze pattern.
+</Tip>
+
+## How the addresses fit together
+
+<CardGroup cols={2}>
+  <Card title="Settlement core" icon="gears">
+    `InflexionCore` is the state machine and EIP-712 `verifyingContract`. It enforces invariants [I1–I10](/security/invariants) and runs strict-CEI settlement. Both rails feed into its single `settle` path.
+  </Card>
+  <Card title="The production pricer" icon="microchip">
+    The Stylus `FairValueOracle` publishes the exact closed-form [Φ-sum](/math/fair-value-phi-sum) on-chain — machine-precise to ~6.7×10⁻¹⁵. Never reimplemented off-chain.
+  </Card>
+  <Card title="Two collateral homes" icon="vault">
+    `ConvexityVault` is the dual-tranche pooled underwriter for [Path A](/protocol/path-a-cvamm); `UnderwriterVault` is per-MM collateral for [Path B](/protocol/path-b-mm). `ILVault` holds the LP's position NFT.
+  </Card>
+  <Card title="Price & vol oracles" icon="chart-line">
+    `OracleManager` anchors entry/settlement price to Chainlink with sequencer, staleness, and lone-spike gates. `VolOracle` maintains `σ_ref`. See [Oracles](/protocol/oracles).
+  </Card>
+</CardGroup>
+
+### Core protocol (Solidity stack)
+
+These are the on-chain contracts under `deployment.core` in the registry.
+
+| Contract | Role |
+| --- | --- |
+| **InflexionCore** | State machine. `createSwapPathA` / `createSwap` (Path B) / `createSwapRouted`; enforces I1–I10; CEI settlement; the EIP-712 `verifyingContract` for signed quotes. |
+| **OracleManager** | Chainlink-anchored entry/settlement price + sequencer + staleness + lone-spike + advisory Uniswap-TWAP. `getPrice` (entry) / `getSettlementPrice` (settle). Reverts on stale feed / sequencer down. |
+| **VolOracle** | `σ_ref = max(σ_short, σ_long, floor)` — a poke-based, time-aware EWMA of Chainlink-tick log-returns. Never raw realized σ. |
+| **ILMath** | **Production** settle-path math (Solidity). `computeMaxIL` / `computeIL` / `getAmountsForLiquidity` — pure Q64.96 fixed point. |
+| **ILVault** | ERC-721 custody of the LP's Uniswap v3 position NFT during an active swap; `claimFees` passthrough to the registered LP. |
+| **UnderwriterVault** | Per-MM collateral home for **Path B** (`deposited` / `locked` / `available`). `lockCollateral` / `releaseAndDistribute` (onlyCore). |
+| **ConvexityVault** | The cvAMM pooled underwriter for **Path A**. USDC ERC-4626, **dual-tranche SENIOR/JUNIOR from launch**. One per pair, backs all 9 markets with fungible capital. |
+| **Treasury** | Protocol treasury — takes the 1% premium cut. Same EOA as the deployer on this testnet. |
+
+### The Stylus FairValueOracle (the production fair-value pricer)
+
+| Field | Value |
+| --- | --- |
+| **Address** | `0x98a6aa75108b70fc0794bc3b87efe0ae99d5d52c` |
+| **Activation tx** | `0x8fc48dc62c0a99ad636301a008fba5bbd02e84e85d6abb373aa2767572d55a6c` |
+| **Runtime size** | `21702` bytes |
+
+This is **production** — the exact closed-form `fairRate` Φ-sum that yields `FairPremium = fairRate · MaxIL`, machine-precise to ≤ 1e-12 (≈ 6.7×10⁻¹⁵). It exposes `fairRate` / `fairRateFromPrices` / `fairPremium` / `volOracle`.
+
+<Warning>
+**The Φ-sum is NEVER reimplemented off-chain.** Stylus bans WASM floating point at activation, so every transcendental (erf/Φ, exp, ln, sqrt) is **integer fixed point** — 1e24 internal, WAD 1e18 ABI. The Solidity `FairValueOracle` reference implementation exists **only** as a revm-testable CI cross-check (Φ via Abramowitz–Stegun, ~1e-7), **not** a second production oracle. The SDK reads the on-chain FairPremium and never approximates it — see [Fair value](/concepts/fair-value).
+</Warning>
+
+### Deployed Solidity libraries (delegatecall-only)
+
+Auto-deployed and linked during the deploy broadcast. Extracting these as public-library delegatecall code is part of what brought `InflexionCore` back under the EIP-170 limit.
+
+| Library | Address | Role |
+| --- | --- | --- |
+| **TickMath** | `0xbf02bbc82e0fb1a4b9828bb90fc9dd9e97578965` | tick → sqrtPriceX96 (pure). |
+| **CvammPricing** | `0x4a053d29a55a64172140f9ebbc27c321c0ba2b53` | The Path-A load stack — `totalLoadWad` / `loadComponents` (base/util/disp/total). |
+| **SwapMath** | `0xf7be9745b6768d06a18c386c6db5c8cb065ba314` | Entry token amounts + oracle→sqrtP conversion (pure). |
+| **QuoteVerification** | `0x74819eed322f3e1a2dc10bb0d3cae50078d90807` | EIP-712 quote hashing / signature check. |
+
+<Warning>
+**Limitation → Why → Mitigation.** A direct `eth_call` to any of these deployed libraries **reverts**. **Why:** Solidity guards deployed library functions to be **delegatecall-only**, so they cannot be called as standalone contracts. **Mitigation:** the SDK never reads them directly — it keeps a **parity-locked TypeScript mirror** of the *load* math instead. The `fairRate` Φ-sum is the exception: it is always read from the on-chain Stylus oracle, never mirrored. See [marketId parity](/integrate/marketid-parity) and [the cvAMM port](/sdk/cvamm-port).
+</Warning>
+
+### Oracles & external integrations
+
+The Chainlink USD feeds (8-decimal) and Uniswap v3 deployment were verified against canonical directories.
+
+<Tabs>
+  <Tab title="Chainlink feeds (8 dec)">
+    | Feed | Address | Heartbeat (testnet) |
+    | --- | --- | --- |
+    | ETH/USD | `0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165` | ~120s |
+    | BTC/USD | `0x56a43EB56Da12C0dc1D972ACb089c06a5dEF8e69` | ~120s |
+    | ARB/USD | `0xD1092a65338d049DB68D7Be6bD89d17a0929945e` | 86,400s |
+    | USDC/USD | `0x0153002d20B96532C639313c2d54c3dA09109309` | 86,400s |
+    | Sequencer Uptime | **`null`** (none on Sepolia) | — |
+
+    Verified 2026-05-28 against the Chainlink reference-data directory. Testnet feeds tick faster (~120s) than mainnet (86,400s), but `OracleManager.MAX_STALENESS` is set to **90,000s** so the same value works on either chain.
+  </Tab>
+  <Tab title="Uniswap v3">
+    | Contract | Address |
+    | --- | --- |
+    | v3 Factory | `0x248AB79Bbb9bC29bB72f7Cd42F17e054Fc40188e` |
+    | NonfungiblePositionManager | `0x6b2937Bde17889EDCf8fbD8dE31C3C2a70Bc4d65` |
+    | SwapRouter02 | `0x101F443B4d1b059569D643917553c771E1b9663E` |
+    | QuoterV2 | `0x2779a0CC1c3e0E44D2542EC3e79e3864Ae93Ef0B` |
+
+    Verified 2026-05-28, re-confirmed 2026-06-03. The protocol's NFT custody (`ILVault`) reads `positions(tokenId)` from this NPM.
+  </Tab>
+</Tabs>
+
+<Warning>
+**Limitation → Why → Mitigation.** There is **no L2 Sequencer Uptime Feed** on Arbitrum Sepolia (`sequencerUptime: null`). **Why:** Chainlink does not publish a sequencer feed on this developer testnet — it has no SLA. **Mitigation:** `OracleManager` treats `sequencerFeed == address(0)` as "skip the sequencer check" — safe on testnet — **but a real sequencer feed MUST be set before any mainnet deploy** (tracked in [status & caveats](/reference/status-caveats)).
+</Warning>
+
+## The demo pair, pool & LP position
+
+There is no pre-seeded WETH/USDC v3 pool with material liquidity on Arbitrum Sepolia, so the demo deploys its own **numéraire-correct mock pair**, ordered so that `dWETH < dUSDC` by address ⇒ `token0 = dWETH`, `token1 = dUSDC = numéraire`. `dWETH` is oracle-priced via the **real Chainlink ETH/USD feed**, so the demo moves with live ETH.
+
+| Item | Value |
+| --- | --- |
+| **dWETH** (demo volatile token, token0) | `0xA8C07E1B245B346c5D1910c5055Efe67bF9E7D1D`, 18 dec |
+| **dUSDC** (demo numéraire, token1) | `0xB89630Dc6e020ae2A84aE72b7d9EEDBDfb2C544d`, 6 dec |
+| **Pool** (dWETH/dUSDC, fee 500) | `0xfE1Eb4D5796a350B13852F822B3E6a9fDbb858a5` |
+| Seeded unprotected LP position (for previews) | tokenId `3218`, ~\$100k |
+| Demo market id (fee 500, 7d) | `0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69` |
+| smokeTestSwapId | `1` (the Path-A lifecycle swap) |
+
+<Note>
+The deploy registers **9 markets = 3 fee tiers × 3 durations** for the dWETH/dUSDC pair (`500`/`3000`/`10000` × `7d`/`30d`/`90d`), all underwritten by the **one** `ConvexityVault`. The `marketId` is `keccak256(abi.encodePacked(token0, token1, fee, durationSeconds))`. See the full [markets grid](/reference/markets-grid) and how the id is derived identically on-chain and in the SDK ([marketId parity](/integrate/marketid-parity)).
+</Note>
+
+## The live create→settle lifecycle (2026-06-05)
+
+A **live, no-time-warp** create→settle ran on a short 300s fee-500 market `0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2`, settled at the Chainlink round bracketing each expiry. All amounts are in USD (`dUSDC`, 6 dec). The fresh demo MM `0xe632B215120dD43A719458487bA3e03638fec953` deposited 5,000 `dUSDC` into `UnderwriterVault`, and its **own** collateral paid the Path-B settlement.
+
+<Note>
+The 300s lifecycle market is a **separate, extra** market used only for this live create→settle proof. It is **not** one of the 9 production markets.
+</Note>
+
+<Tabs>
+  <Tab title="Path A — cvAMM pool (swapId 1)">
+    LP tokenId `3220`, settled from the `ConvexityVault`:
+
+    | Field | Value | Meaning |
+    | --- | --- | --- |
+    | V0 | `270,531.28` | position value (numéraire) at entry |
+    | MaxIL | `1,669.24` | collateral locked = the cap |
+    | premium | `9.70` | what the LP paid |
+    | premium % of MaxIL | `0.58%` | the convexity premium is a tiny fraction of MaxIL |
+    | settled realized IL | `148.64` | actual IL at expiry |
+    | settled payout | `148.64` | paid to the LP, from the ConvexityVault (below the cap, so no truncation) |
+
+    With `MaxIL ≈ 0.62%` of V0 and a premium of just `0.58%` of MaxIL, the LP paid **\$9.70 to cap \$1,669.24 of in-range IL** — the convexity-hedge signature. See the [worked example](/math/worked-example).
+  </Tab>
+  <Tab title="Path B — routed to MM (swapId 2)">
+    LP tokenId `3221`, settled from the **MM's own** `UnderwriterVault` collateral:
+
+    | Field | Value | Meaning |
+    | --- | --- | --- |
+    | premium A (cvAMM) | `13.80` | the pool's price |
+    | premium B (MM) | `8.93` | the MM's price |
+    | chosen path | **B (MM)** | `createSwapRouted` picked the MM because it **strictly** beat the pool |
+    | MM loadBps | `1000` (10%) | MM's load over FairPremium |
+    | MaxIL | `3,215.65` | MM collateral locked |
+    | settled realized IL | `245.66` | |
+    | settled payout | `245.66` | paid from the **MM's OWN** collateral |
+
+    This is the on-chain proof of the two rails: Path A is always-on and signature-free; Path B wins the route **only** when it genuinely undercuts the capped pool price, and the MM's own collateral settles it. See [routing](/protocol/routing) and [the two rails](/concepts/two-rails).
+  </Tab>
+</Tabs>
+
+The math at settlement is **identical regardless of which rail opened the swap** — `payout = min(realized_IL, MaxIL)`, paid from the counterparty's own collateral, with the LP receiving `payout` and the counterparty keeping the residual `collateral − payout`. The lifecycle above demonstrates the trust model end to end: protocol funds are never at stake.
+
+## Subgraph status
+
+<Maturity />
+
+The subgraph deploy is **pending**, and the `_deployBlock` `274081134` is its `startBlock` — the on-chain moat dataset begins at exactly this redeploy.
+
+<Warning>
+**Limitation → Why → Mitigation.** History and precise MM fill attribution are not yet queryable via a subgraph. **Why:** the `QuoteFilled` / `SwapPriced` events and `CvammPricing.loadComponents()` are implemented but await the subgraph deploy; the contract size that previously blocked the redeploy was already resolved on 2026-06-05 (`InflexionCore` is 23,934 B, under EIP-170). **Mitigation:** the SDK **degrades gracefully** — history and fill attribution return a typed pending state (`'rich-events-absent'` / `'no-history-source'`) rather than throwing. See [degradation](/sdk/degradation) and [the data moat's state & limits](/moat/state-and-limits).
+</Warning>
+
+## Mainnet & migration references
+
+The values below are the **mainnet Arbitrum One** references cited in the spec for the eventual production deploy. They are **not** part of the live testnet registry — do not conflate them with the Sepolia addresses above.
+
+<AccordionGroup>
+  <Accordion title="Arbitrum One Chainlink feeds (mainnet, for migration)">
+    | Feed | Address |
+    | --- | --- |
+    | ETH/USD | `0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612` |
+    | BTC/USD | `0x6ce185539ad4fdaecd7274c0b0c9fc4add7c4e76` |
+    | ARB/USD | `0xb2A824043730FE05F3Da2efaFa1CBbe83fa548D7` |
+    | USDC/USD | `0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3` |
+    | Sequencer Uptime | `0xFdB631F5EE196F0ed6FAa767959853A9F217697D` |
+
+    The sequencer feed above is exactly the value that **must be wired** before any mainnet deploy (it is `null` on Sepolia).
+  </Accordion>
+  <Accordion title="Arbitrum One Uniswap v3 + canonical tokens (mainnet, for migration)">
+    | Contract | Address |
+    | --- | --- |
+    | NonfungiblePositionManager | `0xC36442b4a4522E871399CD717aBDD847Ab11FE88` |
+    | v3 Factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` |
+    | WETH | `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1` |
+    | native USDC | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
+
+    On mainnet the production markets would run on the **real** WETH/native-USDC pool — the demo mock pair (`dWETH`/`dUSDC`) exists only because no material-liquidity testnet pool is available on Sepolia.
+  </Accordion>
+  <Accordion title="Canonical Arbitrum Sepolia tokens (not used by the live markets)">
+    These real testnet tokens exist but are **not** what the live markets use — the demo deploys its own mock pair instead (see above), because there is no pre-seeded WETH/USDC v3 pool with material liquidity on Sepolia.
+
+    - WETH `0x980B62Da83eFf3D4576C647993b0c1D7faf17c73` (18 dec)
+    - USDC (Circle native testnet) `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` (6 dec)
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+**Mainnet is roadmap.** The live deployment is the Arbitrum Sepolia testnet stack. A mainnet deploy is a future migration — it requires, at minimum, wiring the sequencer-uptime feed, the real Uniswap pool, and native USDC, plus the standard production checklist. Track open items in [status & caveats](/reference/status-caveats).
+</Info>
+
+---
+
+## Related
+
+<CardGroup cols={3}>
+  <Card title="Decimals & units" icon="ruler" href="/reference/decimals-units">
+    dUSDC = 6, dWETH = 18, feeds = 8, WAD = 1e18 — the numéraire conventions.
+  </Card>
+  <Card title="Markets grid" icon="table-cells" href="/reference/markets-grid">
+    The 9 markets, their ids, and the marketId derivation.
+  </Card>
+  <Card title="SDK addresses & units" icon="cube" href="/sdk/addresses-units">
+    How the SDK loads this registry and resolves contracts.
+  </Card>
+  <Card title="Oracles" icon="satellite-dish" href="/protocol/oracles">
+    OracleManager + VolOracle: Chainlink anchoring and σ_ref.
+  </Card>
+  <Card title="The invariants" icon="shield-check" href="/security/invariants">
+    I1–I10, what each guarantees, and where it is enforced.
+  </Card>
+  <Card title="Status & caveats" icon="triangle-exclamation" href="/reference/status-caveats">
+    Every pending state, its why, and its path forward.
+  </Card>
+</CardGroup>

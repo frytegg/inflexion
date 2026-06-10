@@ -1,0 +1,335 @@
+---
+title: "The pricing stack (3 layers)"
+description: "How Inflexion turns one position's pure geometry into a charged premium: MaxIL (geometry) → fairRate·MaxIL (the exact Φ-sum) → load + the I10 clamp. Both rails price off the same fair value."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+Every premium Inflexion charges is built in **three layers that are kept separate in
+the code**. The separation is not
+cosmetic — each layer has a different author, a different invariant, and a different
+degree of freedom:
+
+1. **Layer 1 — MaxIL.** Pure geometry. The collateral unit. No vol, no time, no calibration.
+2. **Layer 2 — `fairRate` · MaxIL = FairPremium.** The exact closed-form Φ-sum. All of the
+   vol/time dependence lives here, and only here.
+3. **Layer 3 — the load/skew stack + the I10 clamp.** The volatility-risk premium an
+   underwriter charges over fair value, mechanically capped so it can never run away.
+
+The headline property: **both rails price off the *same* FairPremium.** The cvAMM pool
+(Path A) and a market maker (Path B) differ only in how they apply Layer 3 — never in
+Layers 1 or 2.
+
+<Note>
+This page is the wiring diagram. The deep derivations live on their own pages:
+[the IL formula](/math/il-formula), [the MaxIL derivation](/math/maxil-derivation),
+[the Phi-sum](/math/fair-value-phi-sum), [σ_ref](/math/sigma-ref) and
+[the load stack](/math/load-stack). For the end-to-end create→settle path see
+[the lifecycle](/protocol/lifecycle); for the two rails see [the two rails](/concepts/two-rails).
+</Note>
+
+## The stack at a glance
+
+| Layer | What it produces | Author / source | On-chain home | Vol/time dependence | Degrees of freedom |
+|---|---|---|---|---|---|
+| **1 — MaxIL** | the collateral unit (USD) | pure geometry $(P_a, P_b, L, P_0)$ | `ILMath.computeMaxIL` | **none** — identical across all three durations | **none** — exact |
+| **2 — FairPremium** | the risk-neutral fair price (USD) | exact closed-form Φ-sum | `FairValueOracle.fairPremium` | **all of it** — S-curve in $\sigma^2 T$ | **none** — exact closed form, only stochastic input is $\sigma_{\text{ref}}$ |
+| **3 — load + I10** | the charged premium (USD) | the volatility-risk premium stack | `CvammPricing` (Path A) / `_pathBPremiumFromFair` (Path B) | indirect (load is σ-regime keyed) | **bounded** — every primitive from the calibrated risk-parameter set, hard-clamped at `maxLoad` |
+
+The pipeline, in one line of algebra:
+
+$$
+\underbrace{\text{MaxIL}}_{\text{Layer 1}}
+\;\xrightarrow{\;\times\; \text{fairRate}\;}\;
+\underbrace{\text{FairPremium}}_{\text{Layer 2}}
+\;\xrightarrow{\;\times\,(1+\text{totalLoad})\;}\;
+\underbrace{\text{premium}}_{\text{Layer 3}}
+$$
+
+with `totalLoad` hard-capped at `maxLoad` (invariant **I10**) and the whole thing additionally
+capped at MaxIL itself — you can never be charged more than the maximum possible payout.
+
+---
+
+## Layer 1 — MaxIL (geometry)
+
+MaxIL is the **collateral unit** and the **coverage cap** at once — it is computed once at
+creation from pure geometry and never moves (`ILMath.computeMaxIL`).
+In-range IL is convex on $[P_a, P_b]$ (the hold value is affine in price, the LP value is
+strictly concave), so its maximum *while price stays in range* sits at a boundary:
+
+$$
+\text{MaxIL} \;=\; \max\bigl(\,IL(P_a),\; IL(P_b)\,\bigr)
+$$
+
+Two properties make this the right base for everything above it:
+
+- **It carries zero vol/time dependence.** The same position has the **same MaxIL for the
+  7-day, 30-day and 90-day markets** — which is precisely why the cvAMM publishes three
+  *different prices* for one position, all backed by the *same* collateral.
+- **It makes positions fungible.** Because MaxIL is pure geometry, frozen at creation, and
+  L-independent in the fair-rate sense, an underwriter quotes per-*market*, never per-NFT.
+  That is the whole reason the [SignedQuote carries no `tokenId`](/concepts/maxil).
+
+<Warning>
+**MaxIL is a collateral / normalization unit — *not* a risk metric.** Two positions with
+identical MaxIL can carry very different risk (a position bunched at one edge is far more
+likely to realize its MaxIL than a symmetric one). The fix is in Layer 2: both rails price
+$\mathbb{E}_Q[\min(IL,\text{MaxIL})]/\text{MaxIL}$ for the **specific geometry**, so
+distance-to-edge is fully reflected in `fairRate`, not assumed away.
+</Warning>
+
+Reference magnitudes for geometric-symmetric ranges:
+
+| Range | MaxIL as % of $V_0$ |
+|---|---|
+| ±5% | ≈ 1.27% |
+| ±10% | ≈ 2.56% |
+| ±20% | ≈ 5.23% |
+| ±50% | ≈ 13.76% |
+
+Full treatment: [the MaxIL derivation](/math/maxil-derivation) and [MaxIL — the cap and the unit of risk](/concepts/maxil).
+
+---
+
+## Layer 2 — fairRate and FairPremium (the Φ-sum)
+
+Layer 2 turns the geometric unit into a price under the risk-neutral measure:
+
+$$
+\text{fairRate} \;=\; \frac{\mathbb{E}_Q\!\left[\min(IL,\ \text{MaxIL})\right]}{\text{MaxIL}}
+\qquad\qquad
+\text{FairPremium} \;=\; \text{fairRate}\cdot\text{MaxIL}
+$$
+
+`fairRate` is the fraction of MaxIL the capped claim is worth — an **S-curve in $\sigma^2 T$**:
+near 0 for calm/short markets, rising toward 1 for violent/long ones
+(`FairValueOracle.fairPremium`).
+
+<Info>
+**`fairRate` carries ALL of the vol/time dependence; MaxIL carries none.** This clean split
+is what lets one geometric unit (Layer 1) back three different prices (one per duration) — the
+duration shows up only through $T$ inside `fairRate`.
+</Info>
+
+### Why it is an exact closed form, not a fitted surface
+
+The capped v3 payoff $\min(IL,\text{MaxIL})$ is **piecewise** in the terminal price $P_T$:
+linear below $P_a$, a convex $c_1 P - 2\sqrt{P} + c_0$ arm inside $[P_a, P_b]$, and linear
+above $P_b$. Each arm, integrated against the lognormal density of $P_T$, is a standard
+interval moment that closes in the normal CDF $\Phi$. So `FairPremium` is a finite **Φ-sum
+(~6–10 terms, Black–Scholes class)** — no Monte Carlo, no lookup table, no calibrated
+coefficients — evaluated live per quote.
+
+The Φ-sum runs in normalized units ($P_0=1,\ L=1$), so it depends only on $a=P_a/P_0$,
+$b=P_b/P_0$, $\sigma_{\text{ref}}$ and $T$ — it is **L-independent**. **The only stochastic input is $\sigma_{\text{ref}}$**,
+the conservative vol estimate (see [σ_ref](/math/sigma-ref)).
+
+<Warning>
+**The Φ-sum is NEVER reimplemented off-chain.** The production pricer is
+the **Stylus `FairValueOracle`** (machine-precise to ~6.7×10⁻¹⁵); the Solidity
+`FairValueOracle` is a revm-testable CI cross-check ($\Phi$ via Abramowitz–Stegun,
+~1e-7), **not** a second production oracle. Off-chain SDK
+code reads the published value — it never recomputes it. See [the address table](/reference/deployments).
+</Warning>
+
+Full treatment: [the Phi-sum](/math/fair-value-phi-sum), [on-chain published fair value](/concepts/fair-value).
+
+---
+
+## Layer 3 — the load stack and the I10 clamp
+
+FairPremium is what the claim is *worth*; nobody underwrites at fair value. Layer 3 is the
+**volatility-risk premium** — the load an underwriter charges over fair value for taking
+short-gamma risk — plus the two skews that price scarcity and concentration. It is the only
+layer with discretion, so it is also the only layer that is **hard-clamped**.
+
+The cvAMM computes the full stack on-chain (`CvammPricing`):
+
+$$
+\text{premium} \;=\; \text{FairPremium}\cdot\bigl(1 + \text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}\bigr)
+$$
+
+clamped by invariant **I10**:
+
+$$
+\text{premium} \;\le\; \text{FairPremium}\cdot(1 + \text{maxLoad}) \qquad\text{by construction}
+$$
+
+### The three load terms
+
+<AccordionGroup>
+<Accordion title="baseLoad — the structural volatility-risk premium">
+
+The structural premium over fair value, keyed by the $\sigma_{\text{ref}}$ regime (calm /
+normal / stressed bands) — `CvammPricing.baseLoadWad`. It is
+motivated by the **lone-writer CVaR gap** (~91–100% of MaxIL for a single writer) that
+diversification collapses (~78.7% per-contract as the book grows): that gap is the pool's
+reason to exist.
+
+</Accordion>
+<Accordion title="util_skew(u) — scarcity pricing on capacity">
+
+With $u = \text{locked}/\text{total}$: flat below a knee, convex above, capped
+(`CvammPricing.utilSkewWad`). It rises as the pool nears full
+commitment, so marginal capacity is priced **up before over-commitment** — the same
+locked/free accounting wires directly into the [run defense](/protocol/vaults).
+
+</Accordion>
+<Accordion title="dispersion_skew(h) — single-pair concentration pricing">
+
+With $h$ = normalized coverage HHI (Herfindahl): the honest single-pair concentration
+analogue — many positions bunched at one edge all hit MaxIL together. Capped
+(`CvammPricing.dispSkewWad`). The HHI is computed **O(1)** from an
+incremental $\sum \text{lockedByMarket}^2$ accumulator (`ConvexityVault.concentrationWad`).
+
+</Accordion>
+</AccordionGroup>
+
+### The I10 clamp, exactly as coded
+
+The three terms are summed and then **clamped before** the premium is formed:
+
+$$
+\text{totalLoad} \;=\; \min\bigl(\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew},\; \text{maxLoad}\bigr)
+$$
+
+```solidity title="CvammPricing — totalLoadWad / premiumFromLoad"
+// totalLoad is capped at maxLoad — I10, by construction
+uint256 totalLoad = baseLoad + utilSkew + dispSkew;
+if (totalLoad > maxLoad) totalLoad = maxLoad;
+
+// premium rounds UP (F-#8): never under-charge by an integer-division wei
+premium = Math.ceilDiv(fairPremium * (WAD + totalLoad), WAD);
+```
+
+The premium **rounds up** (F-#8) so integer division can never hand out a free sliver of
+coverage. WAD scaling runs throughout: `1e18 = 1.0 = 100% load`, and `1 bps = 1e14 WAD`.
+Finally, **both paths additionally cap the charged premium at
+MaxIL** — "never charge more than the max possible payout".
+
+<Note>
+**I10 is orthogonal to I1 (no-bad-debt).** I10 is a deterministic, mechanical clamp in the
+PHASE-1 pricing/read step, strictly **upstream of `settle`**. It never touches the settlement
+core, the MaxIL formula, or any of I1–I9. The no-bad-debt proof is structural —
+$\text{collateral} = \text{MaxIL} \ge \text{payout}$ — and does not depend on the premium cap.
+See [the invariants](/security/invariants).
+</Note>
+
+---
+
+## Both rails, the same fair value
+
+This is the load-bearing symmetry of the whole pricing design: **Path A and Path B price off
+the identical FairPremium.** They diverge only in how Layer 3 is applied.
+
+<Tabs>
+<Tab title="Path A — cvAMM (pool)">
+
+The cvAMM computes the **entire Layer 3 stack on-chain** — baseLoad + util_skew +
+dispersion_skew, clamped by I10, capped at MaxIL (`_pricePathA`, `CvammPricing`).
+No signature, no validity clock. This is the **floor of liquidity** — it
+always quotes. See [Path A — the cvAMM](/protocol/path-a-cvamm).
+
+</Tab>
+<Tab title="Path B — market maker">
+
+The MM does **not** recompute fair value. Its [SignedQuote](/integrate/quote-signing) carries a
+single `loadBps`, and the contract derives:
+
+$$
+\text{premium} \;=\; \Bigl\lceil \text{FairPremium}\cdot\bigl(1 + \tfrac{\text{loadBps}}{10^4}\bigr) \Bigr\rceil
+$$
+
+capped at MaxIL, and requires `loadBps ≤ maxLoadBps` — **I10 on Path B**
+(`_pathBPremiumFromFair`).
+This is the **ceiling of price** — an MM only wins when its single load number genuinely beats
+the capped pool stack. See [Path B — the MM rail](/protocol/path-b-mm).
+
+</Tab>
+<Tab title="Routed — cheaper of the two">
+
+`createSwapRouted` pokes the vol oracle **once** and prices **both rails off the same
+FairPremium**, then routes to the strictly cheaper one — a tie
+resolves to Path A, and a bad/absent MM quote falls back to the pool instead of reverting. See
+[routing](/protocol/routing).
+
+</Tab>
+</Tabs>
+
+`maxLoad` is the rate; on-chain it is `maxLoadBps` (basis points). The same ceiling binds both
+rails, so neither the pool nor any MM can overcharge past `FairPremium · (1 + maxLoad)`.
+
+---
+
+## The "no PARTIAL primitive is hardcoded" rule
+
+Layer 3 is the only layer with tunable numbers, and **none of them are baked into the code.**
+The `baseLoad` regimes, both skew curves (knee / slope / power / cap), and `maxLoadBps` are all
+read from the calibrated risk-parameter set (the cvAMM block) via `LoadParams`,
+set by the owner through `InflexionCore.setLoadParams`.
+
+<Warning>
+**Limit → Why → Mitigation.**
+
+- **Limit:** Layer 3 has free parameters; a wrong value would mis-price the volatility-risk
+  premium.
+- **Why:** the correct load/skew/σ primitives are an *empirical* question answered by the
+  Monte Carlo quant model, not a constant a developer should guess. Hardcoding any of them is
+  the exact failure the external audit flagged.
+- **Mitigation:** every PARTIAL/load primitive flows from the calibrated risk-parameter set and is settable
+  on-chain; **nothing is hardcoded**. And note Layer 2 has *no* free
+  parameters at all — `fairRate` is an exact closed form with no calibrated coefficients, so
+  the only tunables sit behind the I10 clamp, where a mis-set value can cost depositors NAV but
+  **cannot** create LP bad debt.
+</Warning>
+
+A mis-set load is a **solvency-load** question, not a no-bad-debt question: a too-low load
+compresses pool NAV and the loss hits the [tranche waterfall](/concepts/tranches) junior-first
+— it can never violate the FULL no-bad-debt invariant, which is structural and
+oracle/parameter-independent.
+
+<ClaimA />
+
+---
+
+## A worked number (live, 2026-06-05)
+
+The fresh redeploy ran a real create→settle on a 300s market through the stack:
+
+| Field | Path A (swap #1) | Routed → Path B (swap #2) |
+|---|---|---|
+| Layer 1 — MaxIL | \$1,669.24 | \$3,215.65 |
+| Layer 3 — charged premium | \$9.70 (0.58% of MaxIL) | `premiumB_mm` \$8.93 vs `premiumA_cvamm` \$13.80 |
+| Routing outcome | pool (always-on floor) | MM strictly beat the pool (loadBps 1000) → chose Path B |
+| Realized IL | \$148.64 | \$245.66 |
+| Payout `min(IL, MaxIL)` | \$148.64 | \$245.66 |
+| Settled from | `ConvexityVault` | the MM's own collateral |
+
+Read it top-down: Layer 1 fixes the collateral and the cap; Layer 2 fixes what the claim is
+worth; Layer 3 sets what was charged — and on swap #2 the MM's single `loadBps` produced a
+premium (\$8.93) strictly below the pool's full clamped stack (\$13.80), so routing handed the
+LP the cheaper rail. Both swaps settled at exactly `min(realized_IL, MaxIL)` from the chosen
+counterparty's collateral.
+
+For the full numeric walk-through see [the worked example](/math/worked-example); for the
+live addresses see [deployments](/reference/deployments).
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+<Card title="MaxIL — the cap and the unit" icon="ruler-combined" href="/concepts/maxil">
+Layer 1 in depth: why pure geometry makes positions fungible.
+</Card>
+<Card title="The Φ-sum" icon="function" href="/math/fair-value-phi-sum">
+Layer 2 in depth: the exact closed-form fair value, arm by arm.
+</Card>
+<Card title="The load stack" icon="layer-group" href="/math/load-stack">
+Layer 3 in depth: baseLoad, both skews, and the I10 clamp.
+</Card>
+<Card title="The invariants" icon="shield-check" href="/security/invariants">
+Why I10 is orthogonal to no-bad-debt, and the other nine.
+</Card>
+</CardGroup>

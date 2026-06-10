@@ -1,0 +1,251 @@
+---
+title: "The data moat — the flow is the product"
+description: "Every fill records who paid what load, over a transparent realized-vol reference, for exactly which Uniswap v3 geometry, at which maturity — the first structured view into the microstructure of the DeFi LP volatility-risk premium. Five non-circular behavioral signals; data is the moat, not a paywall."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+The order flow Inflexion generates is a byproduct that is itself a product: **the
+first structured view into the microstructure of the DeFi LP volatility-risk
+premium**. No venue today prices the *in-range
+convexity of a specific Uniswap v3 range*. Inflexion does, on-chain — and every fill
+records **who paid what load, over a transparent realized-vol reference, for exactly
+which position geometry, at which maturity**. The aggregate
+of those choices is a dataset that **cannot exist anywhere else**, because no other
+system is the mechanism that creates it.
+
+<Info>
+**Data is the moat, not a paywall.** The data is built passively from day one and
+exposed as **free public APIs** (The Graph subgraph + REST). **Revenue is protocol
+fees; the data is the competitive moat**. The defensibility is not
+access control — it is that Inflexion is the only place this market clears, so it is
+the only place the dataset accrues.
+</Info>
+
+This page is the conceptual overview. For the rigorous, detailed
+treatment — the exact signal definitions, the on-chain events, the access map, and
+the state of the dataset — read the deep [`/moat/*`](/moat/thesis) group.
+
+## The flow as a product
+
+Inflexion is the **first venue that prices the in-range IL convexity of a *specific*
+Uniswap v3 range** ([the Phi-sum](/math/fair-value-phi-sum) reads the exact geometry
+from `positions(tokenId)`, never a band midpoint). Because the price is computed
+on-chain and the clearing record is emitted on-chain, every fill is a labeled data
+point in a market that has never had a price before:
+
+- **The load paid** — the markup over the protocol's [published fair value](/concepts/fair-value).
+- **Over a transparent reference** — the on-chain realized-vol oracle [σ_ref](/math/sigma-ref).
+- **For exactly which geometry** — the position's range and maturity (width ×
+  distance-to-edge × duration), recovered by decoding the swap's `tokenId`.
+
+That is the raw material of a **DeFi volatility-risk-premium surface for Uniswap
+LPs** — the first on-chain dataset of this
+market's microstructure. Quant funds, vol-arb desks, macro funds,
+DeFi risk desks, structured-product issuers, and data platforms (Nansen / DefiLlama /
+Kaiko / Dune) are the audience; they consume the free public API.
+
+## The circular idea we deliberately dropped
+
+The moat's credibility rests on **not being circular**. An earlier draft framed it as
+"infer implied vol by inverting `fairRate`" — that idea is **DROPPED as circular**.
+It is worth being explicit about *why*,
+because the rigor is the point.
+
+Every premium in the protocol is, by construction:
+
+$$
+\frac{\text{charged\_premium}}{\text{MaxIL}} \;=\; \text{fairRate}(\sigma_{\text{ref}}) \cdot (1 + \text{load})
+$$
+
+`fairRate` is the protocol's **own** published closed form (the
+[Phi-sum](/math/fair-value-phi-sum), computed by the Stylus `FairValueOracle`), and
+`σ_ref` is the protocol's **own** published realized-vol oracle. So inverting
+`fairRate` from the charged premium recovers nothing but **our own published `σ_ref`
+plus our own dealer [load stack](/math/load-stack)** — it tells an outside observer
+of our oracle exactly what they already knew. That is not a market-implied vol; it is
+a tautology.
+
+<Warning>
+**Do not present "invert `fairRate` to read implied vol" as a signal.**
+
+- **Limit:** the inversion is mechanically circular — `charged/MaxIL =
+  fairRate(σ_ref)·(1+load)` only returns the protocol's own `σ_ref` and load stack.
+- **Why:** both inputs are protocol-computed, not external. Inverting a function with
+  the function's own published inputs cannot yield independent information.
+- **Mitigation / path-forward:** reframe the entire moat around **actor behavior** —
+  the free *choices* the protocol does *not* compute (an MM's `loadBps`, an LP's
+  geometry/duration choice), measured **against** the transparent mechanical baseline,
+  never derived from it.
+</Warning>
+
+The decision rule, stated verbatim: a signal is
+non-circular **iff** its informative degrees of freedom come from the MM's `loadBps`
+or the LP's geometry/duration choice — measured against the transparent mechanical
+baseline, not derived from it. The full non-circularity table, and the worked proof,
+live on [circular vs behavioral](/moat/circular-vs-behavioral).
+
+## The five non-circular behavioral signals
+
+Each signal carries an explicit non-circularity verdict. One line each here; the
+exhaustive definitions, sourcing, and per-signal maturity are on
+[the five signals](/moat/five-signals).
+
+<CardGroup cols={1}>
+  <Card title="1 — Realized clearing LOAD over a transparent σ_ref" icon="gauge-high">
+    The convexity premium charged *above* the published realized-vol reference,
+    bucketed by width × distance-to-edge × duration. **Non-circular: PARTIAL — Path B
+    only.** The MM's `QuoteFilled.loadBps` is a free choice (the real signal); the
+    Path-A pool load is a deterministic function of state (the mechanical baseline,
+    kept as the price-to-beat, not sold as a signal).
+  </Card>
+  <Card title="2 — Pool-vs-MM load SPREAD + MM win-rate" icon="arrows-left-right">
+    `spread = poolLoad − mmLoad`, plus how often and how deeply MMs beat the pool — a
+    forward-vol read from MM behavior (a VIX-like signal for LP markets).
+    **Non-circular: YES — as a SPREAD.** The subtraction (behavioral MM load −
+    mechanical pool load) is exactly what removes the circular component.
+  </Card>
+  <Card title="3 — TERM STRUCTURE of convexity" icon="chart-line">
+    The slope of the MM's `loadBps` across the 7/30/90d markets for a fixed range —
+    the LP-convexity-premium term structure. **Non-circular: PARTIAL.** The Path-B
+    slope is behavioral; the Path-A load stack is **duration-independent by
+    construction**, so its "term structure" is a flat line — only the MM slope is a
+    signal.
+  </Card>
+  <Card title="4 — MONEYNESS / DEMAND SKEW by geometry" icon="chart-area">
+    Which positions LPs seek to protect (tight vs wide, centered vs near-edge) — an
+    LP-sentiment / leading-stress indicator. **Non-circular: PARTIAL.** Realized
+    demand (which `tokenId`/duration the LP brings) is an LP choice; the **latent**,
+    unfilled half is off-chain by design (it never reaches the chain — I7).
+  </Card>
+  <Card title="5 — NET CONVEXITY / GAMMA SUPPLY" icon="layer-group">
+    Total gamma being sold (pool + all MMs) and at what aggregate load — a real-time
+    gauge of DeFi appetite to sell vol, tradeable vs Deribit. **Non-circular: YES — as
+    a supply/quantity gauge.** It is a sum over actor positions (a real-world
+    quantity), not a price computation.
+  </Card>
+</CardGroup>
+
+### The shape every signal shares
+
+The reason the set is non-circular is structural. Four of the five separate a
+**behavioral** leg (an actor's free choice) from a **mechanical** baseline (the
+protocol's transparent price-to-beat), and the *subtraction* is what isolates the
+actor's view:
+
+```
+        BEHAVIORAL (the signal)              MECHANICAL (the baseline / price-to-beat)
+        ───────────────────────              ─────────────────────────────────────────
+Load:   QuoteFilled.loadBps  (Path B)   vs   SwapPriced.totalLoadWad  (Path A)
+Vol:    the MM's forward view (implied)  vs   SwapPriced.sigmaRefWad   (backward EWMA)
+Demand: which tokenId/duration LP picks  vs   (no mechanical counterpart — pure choice)
+```
+
+Path A is **never sold as a behavioral signal** — it is the transparent yardstick the
+behavioral MM load is measured against. Two corollaries recur everywhere: the mechanical pool load is kept as the *price-to-beat*,
+not a signal; and **cap-bound fills carry zero load information** and are excluded —
+when `premium == MaxIL` the load was truncated by the cap, which is why the on-chain
+`SwapPriced` event carries an explicit `cappedAtMaxIL` boolean.
+
+## Structures day-one, dynamics with volume
+
+This is the honest framing, and it is **mandatory** on every data-product surface.
+The distinction is between the *static structures* (shippable from launch) and the
+*full dynamics* (which require competition and flow).
+
+<Maturity />
+
+What that means concretely:
+
+| Layer | What it is | When it is real |
+| --- | --- | --- |
+| **On-chain moat events** | `SwapPriced` + `QuoteFilled` + the `CvammPricing.loadComponents` breakdown | **LIVE on-chain since the 2026-06-05 redeploy** — the dataset begins at the redeploy `startBlock` |
+| **Off-chain telemetry** | `DEMAND_LOG` (Signal 4 latent half) + `COMPETITION_LOG` (Signal 2 dynamic half) | **CAPTURING NOW** — from the first interaction logged (it is unreconstructable retroactively, so capturing it now is the entire point) |
+| **History / aggregate surfaces** | the subgraph that indexes the on-chain events into bucketed aggregates | **subgraph-pending** — see the limit below |
+
+<Warning>
+**The subgraph is built but not yet deployed — so history and aggregate surfaces
+degrade to a typed `pending` state.**
+
+- **Limit:** until `SUBGRAPH_URL` is set, every *history* / *aggregate* moat surface
+  returns a typed `pending` body — never an error.
+- **Why:** this is a **build gap, not a contract gap**. The contracts already emit
+  every event the moat needs; the subgraph passes its offline build and test suite but
+  is not yet pointed at a hosted endpoint.
+- **Mitigation / path-forward:** the *current* (non-historical) load surface is served
+  **live now** via the SDK multicall, and the off-chain telemetry halves are capturing
+  now. The pending body even embeds the exact future GraphQL query, so wiring the API
+  at the subgraph deploy is a one-line body swap (see
+  [degradation](/sdk/degradation)).
+</Warning>
+
+So the leading-indicator and forward-vol *dynamics* (the dispersion of Signal 1, the
+competitive distribution of Signal 2) need **≥3 competing MMs** and ~30–50
+fills/bucket — weeks-to-months at launch flow. The **structures** — the term-structure shape, the demand skew by
+geometry, the net-gamma surface — are queryable from launch. What ships first is the
+architecture and the initial view, not yet a mature dataset.
+
+## The honest limits (frame, never expose naked)
+
+These limits belong on every data-product page; each carries its *why* and its
+*mitigation*.
+
+<AccordionGroup>
+  <Accordion title="The clearing load is contaminated — trade the spread, not the level">
+    **Limit:** the load mixes the convexity premium with liquidity, smart-contract
+    risk, capital-lock cost, and inventory-skew premia.
+    **Why:** a single observed load is a sum of several premia, not a clean
+    vol-risk number.
+    **Mitigation:** compare the **spread** (MM − pool, vs implied/forward vol), not the
+    level — the subtraction cancels the shared contamination.
+  </Accordion>
+  <Accordion title="The implied-vol-inversion idea was dropped as circular">
+    **Limit:** "invert `fairRate` for an implied-vol surface" returns only the
+    protocol's own `σ_ref` + load.
+    **Why:** both inputs are protocol-computed (covered above).
+    **Mitigation:** the five signals are **behavioral** (MM `loadBps` + LP
+    geometry/duration), measured against the mechanical baseline.
+  </Accordion>
+  <Accordion title="Cap-bound fills carry zero load information">
+    **Limit:** when `premium == MaxIL`, the observed number is the cap, not the actor's
+    load.
+    **Why:** the load was truncated by the cap, destroying the signal.
+    **Mitigation:** filter `SwapPriced.cappedAtMaxIL == true` out of the load surfaces.
+  </Accordion>
+  <Accordion title="The signal is reflexive as the protocol scales">
+    **Limit:** the protocol's own pricing influences the surface it measures.
+    **Why:** this is intrinsic to being the venue that creates the market.
+    **Mitigation:** normal for any derivative market — read levels in context, and
+    lean on cross-venue spreads (vs Deribit).
+  </Accordion>
+  <Accordion title="Calibration lags at launch — and that is the moat">
+    **Limit:** there is no historical realized-IL dataset to calibrate against on
+    day one.
+    **Why:** one has never existed — no venue priced this risk before.
+    **Mitigation:** the protocol **is the mechanism that creates** the dataset. The
+    absence of a prior dataset is exactly why owning the flow is defensible.
+  </Accordion>
+</AccordionGroup>
+
+## Go deeper
+
+<CardGroup cols={2}>
+  <Card title="The moat thesis" icon="bullseye" href="/moat/thesis">
+    The full argument for why the flow is a defensible dataset, and who consumes it.
+  </Card>
+  <Card title="The five signals" icon="list-ol" href="/moat/five-signals">
+    Exhaustive per-signal definitions, sourcing, non-circularity verdicts, and maturity.
+  </Card>
+  <Card title="Circular vs behavioral" icon="scale-balanced" href="/moat/circular-vs-behavioral">
+    The non-circularity table and the worked proof of why inverting `fairRate` is circular.
+  </Card>
+  <Card title="On-chain primitives" icon="cube" href="/moat/primitives">
+    The two moat events (`SwapPriced`, `QuoteFilled`) and the load-breakdown library.
+  </Card>
+  <Card title="Telemetry pipeline" icon="satellite-dish" href="/moat/telemetry">
+    The off-chain `DEMAND_LOG` / `COMPETITION_LOG` sinks — the latent/dynamic halves.
+  </Card>
+  <Card title="State and limits" icon="circle-info" href="/moat/state-and-limits">
+    The exact state of the dataset and the full set of honest limits.
+  </Card>
+</CardGroup>

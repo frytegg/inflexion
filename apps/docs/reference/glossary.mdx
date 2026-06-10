@@ -1,0 +1,501 @@
+---
+title: "Glossary (exhaustive)"
+description: "Every Inflexion term with its why — product framing, the IL math, MaxIL, pricing and the load stack, the three pillars, the two paths, vaults and tranches, the SignedQuote, settlement, all ten invariants, the two forks, the five data-moat signals, the theory anchors, and the qualified no-bad-debt clause — each cross-linked to its deep page."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx';
+import ClaimB from '/snippets/claim-b-disclosure.mdx';
+import Maturity from '/snippets/maturity-disclaimer.mdx';
+
+This is the **exhaustive** glossary: every term, every struct field, every invariant, every constant — each with the *why* it exists and a link to its deep page. It is grouped by concept rather than strictly alphabetical, because almost every term only makes sense in the company of its neighbours.
+
+<Tip>
+If you just want the dozen symbols you need before the math (`P`, `MaxIL`, `fairRate`, the tranches), read [Concepts at a glance](/concepts/glossary-primer) first — it is the fast on-ramp. This page is the reference you come back to.
+</Tip>
+
+The groups, in order:
+
+<CardGroup cols={3}>
+  <Card title="Product framing" icon="compass" href="#product-framing" />
+  <Card title="The two values & IL math" icon="square-root-variable" href="#the-two-values-and-the-il-math" />
+  <Card title="MaxIL" icon="ruler" href="#maxil-the-cap-and-the-unit-of-risk" />
+  <Card title="Pricing & σ_ref" icon="tag" href="#pricing-fairvalue-fairrate-fairpremium-sigma-ref" />
+  <Card title="The load stack" icon="layer-group" href="#the-load-stack" />
+  <Card title="The three pillars" icon="columns" href="#the-three-pillars" />
+  <Card title="Paths & routing" icon="route" href="#paths-and-routing" />
+  <Card title="Vaults & tranches" icon="building-columns" href="#vaults-and-tranches" />
+  <Card title="The SignedQuote" icon="file-signature" href="#the-signed-quote-path-b-eip-712" />
+  <Card title="Settlement" icon="gavel" href="#settlement-and-the-swaprecord" />
+  <Card title="The ten invariants" icon="shield-halved" href="#the-ten-invariants" />
+  <Card title="The two forks" icon="code-fork" href="#the-two-forks" />
+  <Card title="The data moat" icon="database" href="#the-data-moat-five-behavioral-signals" />
+  <Card title="Theory anchors" icon="book" href="#theory-anchors" />
+  <Card title="The qualified clause" icon="circle-info" href="#the-qualified-no-bad-debt-clause" />
+</CardGroup>
+
+---
+
+## Product framing
+
+<ParamField path="Inflexion" type="the protocol">
+  A collateralized bilateral **derivatives market** on Arbitrum One (live on [Arbitrum Sepolia](/reference/deployments), chainId 421614) that lets Uniswap v3 LPs pay a fixed upfront premium to transfer the **in-range** impermanent-loss risk of a *specific* position to an underwriter, who posts collateral and is paid for taking the risk. At expiry the protocol pays the LP their realized IL, **capped at MaxIL**, trustlessly, from the underwriter's collateral.
+</ParamField>
+
+<ParamField path="In-range convexity hedge" type="what this is — NOT 'IL insurance'">
+  The product's true name. Entry **requires** $P_a \le P_0 \le P_b$ (an out-of-range position is rejected at creation), the payout is $\min(\text{realized\_IL},\,\text{MaxIL})$, and the cap is **load-bearing** for the no-bad-debt guarantee. Calling it "IL insurance" is both a demand risk (sophisticated LPs discount the truncated tail) and a reputational/regulatory one — every LP surface must show the payoff diagram so the cap never surprises an LP. Full treatment: [in-range convexity hedge](/concepts/in-range-convexity-hedge).
+</ParamField>
+
+<ParamField path="FULL mode" type="collateral model — the launch mode">
+  Fully collateralized: posted collateral $=$ MaxIL. This is the launch mode and the one carrying the no-bad-debt guarantee. See [collateral models](/protocol/collateral-models).
+</ParamField>
+
+<ParamField path="PARTIAL mode" type="collateral model — roadmap">
+  A future leverage dial where collateral $<$ MaxIL. Every PARTIAL parameter (floor curve, fee curve, liquidation buffer, circuit-breaker thresholds, exposure caps, first-loss size) **must** come from the calibrated risk-parameter set — hardcoding any of them is the exact failure the audit flagged. Not live.
+</ParamField>
+
+<ParamField path="European / FULL lifecycle" type="settlement timing">
+  Settlement happens **only at expiry** — no early exercise, no mark-to-market margin calls. See [the lifecycle](/protocol/lifecycle).
+</ParamField>
+
+---
+
+## The two values and the IL math
+
+<ParamField path="P" type="price of token0 in token1">
+  The price of the volatile asset in the numéraire — e.g. ETH in USDC. Everything downstream is a function of how `P` moves.
+</ParamField>
+
+<ParamField path="P0 (entry price)" type="oracle price at createSwap">
+  The oracle price at `createSwap` — **not** the LP's original mint price. The hedge covers IL accruing **from creation onward**; any IL borne before that stays the LP's (entry-snapshot semantics).
+</ParamField>
+
+<ParamField path="P_T (settlement price)" type="oracle price at expiry T">
+  The price at expiry `T`, pinned to the Chainlink round active at `T` to kill settle-timing games. `realized_IL` is measured at `P_T`. See [price pinning](/security/price-pinning).
+</ParamField>
+
+<ParamField path="Pa, Pb" type="range bounds (price)">
+  The position's lower (`Pa`) and upper (`Pb`) range bounds. Entry **requires** $P_a \le P_0 \le P_b$ — an out-of-range position reverts `PositionOutOfRange`. This is what makes the risk a clean *in-range* convexity exposure.
+</ParamField>
+
+<ParamField path="L (liquidity)" type="Uniswap v3 liquidity of the position">
+  **Read once at creation and STORED** in the `SwapRecord`; settlement uses the stored `L`, never re-read from the NFT — so an external `increaseLiquidity` cannot inflate the payout (invariant [I6](/security/invariants)).
+</ParamField>
+
+<ParamField path="V_hold(T)" type="value if the LP had just held the entry tokens">
+  $V_{\text{hold}} = \text{amount0}_{\text{entry}}\cdot P_T + \text{amount1}_{\text{entry}}$ — **affine** (a straight line) in `P_T`.
+</ParamField>
+
+<ParamField path="V_lp(T)" type="value of the LP position at P_T">
+  Three regimes: in-range (mixed), below `Pa` (all token0), above `Pb` (all token1). **Strictly concave in range** — and that concavity sitting under the straight `V_hold` line is exactly what makes IL convex (and therefore priceable like an option).
+</ParamField>
+
+The loss being hedged is the gap between them:
+
+$$
+\text{realized\_IL} \;=\; \max\!\big(0,\; V_{\text{hold}}(T) - V_{\text{lp}}(T)\big)
+$$
+
+<ParamField path="realized_IL" type="the loss being hedged">
+  Always computed as `V_hold > V_lp ? V_hold − V_lp : 0` — never an unchecked subtraction, so it can never go negative (invariant [I3](/security/invariants)). The swap covers IL accruing **from creation onward**; any IL borne before covering stays the LP's (entry-snapshot semantics). Full derivation: [the IL formula](/math/il-formula).
+</ParamField>
+
+<ParamField path="V0" type="position value in the numéraire at entry">
+  The position's value in token1 at entry, and the **capacity unit**: Path B capacity (`maxNotionalV0`) is denominated in `V0`, not collateral. A dust floor `MIN_POSITION_V0` rejects tiny positions.
+</ParamField>
+
+---
+
+## MaxIL — the cap *and* the unit of risk
+
+This is the single most important term in the protocol — see [the MaxIL concept page](/concepts/maxil) and [its derivation](/math/maxil-derivation) for the full treatment.
+
+<ParamField path="MaxIL" type="max in-range IL of this specific position">
+  $\text{MaxIL} = \max\big(\text{IL}(P_a),\, \text{IL}(P_b)\big)$ — the largest in-range IL the position can suffer. It is **pure geometry** (computable from `Pa, Pb, L, P0`), **frozen at creation**, **identical across all three durations**, and **L-independent in the fair-rate sense**. This is what makes positions **fungible to an underwriter within a market**.
+</ParamField>
+
+MaxIL wears two hats, both load-bearing:
+
+<CardGroup cols={2}>
+  <Card title="The load-bearing cap" icon="shield-halved">
+    $\text{covered\_payoff} = \min(\text{realized\_IL},\,\text{MaxIL})$, and $\text{collateral}_{\text{FULL}} = \text{MaxIL} \ge \text{payout}$ by construction — so FULL cannot produce bad debt on **any** price path. Structural and oracle-independent.
+  </Card>
+  <Card title="The normalization unit" icon="ruler">
+    Pricing as a `% of MaxIL` makes the underwriter's return-on-collateral **range-width-independent**, removing adverse selection against wide ranges and unlocking full depth. The key pricing innovation.
+  </Card>
+</CardGroup>
+
+<ParamField path="MaxIL is a normalization unit, NOT a risk metric" type="careful distinction">
+  Two positions with identical MaxIL can carry very different risk (distance-to-edge, delta). Both the pool and MMs price the *specific geometry*, so MaxIL alone never sets the price.
+</ParamField>
+
+<ParamField path="Why the cap is correct, not a defect" type="design rationale">
+  Beyond the range the LP is fully rotated into one asset; loss past that point is *directional* (foregone spot upside), not the *impermanent* loss being hedged. Capping is what keeps the product fully collateralized and trustless.
+</ParamField>
+
+<ParamField path="MM quote is PER-MARKET, never per-NFT" type="consequence of fungibility">
+  Because MaxIL makes positions fungible within a market, an MM quotes a load + a MaxIL-ratio band + capacity for a **whole market**, not a single NFT — the [SignedQuote](#the-signed-quote-path-b-eip-712) carries no `tokenId`.
+</ParamField>
+
+Reference magnitudes for a geometric-symmetric range:
+
+| Range | MaxIL as % of V0 |
+| --- | --- |
+| ±5%  | ≈ 1.27% |
+| ±10% | ≈ 2.56% |
+| ±20% | ≈ 5.23% |
+| ±50% | ≈ 13.76% |
+
+---
+
+## Pricing: FairValue, fairRate, FairPremium, σ_ref
+
+The full pricing stack lives at [pricing stack](/protocol/pricing-stack) and [fair value](/concepts/fair-value); the closed form is on [the Φ-sum page](/math/fair-value-phi-sum).
+
+<ParamField path="fairRate" type="fraction of MaxIL the claim is worth">
+  $\text{fairRate} = \mathbb{E}_{Q}[\min(\text{IL},\,\text{MaxIL})] \,/\, \text{MaxIL}$ — the fraction of MaxIL the claim is worth under the risk-neutral measure. An **S-curve in $\sigma^2 T$** (≈0 calm/short, →1 violent/long). It carries **all** the vol/time dependence; MaxIL carries none. **Exact closed form, no fitted coefficients**: the v3 payoff is piecewise (constant / linear-in-`P` / `√P` arms split by the two cap-crossing prices), each arm integrated against the GBM density of `P_T` is a normal-CDF interval moment, so the value is a finite **Φ-sum** (≈6–10 terms). **L-independent** — depends only on $a = P_a/P_0$, $b = P_b/P_0$, $\sigma_{\text{ref}}$, `T`.
+</ParamField>
+
+<ParamField path="FairPremium" type="fair value of the claim">
+  $\text{FairPremium} = \text{fairRate}\cdot\text{MaxIL}$ — **published on-chain** by the Stylus `FairValueOracle.fairPremium(token, a, b, duration, maxIL)`, which reads `σ_ref` via STATICCALL to the VolOracle.
+</ParamField>
+
+<ParamField path="The Φ-sum is NEVER reimplemented off-chain" type="hard rule">
+  A hard rule: the SDK reads the on-chain FairPremium and never approximates it. The only off-chain duplication permitted is the *load* math — never fairRate.
+</ParamField>
+
+<ParamField path="σ_ref (reference volatility)" type="the only stochastic input to fairRate">
+  $\sigma_{\text{ref}} = \max(\sigma_{\text{short}},\, \sigma_{\text{long}},\, \text{floor})$ — a poke-based, **time-aware EWMA of Chainlink-tick log-returns** over two horizons plus a hard floor, annualised over a 365-day year. **Never raw realized σ.** Deep page: [σ_ref](/math/sigma-ref).
+</ParamField>
+
+<AccordionGroup>
+  <Accordion title="Why max(...) and never raw realized σ — the mandatory caveat">
+    Realized vol *understates* risk right before a regime change — a stale-σ jump is exactly where the book bleeds. The conservative `max` cannot fall below the slower estimate or the floor, so it never collapses to a deceptively calm number just before a jump. This caveat is **mandatory**.
+  </Accordion>
+  <Accordion title="Why poke-based">
+    Chainlink rounds are irregular and reading deep history per quote is gas-prohibitive; a permissionless `poke` keeps an O(1) EWMA. `dt` is clamped to `[minSampleInterval, maxSampleInterval]`, and `poke` is a **no-op that emits no event when `dt < minSampleInterval`**.
+  </Accordion>
+  <Accordion title="sigmaComponents.binding — which input binds σ_ref">
+    `0` = short EWMA, `1` = long EWMA, `2` = floor. This is **distinct from the load *regime*** (calm/normal/stressed). At the fresh deploy σ_ref sits at the `0.5e18` floor (fairRate ≈ 0.847 at floor vol).
+  </Accordion>
+  <Accordion title="Scope — what σ_ref is load-bearing for">
+    σ_ref (and the FairValueOracle) is solvency-load-bearing for the **I10 cap and depositor solvency** — a wrong σ mis-prices the load and compresses NAV. It is **NOT** load-bearing for the FULL no-bad-debt invariant [I1](/security/invariants), which is structural and oracle-independent.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## The load stack
+
+The cvAMM's charge **over** fair value. The full curves live at [the load stack](/math/load-stack) and [pricing stack](/protocol/pricing-stack).
+
+$$
+\text{premium} = \text{FairPremium}\cdot\big(1 + \text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}\big)
+$$
+$$
+\text{hard-capped at}\quad \text{FairPremium}\cdot(1 + \text{maxLoad}) \quad\text{(invariant I10)}
+$$
+
+<ParamField path="load / totalLoad" type="the multiplier over FairPremium">
+  $\text{totalLoadWad} = \min(\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew},\ \text{maxLoad})$ — the [I10](/security/invariants) clamp.
+</ParamField>
+
+<ParamField path="baseLoad" type="the structural volatility-risk premium">
+  The structural premium over fair value, banded by σ_ref regime (calm/normal/stressed). Motivated by the **lone-writer CVaR gap**: a single position's CVaR95 sits at ~91–100% of MaxIL, so an uncharged writer is badly underpriced; diversification collapses the gap (~100% → 78.7% as N:1 → 100). The pool charges baseLoad — that gap is its reason to exist.
+</ParamField>
+
+<ParamField path="util_skew" type="utilization skew">
+  $\text{util\_skew}$ rises with $\text{locked}/(\text{locked} + \text{free})$ as the pool nears full commitment — flat below a knee, convex above, capped. Wires into the withdrawal-delay / locked-free run defense.
+</ParamField>
+
+<ParamField path="dispersion_skew" type="concentration skew">
+  Rises as outstanding coverage **clusters** in one width / moneyness / duration corner (the honest single-pair analogue of concentration risk — many bunched positions all hit MaxIL together in one move). A well-dispersed book is charged less.
+</ParamField>
+
+<ParamField path="Regime (calm / normal / stressed)" type="the load regime">
+  The *load* regime, derived from σ_ref vs the loadParams bands. **Distinct from `sigmaComponents.binding`.**
+</ParamField>
+
+<ParamField path="maxLoad / maxLoadBps" type="the I10 ceiling">
+  The [I10](/security/invariants) ceiling — the same value as a rate (`maxLoad`) or in basis points (`maxLoadBps`) on-chain.
+</ParamField>
+
+<ParamField path="Path-B premium" type="MM quote premium formula">
+  $\text{premium}_B = \lceil \text{FairPremium}\cdot(1 + \text{loadBps}/10^4)\rceil$, capped at MaxIL, requiring $\text{loadBps} \le \text{maxLoadBps}$ ([I10](/security/invariants) on Path B). Premiums round **UP**.
+</ParamField>
+
+<Warning>
+**All load / skew / σ primitives come from the calibrated risk-parameter set (the cvAMM block); none is hardcoded.**
+
+- **Why this matters:** hardcoding any PARTIAL or load primitive is the exact failure the external audit flagged — calibrated constants drift away from the regime they were fit to, and a stale constant mis-prices risk.
+- **The mitigation:** the cvAMM load block is read from the Monte-Carlo-produced parameter set, and fairRate itself has **no** calibrated coefficients at all — it is a pure closed form.
+</Warning>
+
+---
+
+## The three pillars
+
+The architecture, in full at [the three pillars](/concepts/three-pillars).
+
+<Steps>
+  <Step title="On-chain published FairValue (Pillar 1)">
+    The exact closed-form Φ-sum, never reimplemented off-chain; the Stylus FairValueOracle is **production**. The single shared price both rails build on. See [fair value](/concepts/fair-value).
+  </Step>
+  <Step title="The cvAMM pool (Pillar 2 — Path A)">
+    `ConvexityVault`, a dual-tranche ERC-4626 pooled passive underwriter that quotes algorithmically on-chain off FairPremium with inventory skews — always-on, signature-free, I10-capped. The **floor of liquidity**. See [Path A](/protocol/path-a-cvamm).
+  </Step>
+  <Step title="MM competition (Pillar 3 — Path B)">
+    Sophisticated MMs compete via firm EIP-712 signed quotes **below** the pool, **no last-look**. The **ceiling of price**. Two load-bearing reasons: hedged MMs export short-gamma risk *out of* the system (a closed pool just circulates ETH short-gamma against itself); forward-vol MMs correct the pool's backward-looking σ_ref bias. See [Path B](/protocol/path-b-mm).
+  </Step>
+</Steps>
+
+---
+
+## Paths and routing
+
+The routing model, in full at [routing](/protocol/routing) and [two rails](/concepts/two-rails).
+
+<ParamField path="Path A (cvAMM, default, signature-free)" type="createSwapPathA">
+  Reads FairPremium + pool inventory, applies the I10 load stack, locks `ConvexityVault` collateral, and splits the premium across tranches. No keeper, no signed quote, no validity clock, no relayer.
+</ParamField>
+
+<ParamField path="Path B (MM signed quotes)" type="createSwap">
+  An MM posts collateral + signs a quote below the pool; the LP can take it. Carries the full signed-quote rail (`validUntil`, `priceBandBps`, bitmap nonces, the Fork-2 band defense, [I9](/security/invariants)). The premium is **derived on-chain** from FairPremium as $\text{FairPremium}\cdot(1 + \text{loadBps})$; on Path B the premium goes **entirely to the MM** (no tranche split).
+</ParamField>
+
+<ParamField path="createSwapRouted" type="the cheaper-of router">
+  Routes the LP to the **cheaper of `{pool, valid MM quote}`**, both priced off the **same** on-chain FairPremium (a single VolOracle poke). The MM wins only if it **strictly** beats the pool; a tie resolves to Path A. An absent / expired / stale / over-band / over-load / zero-price MM quote **falls back to the pool — never reverts**. **Only the executed rail mutates nonce / capacity / lock** (so [I7](/security/invariants) holds).
+</ParamField>
+
+---
+
+## Vaults and tranches
+
+The vault model, in full at [vaults](/protocol/vaults) and [tranches](/concepts/tranches).
+
+<ParamField path="ConvexityVault" type="the Path-A pooled underwriter">
+  One vault per pair, backing all 9 markets with **fungible** USDC and quoting a separate price into each market — one insurer's treasury backing 9 product lines. Dual-tranche (senior/junior) from launch.
+</ParamField>
+
+<ParamField path="UnderwriterVault" type="per-MM Path-B collateral">
+  Per-MM collateral home: `deposited` / `locked` / `available = deposited − locked`. `lockCollateral` runs at **match** (never in the quote payload); `releaseAndDistribute` runs at **settle**.
+</ParamField>
+
+<ParamField path="Senior tranche" type="Tranche enum value 0">
+  Base yield plus a small premium slice (`seniorPremiumShareBps`), **structurally protected from *underwriting* loss** while junior buffers — a "convexity savings account." Protected, not risk-free.
+</ParamField>
+
+<ParamField path="Junior tranche" type="Tranche enum value 1">
+  Captures most of the load for a high APY, but is **first-loss and unhedged** — it bears the entire underwriting tail. A "pure vol-selling tranche."
+</ParamField>
+
+<ParamField path="Structural senior protection" type="totalLocked ≤ juniorAssets">
+  Enforced at **every** `lockCollateral`. Since every payout $\le$ its MaxIL $=$ its locked amount, $\sum \text{payouts} \le \text{totalLocked} \le \text{juniorAssets}$ — so junior absorbs all underwriting loss before senior is touched.
+</ParamField>
+
+<ParamField path="sf = 0.60 (P1.13)" type="target tranche ratio, NOT a hard cap">
+  The **target** senior fraction for UX/incentives — not a structural cap. Senior $P(\text{loss}) = 0$ is the **calibration** result (it holds while utilization $u \le 1 - sf$), not a structural guarantee.
+</ParamField>
+
+<ClaimB />
+
+<ParamField path="Two guarantees, NEVER merged" type="the central distinction">
+  **(A)** LPs are always paid (no bad debt in FULL — structural, code-enforced [I1](/security/invariants)); **(B)** depositors can lose principal. Both true; neither implies the other. See [no-bad-debt](/concepts/no-bad-debt).
+</ParamField>
+
+<ParamField path="Real P1.13 single-asset numbers" type="bare pool, u = 0.40">
+  3y CAGR 122% median / 50% p10 / 247% p90; P(losing month) 26.5%; 1-in-100 month −20.1%; worst month −26.8%. Senior (sf = 0.60): P(loss) = 0 / worst 0%; junior worst −67%.
+</ParamField>
+
+<ParamField path="Idle-only yield (hard rule)" type="rehypothecation constraint">
+  Locked collateral must stay instantly liquid — **never** routed to utilization-gated venues (Aave / Compound). Only idle/free capital may go to instantly-redeemable wrappers (sDAI / tokenized T-bills), with a hard cap and a nude-USDC buffer. See [immutability & custody](/security/immutability-custody).
+</ParamField>
+
+---
+
+## The SignedQuote (Path B, EIP-712)
+
+The full signing flow lives at [quote signing](/integrate/quote-signing).
+
+The `SignedQuote` struct fields:
+
+| Field | Type | What it carries |
+| --- | --- | --- |
+| `mm` | `address` | the market maker / signer |
+| `marketId` | `bytes32` | the market (per-market, never per-NFT) |
+| `loadBps` | `uint` | the MM's load over FairPremium |
+| `minMaxILRatioBps` / `maxMaxILRatioBps` | `uint` | optional convenience filter on the MaxIL ratio |
+| `quotePrice` | `uint` | the oracle price at signing — the **band anchor** |
+| `priceBandBps` | `uint` | the Fork-2 band: auto-void if live oracle drifts beyond it |
+| `model` | `CollateralModel` | FULL at launch |
+| `partialRatioBps` | `uint` | `0` in FULL |
+| `maxNotionalV0` | `uint` | capacity, denominated in V0 |
+| `validUntil` | `uint` | latency clock (see below) |
+| `quoteId` | `bytes32` | capacity / replay key |
+| `nonce` | `uint` | Permit2-style bitmap |
+
+<ParamField path="SIGNED_QUOTE_TYPEHASH" type="EIP-712 type hash">
+  The keccak of the full type string with `loadBps` in struct order. Verification is OZ `SignatureChecker.isValidSignatureNow`, which supports EIP-1271 contract signers (e.g. a vault as signer).
+</ParamField>
+
+<ParamField path="validUntil" type="latency control, default now + 8s, band [5s, 15s]">
+  Protocol-enforced to **[5s, 15s]**. A *latency* control (not risk-capital), bounding how long a bearer signed quote survives in observer hands.
+</ParamField>
+
+<ParamField path="priceBandBps + quotePrice (Fork-2 band)" type="oracle-anchored auto-void">
+  The quote auto-voids on-chain if the live oracle drifts beyond `priceBandBps` from `quotePrice`. **Firm quotes, NO last-look** — all protection is deterministic on-chain.
+</ParamField>
+
+<ParamField path="Bitmap nonce (Permit2-style, word<<8 | bit)" type="selective cancel">
+  Selective cancel of **one** quote, never cancel-all; batchable.
+</ParamField>
+
+<ParamField path="quoteId / consumedNotional" type="capacity authority">
+  `createSwap` requires $\text{consumedNotional}[\text{quoteId}] + V_0 \le \text{maxNotionalV0}$, then increments atomically (replay / double-spend defense). On-chain authoritative; the off-chain engine is advisory only.
+</ParamField>
+
+---
+
+## Settlement and the SwapRecord
+
+In full at [the lifecycle](/protocol/lifecycle) and [price pinning](/security/price-pinning).
+
+<ParamField path="Status enum" type="SwapRecord lifecycle">
+  `0` = `UNINITIALIZED`, `1` = `ACTIVE`, `2` = `SETTLED`.
+</ParamField>
+
+<ParamField path="settle" type="callable by anyone at expiry">
+  Callable by **anyone** once `block.timestamp ≥ expiry`. Strict CEI: status flips to `SETTLED` **first**, then interactions — see [CEI & reentrancy](/security/cei-reentrancy).
+</ParamField>
+
+<ParamField path="OracleManager settle path (getSettlementPrice)" type="price pinning">
+  The settlement price is pinned to the Chainlink round active *at expiry T* (kills settle-timing games), gated by sequencer health + staleness + a **lone-spike** sanity check; the Uniswap TWAP is **advisory-only** (emitted, never reverts).
+</ParamField>
+
+Settlement constants:
+
+| Constant | Value | Role |
+| --- | --- | --- |
+| `GRACE_PERIOD` | 3,600 s | settle grace after the window |
+| `MAX_STALENESS` | 90,000 s | max feed staleness (works on testnet ~120s and mainnet 86,400s feeds) |
+| `LONE_SPIKE_BPS` | 500 (5%) | lone-spike sanity threshold |
+| `LIVENESS_WINDOW` | 86,400 s (24h) | settlement-liveness backstop (Fork 1 / [I8](/security/invariants)) |
+| `TWAP_WINDOW` | 1,800 s | advisory Uniswap TWAP window |
+| `MAX_DEVIATION_BPS` | 200 (2%) | advisory TWAP-vs-Chainlink deviation |
+
+---
+
+## The ten invariants
+
+The never-break list, in full at [the invariants](/security/invariants).
+
+| # | Name | Statement |
+| --- | --- | --- |
+| **[I1](/security/invariants)** | No bad debt (FULL) | `payout ≤ collateral == MaxIL`. Qualified clause: capped payoff + locked collateral + solvent USDC + oracle/settlement liveness + no rehypothecation breach. |
+| **[I2](/security/invariants)** | Cap correctness | `payout == min(realized_IL, MaxIL)`. |
+| **[I3](/security/invariants)** | Non-negativity / no underflow | `realized_IL = V_hold > V_lp ? V_hold − V_lp : 0` — never an unchecked subtraction. |
+| **[I4](/security/invariants)** | LP never profits | `V_lp ≥ V_hold ⟹ payout == 0`. A hedge, not a lottery. |
+| **[I5](/security/invariants)** | Vault solvency | `locked ≤ deposited` per MM (and for the pool); `Σ locked` fully backed. |
+| **[I6](/security/invariants)** | Liquidity immutability | settlement uses `L` stored at creation, never re-read; `increaseLiquidity` cannot inflate payout. |
+| **[I7](/security/invariants)** | Capacity authority | `consumedNotional[quoteId] ≤ maxNotionalV0`; a cancelled bitmap-nonce bit cannot fill. |
+| **[I8](/security/invariants)** | Settlement liveness (Fork 1) | `settle()` always succeeds within `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`. |
+| **[I9](/security/invariants)** | Band enforcement (Fork 2) | `createSwap` reverts iff `absBps(P_live, quote.quotePrice) > quote.priceBandBps` (Path B only). |
+| **[I10](/security/invariants)** | Price cap (launch) | `premium ≤ FairPremium · (1 + maxLoadBps)` on **both** paths — by construction, upstream of settle. Does not touch settle / MaxIL / I1–I9. |
+
+---
+
+## The two forks
+
+The two audit-resolved deadlock/pickoff classes, in full at [the forks](/security/forks).
+
+<ParamField path="Fork 1 — oracle settlement deadlock" type="resolved (Option B)">
+  The v3.1 hard-TWAP gate could permanently lock funds. Replaced by Chainlink round-at-T pinning + a lone-spike check + advisory-only TWAP + a 24h liveness backstop, so settle can never deadlock ([I8](/security/invariants)).
+</ParamField>
+
+<ParamField path="Fork 2 — no-last-look quote pickoff" type="resolved (Option B, Path B only)">
+  A bearer signed quote could be picked off after an oracle gap. Resolved by the **oracle-anchored price band** (auto-void if drift &gt; `priceBandBps`) + short `validUntil` + on-chain selective nonce invalidation — all deterministic, **NOT** last-look ([I9](/security/invariants)).
+</ParamField>
+
+---
+
+## The data moat (five behavioral signals)
+
+The first public view into the **microstructure of the DeFi LP volatility-risk premium** — non-circular, actor-driven. In full at [the five signals](/moat/five-signals) and [circular vs behavioral](/moat/circular-vs-behavioral).
+
+<ParamField path="Signal 1 — Realized clearing LOAD over a transparent σ_ref" type="non-circular (the structural baseline)">
+  Bucketed by `width × distance-to-edge × duration` (cap-bound fills excluded). Pool load = mechanical baseline (`SwapPriced.totalLoadWad`); MM load (`QuoteFilled.loadBps`) = the behavioral signal. The circular "invert fairRate for an implied-vol surface" claim is **DROPPED** — charged/MaxIL = $\text{fairRate}(\sigma_{\text{ref}})\cdot(1+\text{load})$ only recovers our own σ_ref + dealer load. See [circular vs behavioral](/moat/circular-vs-behavioral).
+</ParamField>
+
+<ParamField path="Signal 2 — Pool-vs-MM load spread + MM win-rate" type="behavioral (a forward-vol read)">
+  The MM prices implied/forward vol; the pool prices backward-looking σ_ref. The **spread** between them is the forward-vol read. Dynamic with ≥3 MMs.
+</ParamField>
+
+<ParamField path="Signal 3 — Term structure of convexity" type="behavioral (the MM slope)">
+  The MM `loadBps` slope across 7/30/90d per range. The Path-A load is duration-independent/mechanical, so the *slope* is the MM signal.
+</ParamField>
+
+<ParamField path="Signal 4 — Moneyness / demand skew" type="behavioral (realized + latent)">
+  The realized on-chain half **plus** the latent/unfilled half via off-chain engine telemetry (`DEMAND_LOG`). See [telemetry](/moat/telemetry).
+</ParamField>
+
+<ParamField path="Signal 5 — Net convexity / gamma supply" type="behavioral (the active-set aggregate)">
+  Off-chain Greeks summed over the active set (the GreeksEngine over the subgraph). See [greeks & hedge](/sdk/greeks-hedge).
+</ParamField>
+
+<Warning>
+**Honest framing of the moat (mandatory).**
+
+- **The limit:** the clearing load is contaminated — it bundles liquidity, smart-contract risk, capital-lock, and inventory-skew premia — and the dynamic/latent halves are thin until MM and flow volume grow; the on-chain half (signals 1/2/3/5) begins only at the single subgraph redeploy.
+- **Why:** these are real-world microstructure quantities that mature with participation, not synthetic data we can backfill.
+- **The mitigation / path-forward:** the value is in the *architecture* of the moat. The **structures exist day-one**; you **trade the SPREAD, not the level** (the spread cancels the shared contamination); and the latent halves accrue with volume.
+</Warning>
+
+<Maturity />
+
+---
+
+## Theory anchors
+
+Cite, do not re-derive — the on-chain pricer is the exact Φ-sum, not these. In full at [theory anchors](/math/theory-anchors).
+
+<ParamField path="Lipton, Lucic & Sepp (2025)" type="static replication anchor">
+  An IL-protection claim is statically replicable by a strip of vanilla options ⇒ model-light fair value + a concrete hedge.
+</ParamField>
+
+<ParamField path="Milionis, Moallemi & Roughgarden (2022) — LVR" type="cost-of-gamma anchor">
+  The AMM's adverse-selection cost has a closed form proportional to instantaneous variance (= the theta of the replicating short-option position) ⇒ a closed-form anchor for the cost of short-gamma exposure.
+</ParamField>
+
+<Note>
+These are theory anchors for **why** the claim is priceable and hedgeable — **not** the on-chain pricer. The exact Φ-sum is.
+</Note>
+
+---
+
+## The qualified no-bad-debt clause
+
+Never state no-bad-debt unqualified. The full clause:
+
+> No-bad-debt is exact **only** under: FULL collateralization + capped payoff + solvent USDC + oracle/settlement liveness + no rehypothecation breach.
+
+<ClaimA />
+
+A σ_ref / vol-oracle fault can cost *depositors* money (bad pricing — junior first, then senior in the tail) but can **never** create LP bad debt in FULL: [I1](/security/invariants) is structural and oracle-independent. This is exactly why [the two guarantees are never merged](/concepts/no-bad-debt).
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Concepts at a glance" icon="compass" href="/concepts/glossary-primer">
+    The fast on-ramp — the dozen symbols you need before the math.
+  </Card>
+  <Card title="The deployments registry" icon="server" href="/reference/deployments">
+    Live Arbitrum Sepolia addresses, the single source of truth.
+  </Card>
+  <Card title="The ten invariants" icon="shield-halved" href="/security/invariants">
+    The never-break list, each with its statement and rationale.
+  </Card>
+  <Card title="The math overview" icon="square-root-variable" href="/math/overview">
+    The IL formula, the Φ-sum, the load stack — with worked numbers.
+  </Card>
+</CardGroup>

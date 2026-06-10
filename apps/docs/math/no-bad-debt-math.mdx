@@ -1,0 +1,392 @@
+---
+title: "The no-bad-debt math"
+description: "The three-line structural core (payout ≤ MaxIL = collateral), why it is orthogonal to the premium and to every oracle, the dual-tranche waterfall (totalLocked ≤ juniorAssets), and the P1.13 verification that max_payout_frac = 1.0."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+Inflexion's no-bad-debt guarantee is not a calibration result, a buffer, or a
+heuristic. In FULL mode it is **three lines of algebra** that hold for *any* price
+path and *any* — even wrong — volatility input. This page derives those three lines,
+proves they are orthogonal to the premium and to every pricing oracle, extends the
+same algebra to the dual-tranche waterfall that protects senior depositors, and shows
+the heavy-run verification that `max_payout_frac = 1.000000` on every simulated path.
+
+<ClaimA />
+
+<Note>
+**The whole proof in one sentence.** Collateral is locked at `MaxIL`; the payout is
+[capped](/concepts/maxil) at `MaxIL`; therefore `payout ≤ collateral` by
+construction — and nothing about *how* the premium was priced, or *what* the oracle
+said, can change that.
+</Note>
+
+## 1. The three-line structural core
+
+The settle-path guarantee, stated exactly as the code enforces it:
+
+$$
+\begin{aligned}
+\text{collateral}_{\text{FULL}} &= \text{MaxIL}
+   && \text{(locked at creation)} \\[2pt]
+\text{covered\_payoff} &= \min(\text{realized\_IL},\, \text{MaxIL}) \;\le\; \text{MaxIL}
+   && \text{(by construction of the cap)} \\[2pt]
+\therefore\quad \text{payout} &\le \text{collateral} = \text{MaxIL}
+   && \text{(no bad debt — invariants I1, I2)}
+\end{aligned}
+$$
+
+Read line by line, this is the entire argument:
+
+<Steps>
+  <Step title="Collateral is locked at exactly MaxIL">
+    At swap creation the underwriter posts collateral equal to the position's
+    [MaxIL](/concepts/maxil) — the boundary impermanent loss,
+    $\text{MaxIL} = \max\big(IL(P_a),\, IL(P_b)\big)$, which is **pure geometry,
+    frozen at creation**. Path A locks it from the pool; Path B locks the MM's own
+    collateral. In FULL mode `collateral == MaxIL` exactly — not a
+    multiple, not a fraction.
+  </Step>
+  <Step title="The payout is capped at MaxIL">
+    At `settle`, the protocol recomputes `realized_IL` on-chain from the
+    Chainlink-pinned settlement price and applies the cap:
+
+    ```solidity
+    uint128 payout = realisedIL > s.maxIL ? s.maxIL : uint128(realisedIL);
+    ```
+
+    That ternary **is** the $\min$. The covered payoff is
+    $\min(\text{realized\_IL},\, \text{MaxIL})$, so it can never exceed `MaxIL`.
+  </Step>
+  <Step title="Therefore payout ≤ collateral">
+    Combine the two: `payout ≤ MaxIL == collateral`. There is no price path — in
+    range, below $P_a$, above $P_b$, or in the no-IL region — on which the payout can
+    exceed the locked collateral. The underwriter's capital always covers the claim,
+    with a non-negative residual returned at settle.
+  </Step>
+</Steps>
+
+The two invariants this nails down:
+
+- **I1 — No bad debt (FULL):** $\text{payout} \le \text{collateral} = \text{MaxIL}$.
+- **I2 — Cap correctness:** $\text{payout} = \min(\text{realized\_IL},\, \text{MaxIL})$.
+
+Both are enforced in `InflexionCore` and verified by a fuzz test
+(`testFuzz_I1_I2_payoutCappedAtMaxIL`, 256 runs). Both vaults additionally re-check
+`payout ≤ lockedAmount` as defense-in-depth.
+
+<Warning>
+**The cap is the guarantee — removing it breaks everything.** Above $P_b$ the LP has
+rotated fully into token1, so $V_{\text{lp}}$ is **constant** while $V_{\text{hold}}$
+keeps growing linearly with price — absolute IL is **unbounded** beyond the range.
+**Why this is not a defect:** IL beyond the range boundary is
+*directional* loss (foregone spot upside), not the *impermanent* loss the LP set out
+to hedge. **Mitigation:** capping at MaxIL keeps the product fully collateralized and
+trustless — which is exactly why Inflexion is an
+[in-range convexity hedge](/concepts/in-range-convexity-hedge), **not "IL
+insurance."** No fixed collateral could ever back an unbounded payoff.
+</Warning>
+
+## 2. Why the guarantee is orthogonal to the premium
+
+The three lines above contain **no premium term, no load, no fairRate, and no
+$\sigma$.** That is deliberate, and it is the single most important structural fact
+about the protocol.
+
+The premium is computed *upstream* of settle, in a completely separate phase (the
+four-phase CEI structure):
+
+$$
+\text{premium} \;=\; \underbrace{\text{fairRate}\cdot\text{MaxIL}}_{\text{FairPremium}}\;\cdot\;\big(1 + \min(\text{baseLoad}+\text{util}+\text{disp},\ \text{maxLoad})\big)
+$$
+
+This sits in **PHASE 1 (pricing, READ)** and **PHASE 2 (checks)**. The no-bad-debt
+cap lives in `settle`, which runs only after expiry. The
+[invariant I10 price cap](/security/invariants) — overcharge is impossible by
+construction — is *also* purely upstream:
+
+<Info>
+**I10 orthogonality.** The load clamp
+$\text{total} = \min(\text{baseLoad}+\text{util}+\text{disp},\ \text{maxLoad})$ is a
+mechanical deterministic clamp, so
+$\text{premium} \le \text{FairPremium}\cdot(1+\text{maxLoad})$ holds for **all**
+inputs on **both** paths. But I10 lives in pricing, strictly **upstream of `settle`**
+— it does **not** touch `settle`, the MaxIL formula, or I1–I9. A mispriced premium is
+an economic outcome for the *underwriter* (NAV), never an LP bad-debt event.
+</Info>
+
+The consequence is sharp: even if the premium were charged at **zero**, or at ten
+times fair value, the LP would still be paid exactly $\min(\text{realized\_IL}, \text{MaxIL})$ and the underwriter's `MaxIL` of collateral would still cover it. The
+premium decides **whether underwriting is profitable**; it has **nothing to do with
+whether the LP gets paid.** Those are two separate questions, answered by two
+separate parts of the contract, in two separate phases.
+
+## 3. Why the guarantee is oracle-independent
+
+The same observation, sharpened to its most-probed corner. The no-bad-debt proof is
+*structural* and holds **regardless of what any oracle said** — including a wrong,
+stale, or maliciously-set one.
+
+Walk the oracle dependencies:
+
+| Oracle | What it feeds | Load-bearing for I1 (no bad debt)? |
+| --- | --- | --- |
+| `FairValueOracle` (Stylus Φ-sum) | `FairPremium` → the premium | **No** — pricing only, upstream of settle |
+| `VolOracle` ($\sigma_{\text{ref}}$) | the load regime band | **No** — pricing only, upstream of settle |
+| `OracleManager` (Chainlink round-at-T) | the settlement price $P_T$, hence `realized_IL` | Indirectly: needed for *liveness*, not for the *bound* |
+
+The first two never enter `settle` at all. `FairPremium` and $\sigma_{\text{ref}}$
+are solvency-load-bearing for **the I10 cap and depositor solvency only** — a wrong
+$\sigma_{\text{ref}}$ makes the pool *under-charge load*, compressing NAV — but they
+are **NOT** load-bearing for the FULL no-bad-debt invariant. In FULL, collateral =
+MaxIL ≥ payout *regardless of what $\sigma$ was*.
+
+The third — the Chainlink round-at-T — sets the settlement price, so it determines
+*the value* of `realized_IL`. But the cap is applied **after** that value is
+computed:
+
+$$
+\text{payout} \;=\; \min\big(\text{realized\_IL}(\underbrace{P_T}_{\text{any value}}),\ \text{MaxIL}\big)\;\le\;\text{MaxIL}.
+$$
+
+For **any** $P_T$ whatsoever — correct, glitched, or adversarial — the right-hand
+side is $\le \text{MaxIL}$. The cap is the outermost operation, so the bound is
+immune to what feeds it. The settlement price affects *how much* the LP is paid (up
+to the cap), never *whether collateral covers it*.
+
+<Tip>
+**The crucial split, never merge it.** I1 (no bad debt) is structural and
+oracle-independent. The oracles are load-bearing only for I10 and depositor solvency.
+A vol-oracle fault can cost depositors money but can **never** create LP bad debt in
+FULL. The heavy run makes this concrete: a lagging $\sigma_{\text{ref}}$ underprices
+coverage written at a stress *onset* (payout/premium = 1.14 at onset), and that
+residual is a vol-risk-premium the `baseLoad` must carry — **not** a no-bad-debt risk.
+See [σ_ref](/math/sigma-ref) for the precise load-bearing scope.
+</Tip>
+
+### What the cap depends on, exactly
+
+To be precise about what *is* required for I1, separate from what is not:
+
+- **Required (structural, by code):** the cap operation itself; collateral locked at
+  MaxIL at creation; `L` stored once and never re-read (invariant I6 — an external
+  `increaseLiquidity` on the custodied NFT cannot inflate the computed IL); the guarded
+  subtraction $\text{realized\_IL} = V_{\text{hold}} > V_{\text{lp}} ?\ V_{\text{hold}} - V_{\text{lp}} : 0$ (invariant I3).
+- **Required for the full clause (the qualifiers, not the bound):** capped payoff,
+  solvent USDC, oracle/settlement *liveness* (so `settle` can run — see
+  [the forks](/security/forks) and invariant I8), and no rehypothecation breach
+  (locked collateral stays instantly liquid).
+- **NOT required:** a correct premium, a correct `fairRate`, a correct
+  $\sigma_{\text{ref}}$, or even a correct settlement price for the *bound* to hold
+  (only for the *amount* within the bound).
+
+This is why the static-analysis pass could confirm that "the FULL no-bad-debt
+guarantee (I1) is structural and independent of the FairValue/Vol oracles" — `settle`
+caps payout at `MaxIL == collateral`.
+
+## 4. The dual-tranche waterfall math
+
+I1 guarantees **LPs are always paid**. It says nothing about whether the *underwriter*
+loses money — and on the pooled cvAMM rail (Path A), the underwriter is the
+[two-tranche vault](/concepts/tranches). The same `payout ≤ locked` algebra extends
+to a second structural invariant that protects senior depositors.
+
+<ClaimB />
+
+### 4.1 The senior-protection invariant
+
+The structural senior protection is the invariant **`totalLocked ≤ juniorAssets`**,
+enforced at **every** `lockCollateral` (the `SeniorProtectionBreached` revert). Chain
+it with the per-swap no-bad-debt bound:
+
+$$
+\underbrace{\sum_i \text{payout}_i \;\le\; \sum_i \text{MaxIL}_i \;=\; \text{totalLocked}}_{\text{I1, summed over open swaps}}\;\le\;\underbrace{\text{juniorAssets}}_{\text{senior-protection invariant}}
+$$
+
+so
+
+$$
+\sum_i \text{payout}_i \;\le\; \text{totalLocked} \;\le\; \text{juniorAssets}
+\quad\Longrightarrow\quad \text{junior absorbs all underwriting loss before senior is ever touched.}
+$$
+
+The first inequality is just I1 summed over every open swap — each payout is bounded
+by its own locked MaxIL, so the total payout is bounded by `totalLocked`. The second
+is the vault invariant. Together they mean the **junior-first-loss waterfall absorbs
+all underwriting loss before senior capital is reached.**
+
+### 4.2 The waterfall in code
+
+`releaseAndDistribute` takes the junior loss first and only then any senior loss:
+
+$$
+\text{juniorLoss} = \min(\text{payout},\ \text{juniorAssets}),
+\qquad
+\text{seniorLoss} = \text{payout} - \text{juniorLoss}.
+$$
+
+By the invariant above, $\text{payout} \le \text{totalLocked} \le \text{juniorAssets}$, so $\text{juniorLoss} = \text{payout}$ and
+$\text{seniorLoss} = 0$ at every settle. The $\min$ is therefore **defense-in-depth**
+— under the invariant, senior is never reached.
+
+### 4.3 The algebraic link to `u ≤ 1 − sf`
+
+This is the **adaptive code form** of the "enforce $u \le 1 - sf$" rule, keyed to the
+*actual* junior buffer rather than a fixed ratio (which is safer). The algebra: with
+target senior fraction $sf = 0.60$, the junior fraction is $1 - sf = 0.40$, and on
+utilization $u = \text{totalLocked}/\text{totalAssets}$,
+
+$$
+\text{totalLocked} \le \text{juniorAssets}
+\quad\Longleftrightarrow\quad
+u \le 0.40 = 1 - sf.
+$$
+
+That is exactly the utilization bound under which the P1.13 senior-`P(loss) = 0`
+calibration holds.
+
+<Warning>
+**Senior protection is calibrated, not unconditional.** **Limit:** `P(senior loss) =
+0` holds only while $u \le 1 - sf$, and never against systemic failure (USDC depeg,
+oracle failure, contract bug). **Why:** the bound `totalLocked ≤ juniorAssets`
+guarantees underwriting losses are absorbed by junior, but it cannot guarantee
+against an exogenous failure of the collateral asset or the chain. **Mitigation:**
+$sf = 0.60$ is the *target* tranche ratio for UX/incentives, **not** the hard cap —
+the hard, always-enforced constraint is the adaptive `totalLocked ≤ juniorAssets`
+check at every lock, plus a withdrawal cooldown and a `JuniorBelowLocked` revert that
+forbids drawing junior below `totalLocked`. Capital-not-guaranteed remains the umbrella
+for **both** tranches.
+</Warning>
+
+### 4.4 The two claims, side by side
+
+The math gives you two **distinct** guarantees, and they are **never merged**:
+
+| | Claim A — LP no bad debt | Claim B — depositor / MM capital risk |
+| --- | --- | --- |
+| **Statement** | LPs are always paid `min(IL, MaxIL)` in FULL | Capital is **not** guaranteed for either tranche |
+| **Status** | Structural, code-enforced (I1), oracle-independent | Calibrated; junior is first-loss, senior takes the systemic tail |
+| **Depends on** | The cap + the full clause (capped payoff, solvent USDC, liveness, no rehypothecation) | Realized vs. priced vol; utilization; the tranche buffer |
+| **Failure mode** | Cannot fail in FULL under the clause | Depositor NAV can compress; junior worst ≈ −67% in the heavy run |
+| **Code** | `InflexionCore` cap; vault re-checks | `ConvexityVault` senior-protection + waterfall |
+
+This is also why Inflexion is **not Bancor**: the cvAMM pays claims in
+**pre-locked USDC and mints nothing** — no token-inflation reinsurance, no death
+spiral. LPs are always paid (Claim A); depositors can lose principal in a crash
+(Claim B). Two claims, never one.
+
+## 5. P1.13 verification — `max_payout_frac = 1.0`
+
+The structural argument is airtight on paper. The P1.13 heavy run confirms it
+empirically across an extreme price grid, and — crucially — independently of any
+oracle.
+
+Define the payout fraction as the payout normalized by its own collateral:
+
+$$
+\text{payout\_frac} \;=\; \frac{\min(\text{realized\_IL},\ \text{MaxIL})}{\text{MaxIL}}.
+$$
+
+If I1 holds for every path, this fraction must satisfy
+$\text{payout\_frac} \le 1.0$ everywhere — the payout never exceeds the collateral.
+
+**Result:**
+
+<CardGroup cols={3}>
+  <Card title="max_payout_frac" icon="equals">
+    **1.000000** — the cap binds exactly at the boundary and never exceeds it.
+  </Card>
+  <Card title="Exceptions" icon="circle-check">
+    **Zero.** No simulated path produced `payout > MaxIL`.
+  </Card>
+  <Card title="Grid" icon="chart-line">
+    A **±99%** terminal-price grid, plus a widened **−6…+6 log-move** grid.
+  </Card>
+</CardGroup>
+
+`max_payout_frac = 1.000000` across that grid, with **zero exceptions**,
+**structurally and independent of any oracle.** The fraction reaches exactly 1.0
+because for any path that drives `realized_IL ≥ MaxIL`, the cap binds and the payout
+*equals* MaxIL — never more. This is the numerical fingerprint of "the cap is the
+outermost operation."
+
+The heavy-run model is deliberately **stronger than GBM** — the bar the protocol set
+for itself:
+
+- Student-t fat tails ($t_{df} = 4$),
+- a 3-state Markov vol regime (calm 0.45 / normal 0.75 / stressed 1.30, persistence
+  0.82),
+- tail-dependent crash correlation → 1 (single pair, the whole book settles against
+  the same move),
+- Poisson deep-crash months (~0.8/yr, mean −45%),
+- and a **lagging $\sigma_{\text{ref}}$** so coverage at a stress onset is underpriced
+  exactly as it would be on-chain.
+
+That the no-bad-debt fraction stays pinned at 1.0 under a model this hostile is the
+point: I1 is structural, so **no stochastic model can break it** — a fat-tailed,
+regime-switching, crash-correlated world produces the same bound as a calm one,
+because the bound is algebraic, not statistical.
+
+<Info>
+**The adversarial self-audit verdict was GO:** a 6-agent workflow independently
+re-ran the engine and confirmed the no-bad-debt
+structural result (`max_payout_frac = 1.0`), that the measure split is correct
+(premium risk-neutral at $\sigma_{\text{ref}}$, payout under the real measure), and
+that the model is in fact **net-conservative to depositors** — the $\sigma_{\text{ref}}$
+floor of 0.50 sits above calm ETH vol (~0.45), so the pool overcharges the ~27% of
+calm months; all-months realized payout/premium = **0.654**.
+</Info>
+
+<Maturity />
+
+## 6. The invariant set, in one place
+
+The settle-path invariants that make the three-line core hold at the formula level:
+
+| Invariant | Statement | Where enforced |
+| --- | --- | --- |
+| **I1** | No bad debt (FULL): `payout ≤ collateral == MaxIL` | `InflexionCore` cap |
+| **I2** | Cap correctness: `payout == min(realized_IL, MaxIL)` | `InflexionCore` cap |
+| **I3** | Non-negativity / no underflow: guarded subtraction, never unchecked | `ILMath` |
+| **I4** | LP never profits: `V_lp ≥ V_hold ⟹ payout == 0` | `ILMath` (the `: 0` arm) |
+| **I5** | Vault solvency: `locked ≤ deposited` per MM and per pool | `UnderwriterVault`, `ConvexityVault` |
+| **I6** | Liquidity immutability: settle uses the `L` stored at creation | `InflexionCore` |
+| **I10** | Price cap (by construction, upstream of settle): `premium ≤ FairPremium·(1 + maxLoadBps)` | `CvammPricing` |
+| **Pool** | Senior protection: `totalLocked ≤ juniorAssets` at every lock | `ConvexityVault` |
+
+Note the asymmetry: **I1 depends on oracle/settlement liveness** (so `settle` can
+run within its window), while **I10 is always-true by code** (a pure pricing clamp
+with no liveness dependency). They live in different phases and answer different
+questions — never conflate them. Full statements, the "why each holds," and the
+fuzz-test citations are on [the invariants page](/security/invariants).
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — the cap and the unit" icon="ruler-combined" href="/concepts/maxil">
+    Why MaxIL is *both* the load-bearing payout cap *and* the unit that makes
+    positions fungible to an underwriter.
+  </Card>
+  <Card title="MaxIL derivation" icon="function" href="/math/maxil-derivation">
+    The convexity proof that the in-range max is at a boundary, and why beyond-range
+    IL is unbounded.
+  </Card>
+  <Card title="The invariants" icon="shield-halved" href="/security/invariants">
+    All ten invariants I1–I10 plus the pool-side senior-protection invariant, each
+    with its "why" and fuzz-test citation.
+  </Card>
+  <Card title="Tranches" icon="layer-group" href="/concepts/tranches">
+    The junior-first-loss / senior-protected waterfall, the run defense, and the
+    capital-not-guaranteed disclosure for both.
+  </Card>
+  <Card title="σ_ref" icon="wave-square" href="/math/sigma-ref">
+    The vol oracle and its precise load-bearing scope — solvency and I10 only, never
+    I1.
+  </Card>
+  <Card title="The trust model" icon="lock" href="/security/trust-model">
+    Why the no-bad-debt guarantee is independent of the off-chain matcher and of how
+    the swap was opened.
+  </Card>
+</CardGroup>

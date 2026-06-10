@@ -1,0 +1,321 @@
+---
+title: "FairValue: the exact Phi-sum"
+description: "The full term-by-term derivation of fairRate as a finite, exact sum of normal-CDF terms — the piecewise capped payoff, the lognormal interval-moment building block, the cap-crossing prices, L-independence, and the verification chain proving it equals the settle-path math to machine precision."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+This is the deep derivation deferred from [the fair-value concept page](/concepts/fair-value). It builds the on-chain pricer line by line: from the capped Uniswap-v3 payoff, through the lognormal interval-moment building block, to the finite sum of normal-CDF terms that the [Stylus `FairValueOracle`](/protocol/oracles) evaluates live per quote. By the end you will be able to reconstruct `FairPremium` term by term, and you will know exactly how well the on-chain integer math agrees with a 50-digit reference.
+
+The thesis of the page in one sentence: **`FairPremium = E_Q[min(IL, MaxIL)]` is a finite Φ-sum of about 6–10 terms (Black–Scholes class) — no Monte Carlo, no lookup table, no fitted coefficients — because the capped v3 payoff is piecewise-polynomial in the terminal price, and every polynomial piece integrated against the lognormal density is a standard interval moment in the normal CDF `Φ`.**
+
+<Note>
+**Notation, fixed once.** Price `P` = price of token0 in token1 (e.g. ETH in USDC; token1 is the numéraire). A position has liquidity `L` over `[Pa, Pb]`, opened/snapshotted at `P0` with `Pa ≤ P0 ≤ Pb` enforced at creation. The terminal (settlement) price is `P_T`. `Φ` is the standard normal CDF; `σ` is the per-annum volatility (`σ_ref` on-chain); `T` is the duration in years. Everything below runs in **normalized units `P0 = 1`, `L = 1`** unless stated otherwise — that is exactly how the on-chain entry point computes it.
+</Note>
+
+## 1. The two-layer factorization
+
+The entire pricing reduces to one multiplication, and the two factors do completely separate jobs:
+
+$$
+\textbf{fairRate} \;=\; \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(\mathrm{IL},\,\mathrm{MaxIL})\right]}{\mathrm{MaxIL}}
+\qquad\qquad
+\textbf{FairPremium} \;=\; \textbf{fairRate}\cdot\textbf{MaxIL}
+$$
+
+The point of the factorization is a clean separation of variables:
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — pure geometry" icon="ruler-combined" href="/concepts/maxil">
+    `max(IL(Pa), IL(Pb))`. Frozen at creation, **identical across all three durations**, computed from `(Pa, Pb, L, P0)` only. Carries **none** of the vol/time dependence. Derived in [the MaxIL derivation](/math/maxil-derivation).
+  </Card>
+  <Card title="fairRate — pure stochastics" icon="wave-square">
+    The fraction of MaxIL the claim is worth under the risk-neutral measure. An **S-curve in `σ²·T`**. Carries **all** of the vol/time dependence; geometry enters only through the normalized edges `a = Pa/P0`, `b = Pb/P0`. This page derives it.
+  </Card>
+</CardGroup>
+
+Because `fairRate` carries all the time dependence and `MaxIL` carries none, **one position prices to three different `FairPremium` values** (7 / 30 / 90 days), all backed by the **same** MaxIL — only `fairRate` moves. The S-curve runs between two asymptotes: `fairRate → 0` as `σ²·T → 0` (price barely moves, the cap is irrelevant, the claim is near-worthless) and `fairRate → 1` as `σ²·T → ∞` (price almost surely exits the range and almost surely pays the full MaxIL — you are pre-paying a near-certain loss).
+
+## 2. The piecewise payoff — the object we integrate
+
+The integrand is the capped IL as a function of the terminal price. Recall the IL function (full setup in [the IL formula](/math/il-formula)):
+
+$$
+\mathrm{IL}(P_T) \;=\; \max\!\bigl(0,\; V_{\mathrm{hold}}(P_T) - V_{\mathrm{lp}}(P_T)\bigr)
+$$
+
+with `V_hold` affine in `P_T` and `V_lp` piecewise across the range edges. Substituting the three regimes of `V_lp` makes `IL(P_T)` **piecewise-polynomial in `P_T`**: it is linear outside the range and a `√P`-bearing convex arm inside it. The capped payoff `min(IL, MaxIL)` then splits the price axis into **three arms, separated by the range edges `Pa, Pb` and the two cap-crossing prices `PcapL, PcapR`**:
+
+<Tabs>
+  <Tab title="Below Pa (rotated into token0)">
+    The position is fully token0; its value scales linearly with price while a hold also moves linearly, so IL is **linear and decreasing** in `P_T`:
+
+    $$
+    \mathrm{IL}(P_T) = a^{b}_{1}\,P_T + a^{b}_{0}, \qquad a^{b}_{1} < 0
+    $$
+
+    It is **capped flat at MaxIL** for `P_T < PcapL` (if the lower cap binds). The superscript `b` denotes the *below*-range arm.
+  </Tab>
+  <Tab title="Inside [Pa, Pb] (the convex arm)">
+    The position holds a price-dependent mix of both tokens; `V_lp` is strictly concave, so IL is **convex**:
+
+    $$
+    \mathrm{IL}(P_T) = c_{1}\,P_T - 2L\sqrt{P_T} + c_{0}
+    $$
+
+    This arm is **never capped.** A convex function on a compact interval lies below the chord through its endpoints, and the endpoint values are exactly `IL(Pa)` and `IL(Pb)`, both `≤ MaxIL = max(IL(Pa), IL(Pb))`. So inside the range the cap never binds — the convexity of the arm is precisely what guarantees it.
+  </Tab>
+  <Tab title="Above Pb (rotated into token1)">
+    The position is fully token1 with **constant** value, while a hold keeps growing linearly, so IL is **linear and increasing** in `P_T`:
+
+    $$
+    \mathrm{IL}(P_T) = a^{a}_{1}\,P_T + a^{a}_{0}, \qquad a^{a}_{1} > 0
+    $$
+
+    It is **capped flat at MaxIL** for `P_T > PcapR` (if the upper cap binds). The superscript `a` denotes the *above*-range arm. This is the unbounded tail that makes the cap load-bearing.
+  </Tab>
+</Tabs>
+
+<Warning>
+**This is why the cap is the product, not a defect.** Beyond `Pb` the LP has rotated fully into token1 and IL grows **without bound** — it is *directional* loss (foregone spot upside), not the *impermanent* loss the LP set out to hedge. Capping at MaxIL is exactly what keeps the payoff `≤` the posted collateral, which is the structural core of [no bad debt](/concepts/no-bad-debt) and the reason Inflexion is an [in-range convexity hedge, not "IL insurance"](/concepts/in-range-convexity-hedge).
+</Warning>
+
+### 2.1 The cap-crossing prices
+
+The cap binds where a linear arm reaches `MaxIL`. Setting each linear arm equal to `MaxIL` and solving gives the two crossing prices:
+
+$$
+PcapL = \frac{\mathrm{MaxIL} - a^{b}_{0}}{a^{b}_{1}} \quad(\text{cap binds for } P_T < PcapL \text{ if } PcapL > 0)
+$$
+
+$$
+PcapR = \frac{\mathrm{MaxIL} - a^{a}_{0}}{a^{a}_{1}} \quad(\text{cap binds for } P_T > PcapR \text{ if } PcapR > Pb)
+$$
+
+Whether a cap binds depends on geometry. When it does **not** bind, its interval simply collapses to zero width — which is precisely how the [vectorized engine](#33-the-vectorized-engine-and-branch-free-caps) folds the branches away. The full set of integration limits is therefore the finite ordered set:
+
+$$
+K \in \{\,0,\; Pa,\; Pb,\; PcapL,\; PcapR,\; +\infty\,\}
+$$
+
+## 3. The lognormal interval-moment building block
+
+Now the key move. Under risk-neutral GBM (next section), `P_T` is **lognormal**. Every arm above is a polynomial in `P_T` with terms of the form `P_T^p` for `p ∈ {0, ½, 1}` (a constant, the `√P` term, and the linear term). So each arm's contribution to `E_Q[min(IL, MaxIL)]` is a sum of **truncated lognormal moments** — the expectation of a power of `P_T` restricted to a price interval. There is exactly one closed expression for that, and it is the entire engine of the page:
+
+$$
+\mathbb{E}\!\left[\, P_T^{\,p}\cdot \mathbf{1}\{K_1 < P_T < K_2\}\,\right]
+\;=\; P_0^{\,p}\,\exp\!\Bigl(\tfrac12\,p(p-1)\,\sigma^2 T\Bigr)\,
+\bigl(\Phi(d(K_1)) - \Phi(d(K_2))\bigr)
+$$
+
+$$
+\text{with}\qquad d(K) \;=\; \frac{\ln(P_0/K) + \bigl(p - \tfrac12\bigr)\sigma^2 T}{\sigma\sqrt{T}}
+$$
+
+The sentinels handle the open ends of the price axis exactly:
+
+$$
+K \le 0 \;\Rightarrow\; d = +\infty \;\Rightarrow\; \Phi = 1
+\qquad\qquad
+K = +\infty \;\Rightarrow\; d = -\infty \;\Rightarrow\; \Phi = 0
+$$
+
+So a lower bound of `0` and an upper bound of `+∞` plug in cleanly with no special-casing.
+
+<Accordion title="Why this expression is exactly the truncated lognormal moment (the half-page derivation)">
+Write `P_T = P_0\,e^{X}` where, under risk-neutral GBM with `μ = 0` (next section), `X \sim \mathcal{N}\!\left(-\tfrac12\sigma^2 T,\; \sigma^2 T\right)`. Then `P_T^{\,p} = P_0^{\,p} e^{pX}`. The unconstrained moment is the standard lognormal/MGF result:
+
+$$
+\mathbb{E}[P_T^{\,p}] = P_0^{\,p}\,\mathbb{E}[e^{pX}]
+= P_0^{\,p}\exp\!\Bigl(p\bigl(-\tfrac12\sigma^2 T\bigr) + \tfrac12 p^2 \sigma^2 T\Bigr)
+= P_0^{\,p}\exp\!\Bigl(\tfrac12 p(p-1)\,\sigma^2 T\Bigr),
+$$
+
+which is exactly the prefactor above. (Note `p = 1 \Rightarrow` prefactor `= 1`, i.e. `E[P_T] = P_0` — the forward, consistent with `r = 0`.) The truncation `\{K_1 < P_T < K_2\}` is `\{\ln(K_1/P_0) < X < \ln(K_2/P_0)\}`. Performing the Gaussian integral of `e^{pX}` over that band and completing the square shifts the mean by `p\sigma^2 T`, which lands the integration limits at precisely `d(K_1)` and `d(K_2)` as written. The difference of two `Φ` values is the probability mass of the shifted Gaussian inside the band. ∎
+
+This is identical in form to the building blocks of the Black–Scholes formula — which is why the result is "Black–Scholes class." `p = 0` gives the digital (probability) piece; `p = 1` gives the asset-or-nothing piece; `p = ½` is the `√P` piece unique to the v3 in-range arm.
+</Accordion>
+
+### 3.1 The three moments the arms actually use
+
+Each arm needs only the three moments `M0`, `Mh`, `M1` (for `p = 0, ½, 1`) over its own interval. Their prefactors are worth tabulating because two of them are trivial and one is not:
+
+| Moment | `p` | Prefactor `exp(½·p(p−1)·σ²T)` | Role in the arms |
+| ------ | --- | ------------------------------ | ---------------- |
+| `M0` | `0` | `1` | the constant terms `a₀`, `c₀` (digital / probability mass) |
+| `Mh` | `½` | `exp(−⅛·σ²T)` | the `−2L√P` convex term (the only non-trivial prefactor) |
+| `M1` | `1` | `1` | the linear terms `a₁·P`, `c₁·P` (forward / asset-or-nothing) |
+
+The two unit prefactors (`p = 0` and `p = 1`) are why the linear arms are pure `Φ`-differences; the single `exp(−⅛σ²T)` factor on `Mh` is the only place the `√P` regime injects extra variance dependence.
+
+### 3.2 Assembling FairPremium as a finite Φ-sum
+
+`E_Q[min(IL, MaxIL)]` is now the sum over the (up to five) sub-intervals carved by `{0, Pa, Pb, PcapL, PcapR, +∞}`, each contributing either a **flat-MaxIL piece** (a single `M0`-weighted probability mass, where the cap binds) or a **polynomial-arm piece** (a linear combination of `M0`, `Mh`, `M1` over that interval). Summing them:
+
+$$
+\textbf{FairPremium} = \mathbb{E}_{\mathbb{Q}}\!\left[\min(\mathrm{IL},\,\mathrm{MaxIL})\right]
+\;=\; \underbrace{\sum_{\text{arms}} \bigl(\alpha\,M_0 + \beta\,M_h + \gamma\,M_1\bigr)}_{\text{a finite }\Phi\text{-sum, }\approx 6\text{–}10\text{ terms}}
+$$
+
+Each `M` is itself a difference of two `Φ`'s, so the whole expression is a finite linear combination of normal-CDF evaluations — **Black–Scholes class, no Monte Carlo, no lookup table, no fitted coefficients, evaluated live per quote**.
+
+<Warning>
+**`fairRate` is NOT** a fitted surface, a Monte-Carlo estimate, or an interpolated table. It is an *exact closed form* — a finite sum of `Φ` terms — with **no calibrated coefficients**. The only stochastic input is `σ_ref`. Calling it any of those undersells the central technical claim and is wrong.
+</Warning>
+
+### 3.3 The vectorized engine and branch-free caps
+
+The scalar form branches on whether each cap binds. The production-adjacent vectorized form `fair_rate_vec` removes the branches by **clipping the split points**:
+
+$$
+PcapL_{\text{eff}} = \max(PcapL,\,0), \qquad PcapR_{\text{eff}} = \max(PcapR,\,Pb)
+$$
+
+When a cap does not bind, its interval collapses to zero width and contributes nothing — so the same straight-line formula is correct whether or not a cap binds. This is ~1000× faster than the scalar loop and is **verified `≡` the scalar form** in the test suite.
+
+## 4. The one modeling assumption: GBM with μ = 0, r = 0
+
+The Φ-sum is **exact given the model**. There is exactly one modeling assumption, and stating it plainly is mandatory:
+
+<Warning>
+**Limit:** the closed form assumes risk-neutral **geometric Brownian motion with `μ = 0`, `r = 0`** (so the forward equals `P0`). This is the only place a model enters; no on-chain formula removes it.
+
+**Why it is acceptable:** zero-drift GBM is the standard, model-light risk-neutral baseline for a short-dated claim. The residual it leaves is *forward-looking-vol information*, not a structural error — and it is exactly what keeps the prefactor `E[P_T] = P_0` (the forward) clean.
+
+**Mitigation — two layers:**
+1. **A conservative `σ_ref`.** The vol input is `max(σ_short, σ_long, floor)`, with the floor set deliberately *above* calm ETH vol so the pool overcharges calm months and is net-conservative to depositors (all-months realized payout/premium `= 0.654` in the heavy run). See [σ_ref](/math/sigma-ref).
+2. **MM alpha by design.** The residual forward-vol premium is *deliberately* left for [Path-B market makers](/protocol/path-b-mm), who price off implied / forward vol and correct the pool's structural backward-looking bias. That is the incentive that keeps MMs two-sided — a feature, not a bug.
+</Warning>
+
+It is worth being precise about scope: a wrong or too-low `σ_ref` makes the pool **under-charge load**, so premium income stops covering payouts and NAV compresses — junior absorbs it first, senior in the tail. It is **not** load-bearing for the FULL no-bad-debt invariant: in FULL, `collateral = MaxIL ≥ payout` *regardless of what σ was*. A vol-oracle fault can cost depositors money but can **never** create LP bad debt in FULL. Two separate guarantees, never merged.
+
+<ClaimA />
+
+## 5. L-independence — why positions are fungible
+
+A structural property falls straight out of the normalization. The Φ-sum runs in units `P0 = 1`, `L = 1`, so it depends **only** on the normalized edges and the stochastic parameters:
+
+$$
+\textbf{fairRate} = \textbf{fairRate}\bigl(a,\,b,\,\sigma,\,T\bigr),
+\qquad a = \frac{Pa}{P0},\quad b = \frac{Pb}{P0}
+$$
+
+— **not on `L`.** The on-chain entry point `fair_rate_wad` takes exactly `(a, b, durationSeconds)` normalized to `P0 = 1, L = 1`. `MaxIL` is the only place `L` (and the price scale) re-enters, linearly, when forming `FairPremium = fairRate · MaxIL`.
+
+<Note>
+**This `L`-independence in the fair-rate sense is what makes positions [fungible to an underwriter within a market](/concepts/maxil).** Two positions with the same geometry ratios `(a, b)` and duration price to the *same* `fairRate` no matter how large each is — only `MaxIL` scales them. That is the mechanical reason an MM quote is **per-market, never per-NFT** (the `SignedQuote` carries no `tokenId`): the MM quotes one `(load, MaxIL-ratio band, capacity)` for an entire `marketId`, and any in-band position fills against it. See [two rails](/concepts/two-rails) and [quote signing](/integrate/quote-signing).
+</Note>
+
+## 6. Verification — the closed form equals the settle-path math
+
+A closed-form pricer is only safe if it cannot drift from the math that *settles* the claim. Inflexion verifies this with a chain of equalities, each one independently checkable, so the on-chain pricer is provably tied to the reference IL implementation, which is provably tied to brute-force integration and Monte Carlo:
+
+<Steps>
+  <Step title="Closed form ≡ reference IL quadrature ≡ Monte Carlo">
+    `cvamm.verify_closed_form` compares the Φ-sum against the reference IL implementation evaluated by dense quadrature and by Monte Carlo. Result: `max_abs_err ≈ 5.1×10⁻¹¹` (verdict "CONFIRMED (machine precision)" when `< 1e-5`). The heavy calibration run restates it as `≡` the reference IL to `3.3×10⁻⁹`. Both are far inside any tolerance.
+  </Step>
+  <Step title="Vectorized engine ≡ scalar engine">
+    `fair_rate_vec` — the branch-free clipped-split-point form — is verified equal to the scalar `fair_rate` across the test suite, ~1000× faster. The clipping is not an approximation: a non-binding cap collapses its interval to zero width, so the formula is identically correct.
+  </Step>
+  <Step title="Stylus Φ-sum ≡ a 50-digit mpmath reference">
+    The on-chain Rust matches high-precision `mpmath` fixtures (`dps = 50`) to **≤ 1×10⁻¹² on `fairRate`** — equivalently `≤ 1e6` wei at the `1e18` scale, in practice a few wei. The Stylus integer fixed-point `erf` is "machine-precise" precisely because Stylus **bans WASM floating point at activation**, so there is no nondeterministic float to drift.
+  </Step>
+</Steps>
+
+By contrast the **Solidity** oracle's Abramowitz–Stegun `Φ` is only `~1.5×10⁻⁷` (÷MaxIL-amplified to `~1e-3` at the tight tier), which is exactly why the Solidity `FairValueOracle` is a **revm-testable CI cross-check, not a second production oracle**, and the **Stylus oracle is production**.
+
+<Warning>
+**Cite the verifiable precision figure, not a tighter one.**
+
+**Limit:** a higher-level description characterizes the Stylus FVO as "machine-precise to `6.7×10⁻¹⁵`." That figure could **not** be located verbatim in the Stylus pricing path.
+
+**Why the discrepancy:** `6.7×10⁻¹⁵` most plausibly refers to the precision of the *internal `erf` primitive* rather than the *end-to-end `fairRate` error* — they are different quantities, and the end-to-end figure is the one a claim should rest on.
+
+**Mitigation:** the **defensible, verifiable claim is `≤ 1×10⁻¹²` absolute on `fairRate`** versus the 50-digit `mpmath` fixtures. That is "machine-exact for purposes here" — at the `1e18` WAD scale it is at most a handful of wei, far below any economically meaningful amount — and it is the figure to use in public claims.
+</Warning>
+
+## 7. Reference points and a worked premium
+
+The S-curve, made concrete. At `σ = 60%`, risk-neutral, geometric half-widths — reference IL ground truth reproduced by `cvamm.fair_rate`:
+
+| Range width | 7d    | 30d   | 90d   |
+| ----------- | ----- | ----- | ----- |
+| ±5%         | 69.5% | 84.8% | 91.3% |
+| ±10%        | 44.9% | 70.8% | 82.9% |
+| ±20%        | 18.2% | 47.3% | 67.4% |
+
+Read it as the Φ-sum walking *up* `σ²·T`: a wide/short position (±20% / 7d) is worth only **18%** of MaxIL — the cheapest fraction, the most convexity value for the LP; a tight/long position (±5% / 90d) is worth **91%** — effectively pre-paying a near-certain loss.
+
+Multiplying through by `MaxIL` gives the published premium. A 50,000 USDC position, ±10% geometric range, `σ_ref = 60%`, `baseLoad = +15%`, skews `= 0`. **MaxIL = 1,280 USDC (2.56% of V0) — identical for all three durations**; only the Φ-sum moves:
+
+| Duration | fairRate | FairPremium = fairRate·MaxIL | cvAMM publishes (@ +15% [load](/math/load-stack)) |
+| -------- | -------- | ---------------------------- | ------------------------------------------------- |
+| 7d       | 44.9%    | 574 USDC                     | 661 USDC (1.32% of V0)                            |
+| 30d      | 70.8%    | 906 USDC                     | 1,042 USDC (2.08% of V0)                          |
+| 90d      | 82.9%    | 1,061 USDC                   | 1,221 USDC (2.44% of V0)                          |
+
+The collateral the underwriter posts (MaxIL = 1,280 USDC) is constant down the table; the Φ-sum does all the work.
+
+### Live on-chain
+
+This priced live swaps on the Arbitrum Sepolia stack (2026-06-05). Both rails priced off the **same** published `FairPremium`:
+
+<CodeGroup>
+```text Path A — cvAMM (swap #1)
+V0          = $270,531.28
+MaxIL       = $1,669.24
+premium     = $9.70   (0.58% of MaxIL — a wide/short position, low fairRate)
+realized IL = $148.64
+payout      = $148.64  (paid from the ConvexityVault)
+```
+
+```text Path B — MM won the route (swap #2)
+premiumA (cvAMM) = $13.80
+premiumB (MM)    = $8.93   (loadBps 1000) — strictly beat the pool → routed to MM
+MaxIL            = $3,215.65
+realized IL      = $245.66
+payout           = $245.66  (paid from the MM's own collateral)
+```
+</CodeGroup>
+
+Full registry and lifecycle record in [the deployment reference](/reference/deployments).
+
+## 8. FAQ
+
+<AccordionGroup>
+  <Accordion title="Why is the inside-range arm never capped?">
+    Because it is **convex** and its endpoints are exactly `IL(Pa)` and `IL(Pb)`. A convex function on `[Pa, Pb]` lies below the chord joining its endpoint values, and `MaxIL = max(IL(Pa), IL(Pb))` is at least as large as either endpoint. So inside the range `IL ≤ MaxIL` everywhere — the cap can only bind on the *linear* tails outside the range. The cap-crossing prices `PcapL, PcapR` therefore always fall outside `[Pa, Pb]` when they bind at all. (See [the MaxIL derivation](/math/maxil-derivation).)
+  </Accordion>
+  <Accordion title="Why only the moments p ∈ {0, ½, 1}?">
+    Because the IL arms are polynomials in `P_T` whose only powers are a constant (`p = 0`), a `√P` term (`p = ½`, from the in-range `−2L√P`), and a linear term (`p = 1`). There is no higher power anywhere in the v3 IL formula, so three truncated lognormal moments suffice for the whole Φ-sum. The `p = ½` moment is the one genuinely characteristic of a v3 in-range position.
+  </Accordion>
+  <Accordion title="What happens to the integral at the open ends of the price axis?">
+    The lower bound `K = 0` and the upper bound `K = +∞` are handled by the sentinel rule `K ≤ 0 ⇒ d = +∞ ⇒ Φ = 1` and `K = +∞ ⇒ d = −∞ ⇒ Φ = 0`. So the below-Pa arm integrates cleanly from `0` and the above-Pb arm integrates cleanly to `+∞` with no special-casing in the code.
+  </Accordion>
+  <Accordion title="Is the off-chain SDK allowed to recompute the Φ-sum?">
+    No. As a hard rule: **the Φ-sum is never reimplemented off-chain.** The SDK reads the on-chain `FairPremium` (from the Stylus oracle) and never approximates it — that is what guarantees the price the LP sees is the price that settles. See [the SDK FairValue surface](/sdk/getting-started) and [the pricing stack](/protocol/pricing-stack).
+  </Accordion>
+</AccordionGroup>
+
+## Where this sits
+
+<CardGroup cols={2}>
+  <Card title="On-chain fair value (concept)" icon="wave-square" href="/concepts/fair-value">
+    The conceptual tour this page derives in full.
+  </Card>
+  <Card title="MaxIL — the cap and the unit" icon="lock" href="/concepts/maxil">
+    The geometry factor — the other half of `FairPremium`.
+  </Card>
+  <Card title="σ_ref — the volatility oracle" icon="chart-line" href="/math/sigma-ref">
+    `max(σ_short, σ_long, floor)`: the only stochastic input to the Φ-sum.
+  </Card>
+  <Card title="The load stack" icon="layer-group" href="/math/load-stack">
+    How both rails build their premium on top of the Φ-sum's FairPremium.
+  </Card>
+  <Card title="The IL formula" icon="function" href="/math/il-formula">
+    `V_hold` vs `V_lp` — the integrand this page integrates.
+  </Card>
+  <Card title="Theory anchors" icon="book" href="/math/theory-anchors">
+    Lipton–Lucic–Sepp and Milionis–Moallemi–Roughgarden: why the claim is priceable — not the pricer.
+  </Card>
+</CardGroup>

@@ -1,0 +1,252 @@
+---
+title: "MaxIL & the convexity proof"
+description: "MaxIL = max(IL(Pa), IL(Pb)): the convexity proof that interior IL never exceeds the boundary, the upper-boundary asymmetry, and why the cap is load-bearing for no-bad-debt — with the verified [80,100,125] fixture."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+[MaxIL](/concepts/maxil) is the single quantity that does double duty in Inflexion: it is both the **load-bearing payout cap** that makes [no bad debt](/concepts/no-bad-debt) possible, and the **unit of risk** that makes positions fungible to an underwriter. This page proves where it comes from. The headline definition is one line:
+
+$$
+\mathrm{MaxIL} \;=\; \max\!\big(\, \mathrm{IL}(P_a),\; \mathrm{IL}(P_b) \,\big)
+$$
+
+The maximum in-range impermanent loss is attained at a **range boundary**, never in the interior. That fact is not an approximation or a calibration — it follows from a short convexity argument, and it is what lets the protocol lock exactly `MaxIL` of collateral at creation and guarantee the LP is always made whole, capped, from it.
+
+<Note>
+This page is the rigorous companion to the [IL formula](/math/il-formula) (where $V_{\text{hold}}$ and $V_{\text{lp}}$ come from) and to [FairValue](/math/fair-value-phi-sum) (which prices the *capped* claim $\min(\mathrm{IL}, \mathrm{MaxIL})$). Read those for the surrounding stack; this page is about the geometry of the cap itself.
+</Note>
+
+## The setup, in one screen
+
+Let $P$ be the price of token0 in token1 (e.g. ETH in USDC). A position is liquidity $L$ over a tick range $[P_a, P_b]$, opened at $P_0$ with the **in-range requirement** $P_a \le P_0 \le P_b$ enforced at creation; on-chain the gate `a >= 1e18 || b <= 1e18` reverts `OutOfRange`. Out-of-range entries are rejected — there is nothing to hedge if the position is already one-sided.
+
+Impermanent loss is the gap between *holding* the entry basket and *being the LP*:
+
+$$
+\mathrm{IL}(P) \;=\; \max\!\big(0,\; V_{\text{hold}}(P) - V_{\text{lp}}(P)\big)
+$$
+
+with the two value functions taken directly from the settle-path math:
+
+$$
+V_{\text{hold}}(P) \;=\; a_0\,P + a_1
+\qquad\text{(affine in } P\text{)}
+$$
+
+$$
+V_{\text{lp}}(P) \;=\;
+\begin{cases}
+L\,\big(\tfrac{1}{\sqrt{P_a}} - \tfrac{1}{\sqrt{P_b}}\big)\, P & P < P_a \quad\text{(linear, all token0)}\\[6pt]
+L\,\big(2\sqrt{P} - \tfrac{P}{\sqrt{P_b}} - \sqrt{P_a}\big) & P_a \le P \le P_b \quad\text{(strictly concave)}\\[6pt]
+L\,\big(\sqrt{P_b} - \sqrt{P_a}\big) & P > P_b \quad\text{(constant, all token1)}
+\end{cases}
+$$
+
+where $a_0 = \text{amount0\_entry} = L(1/\sqrt{P_0} - 1/\sqrt{P_b})$ and $a_1 = \text{amount1\_entry} = L(\sqrt{P_0} - \sqrt{P_a})$ are the entry token amounts snapshotted at creation. The three regimes of $V_{\text{lp}}$ are the whole story: **inside** the range the LP holds a price-dependent mix of both tokens, **below** $P_a$ it has rotated fully into token0, **above** $P_b$ it has rotated fully into token1.
+
+<Tip>
+The single most important shape fact: $V_{\text{lp}}$ is **strictly concave inside the range** and **flat above $P_b$**. The concavity is why interior IL is bounded by the endpoints; the flatness is why IL *beyond* the range is unbounded. Both follow below.
+</Tip>
+
+## The convexity proof
+
+We want the maximum of $\mathrm{IL}(P)$ **while the price stays in range**, i.e. over the compact interval $[P_a, P_b]$. The claim is that this maximum is attained at an endpoint. Three lines:
+
+<Steps>
+<Step title="V_hold is affine">
+$V_{\text{hold}}(P) = a_0 P + a_1$ is a straight line in $P$. Its second derivative is identically zero:
+$$
+\frac{d^2 V_{\text{hold}}}{dP^2} = 0.
+$$
+</Step>
+
+<Step title="V_lp is strictly concave in range">
+On $[P_a, P_b]$, $V_{\text{lp}}(P) = L\big(2\sqrt{P} - \sqrt{P_a} - P/\sqrt{P_b}\big)$, so
+$$
+\frac{dV_{\text{lp}}}{dP} = L\left(P^{-1/2} - \frac{1}{\sqrt{P_b}}\right),
+\qquad
+\frac{d^2 V_{\text{lp}}}{dP^2} = -\tfrac{1}{4}\,L\,P^{-3/2} < 0
+$$
+for all $P > 0$. So $V_{\text{lp}}$ is **strictly concave** — the LP is short gamma.
+</Step>
+
+<Step title="IL = affine − concave = convex">
+$$
+\mathrm{IL}(P) = V_{\text{hold}}(P) - V_{\text{lp}}(P) = \underbrace{\text{affine}}_{\text{convex}} - \underbrace{\text{concave}}_{-(\cdot)\,\text{convex}} = \text{convex}.
+$$
+Concretely $\dfrac{d^2 \mathrm{IL}}{dP^2} = 0 - \big(-\tfrac14 L P^{-3/2}\big) = +\tfrac14 L P^{-3/2} > 0$. And $\max(0, \mathrm{IL})$ — the pointwise max of two convex functions — is convex too.
+</Step>
+
+<Step title="A convex function on a compact interval maxes at an endpoint">
+A convex function on $[P_a, P_b]$ attains its maximum at $P_a$ or $P_b$. Therefore
+$$
+\max_{P \in [P_a, P_b]} \mathrm{IL}(P) = \max\!\big(\mathrm{IL}(P_a), \mathrm{IL}(P_b)\big) \;=\; \mathrm{MaxIL}. \qquad \blacksquare
+$$
+</Step>
+</Steps>
+
+This holds for **any** entry $P_0 \in [P_a, P_b]$ — centered or arbitrarily skewed toward one edge. The proof never used the location of $P_0$; it only used the affine/concave shapes, which hold for every in-range entry.
+
+<Accordion title="Why the asymmetric-entry case was double-checked (and confirmed)">
+Two external auditors flagged the asymmetric case — a position opened far from the center of its range — worried the maximum might wander into the interior. One re-derived the algebra and confirmed the boundary result holds. To be sure, a property test `fuzz_asymmetric_entry_maxil` samples highly asymmetric $P_0$ near $P_a$ / $P_b$, 2,000 times, and checks `MaxIL == max(IL(Pa), IL(Pb))` every time. The convexity argument above is exactly why the test passes: convexity of $\mathrm{IL}$ does not depend on where the entry sits.
+</Accordion>
+
+## The asymmetry: the upper boundary is larger
+
+The boundaries are **not** symmetric, even for a ratio-symmetric range. The convex IL curve rises more steeply toward the **upper** boundary, so
+
+$$
+\mathrm{MaxIL} = \mathrm{IL}(P_b) > \mathrm{IL}(P_a)
+$$
+
+for a geometric-symmetric range. Intuitively: $V_{\text{hold}}$ grows *linearly without bound* as price rises (you keep holding token0, which keeps appreciating), while $V_{\text{lp}}$ flattens as the position rotates into token1 — so the gap at $P_b$ exceeds the gap at $P_a$, where instead the LP is rotating into the appreciating token0 and partially keeps pace. The canonical fixture makes this concrete: a $[80, 100, 125]$ range (−20% / +25% around 100) is ratio-symmetric, and $\mathrm{IL}(125) > \mathrm{IL}(80)$.
+
+<Warning>
+**Limit → Why → Mitigation.** Because the upper boundary is the larger one, you cannot approximate MaxIL by the lower-edge IL or by a centered average — that would *under*-collateralize the worst in-range case and break the cap. **Why:** the asymmetry is structural (affine $V_{\text{hold}}$ vs. flattening $V_{\text{lp}}$), not a rounding artifact. **Mitigation:** the protocol always computes both endpoints and takes the literal `max` (on-chain `ILMath.sol`), and the asymmetric-entry fuzz test guards it. MaxIL is never inferred — it is computed from the full geometry.
+</Warning>
+
+## Why the cap is load-bearing, not a defect
+
+MaxIL is the maximum in-range IL — it is **not** the global worst case. Above $P_b$ the LP is fully in token1, so $V_{\text{lp}}$ is *constant* while $V_{\text{hold}}$ keeps growing linearly with price. Absolute IL is therefore **unbounded beyond the range**:
+
+$$
+\lim_{P \to \infty} \mathrm{IL}(P) = \lim_{P \to \infty}\big(a_0 P + a_1 - L(\sqrt{P_b}-\sqrt{P_a})\big) = +\infty.
+$$
+
+The protocol does **not** insure that tail. It covers the **capped** payoff:
+
+$$
+\text{covered\_payoff} \;=\; \min(\text{realized\_IL},\; \mathrm{MaxIL})
+$$
+
+via `compute_payout`. And because FULL collateral is set to exactly the cap,
+
+$$
+\text{collateral}_{\text{FULL}} = \mathrm{MaxIL}, \qquad
+\text{covered\_payoff} \le \mathrm{MaxIL} \;\;\text{by construction}
+$$
+
+$$
+\therefore\quad \text{payout} \;\le\; \text{collateral} = \mathrm{MaxIL}
+$$
+
+so FULL mode **cannot produce bad debt under any price path** — this is [invariants](/security/invariants) **I1** (no bad debt) and **I2** (cap correctness). The guarantee is structural and oracle-independent: it holds for any price path and any (even wrong) $\sigma$.
+
+<ClaimA />
+
+**The product framing is the honest version of the cap.** At the range boundary the LP has fully rotated into one asset. IL *beyond* that point is **directional** loss — foregone spot upside — not the **impermanent** loss the LP set out to hedge. Capping at MaxIL keeps the product fully collateralized and trustless, and is exactly why Inflexion is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), **not "IL insurance."** Mislabeling it "IL insurance" is both a demand risk (sophisticated LPs would discount the truncated tail) and a reputational/regulatory one — so every LP surface shows the payoff diagram and the cap, and the cap never surprises an LP. See [what this is not](/what-this-is-not).
+
+<Info>
+The cap is the *opposite* of a weakness. An uncapped IL claim would be an unbounded short-volatility liability with no finite collateral that makes it safe. The cap is precisely what turns an unhedgeable tail into a bounded, fully-collateralizable, fungible unit of risk — see [MaxIL as the unit of risk](/concepts/maxil) and [tranches](/concepts/tranches).
+</Info>
+
+## Reference magnitudes — MaxIL as a fraction of V0
+
+These are **pure geometry** — no volatility, no time enters MaxIL at all. For a geometric-symmetric range $[P_0/(1+w),\; P_0(1+w)]$, computed by `compute_max_il` / `cvamm.maxil_over_v0` (`maxil_over_v0_geometric`):
+
+| range width | MaxIL / V0 (geometric centering) |
+| ----------- | -------------------------------- |
+| ±5%         | **1.27%** |
+| ±10%        | **2.56%** |
+| ±20%        | **5.23%** |
+| ±50%        | **13.76%** (arithmetic centering ±50% → ~18.0%) |
+
+Tighter ranges produce *smaller* MaxIL: the position has less room to drift before rotating fully into one asset, so the worst in-range gap is smaller. Wider ranges produce larger MaxIL — more interior price travel, a bigger boundary gap.
+
+<Warning>
+**Doc-correction flag.** The table above is the *corrected* set from `compute_max_il`. Older documentation carried an **older, ~4.2× too-low** set (`±5% → 0.3%`, `±10% → 1.2%`, `±20% → 4.8%`, `±50% → 25%`). **Why:** that was a documentation bug — the contract `ILMath.sol` always computed the correct (higher) values, so this was never a code change. **Mitigation:** use the "Reference magnitudes" table here. The earlier *fixture* table for `[80,100,125]` (MaxIL ≈ 6.6% of V0) is correct and verified — only the centered-range ballpark there is stale.
+</Warning>
+
+## Worked fixture: `[80, 100, 125]`, `L = 1e18`
+
+This is the canonical asymmetric-but-ratio-symmetric fixture, with every number verified by `amounts_fixture_matches_python` / `maxil_fixture_matches_python` and mirrored in `ILMath.t.sol`. Range $[P_a, P_b] = [80, 125]$, entry $P_0 = 100$, $L = 10^{18}$.
+
+<Steps>
+<Step title="Entry token amounts">
+$$
+a_0 = L\Big(\tfrac{1}{\sqrt{100}} - \tfrac{1}{\sqrt{125}}\Big) = 10{,}557{,}280{,}900{,}008{,}417 \;\approx\; 0.01055728
+$$
+$$
+a_1 = L\Big(\sqrt{100} - \sqrt{80}\Big) = 1{,}055{,}728{,}090{,}000{,}841{,}200 \;\approx\; 1.05572809
+$$
+</Step>
+
+<Step title="Hold value at entry">
+$$
+V_{\text{hold}}(P_0) = a_0 \cdot 100 + a_1 = 2{,}111{,}456{,}180{,}001{,}682{,}900 \;\approx\; 2.11145618
+$$
+</Step>
+
+<Step title="IL at each boundary">
+$$
+\mathrm{IL}(P_a = 80) \approx 1.11456 \times 10^{17} \;\approx\; 0.111456
+$$
+$$
+\mathrm{IL}(P_b = 125) = 139{,}320{,}225{,}002{,}101{,}320 \;\approx\; 0.13932023
+$$
+</Step>
+
+<Step title="Take the max">
+$$
+\mathrm{MaxIL} = \max(0.111456,\; 0.13932023) = \mathrm{IL}(P_b) = 139{,}320{,}225{,}002{,}101{,}320 \;\approx\; 0.13932023
+$$
+</Step>
+</Steps>
+
+Collected:
+
+| Quantity        | Value (token1 wei, integer)  | ≈ (× 1e18) |
+| --------------- | ---------------------------- | ---------- |
+| `amount0_entry` | `10_557_280_900_008_417`     | 0.01055728 |
+| `amount1_entry` | `1_055_728_090_000_841_200`  | 1.05572809 |
+| `V_hold(P0)`    | `2_111_456_180_001_682_900`  | 2.11145618 |
+| `IL(Pa = 80)`   | `≈ 1.11456e17`               | 0.111456   |
+| `IL(Pb = 125)`  | `139_320_225_002_101_320`    | 0.13932023 |
+| **MaxIL**       | `139_320_225_002_101_320`    | 0.13932023 |
+
+Two facts fall straight out of this fixture:
+
+1. **The asymmetry is real.** $\mathrm{IL}(125) = 0.1393 > \mathrm{IL}(80) = 0.1115$. The upper boundary is ~25% larger than the lower, on a ratio-symmetric range. `MaxIL = IL(Pb)` exactly as the proof predicts.
+2. **MaxIL / V0 ≈ 6.6%.** With $V_{\text{hold}}(P_0) \approx 2.1115$ and $\mathrm{MaxIL} \approx 0.1393$, the cap is about 6.6% of the position's entry value — consistent with the ±20%-ish width of this range.
+
+<Note>
+**Integer vs. float reproducibility.** On-chain everything is integer math in Uniswap Q64.96 with floor rounding everywhere (see [the IL formula](/math/il-formula)). The on-node integer-floor MaxIL is `139_320_225_002_103_011`, which sits **1,691 wei** from the Python float anchor `139_320_225_002_101_320` — well inside the 10,000-wei float-vs-integer tolerance. The Stylus and Solidity implementations agree to the wei by construction because they share the same `mulDiv` chain.
+</Note>
+
+## What MaxIL is — and is not
+
+MaxIL being **frozen at creation**, **identical across all three durations** (7/30/90d) for a given position, and **$L$-independent in the fair-rate sense** is exactly what makes positions **fungible to an underwriter**. An MM quote is therefore **per-market** — a load, an optional MaxIL-ratio band, and capacity — **never per-NFT** (the SignedQuote carries no `tokenId`). See [the two rails](/concepts/two-rails) and [quote signing](/integrate/quote-signing).
+
+<Warning>
+**Important nuance — MaxIL is a normalization unit, not a risk metric.** Two positions with identical MaxIL can carry very different risk (distance from current price, delta). **Why:** MaxIL is pure geometry; it knows nothing about how close the price currently sits to an edge or how volatile the pair is. **Mitigation:** both the pool and MMs price $E_Q[\min(\mathrm{IL}, \mathrm{MaxIL})]/\mathrm{MaxIL}$ — the [fairRate](/math/fair-value-phi-sum) — for the **specific public geometry** (`positions(tokenId)`). `MaxIL/V0` is a fine monotone *proxy for width* when displaying or filtering, but is **never** the pricing input. This is what dissolves the old adverse-selection story: the pricing input is fully public.
+</Warning>
+
+## Where this lives in the stack
+
+MaxIL is the *geometry* layer — the "how much capital." It multiplies cleanly with the stochastics and the inventory state:
+
+$$
+\text{premium} \;=\; \underbrace{\text{fairRate}}_{\text{stochastics: how risky}} \cdot \underbrace{\mathrm{MaxIL}}_{\text{geometry: how much capital}} \cdot \underbrace{(1 + \text{load})}_{\text{inventory: how scarce}}
+$$
+
+| Layer | Formula | Depends on | Where it lives |
+| ----- | ------- | ---------- | -------------- |
+| IL | $\max(0,\, V_{\text{hold}} - V_{\text{lp}})$ | $P_a, P_b, L, P_0, P_T$ | `ILMath.sol` / `il.py` |
+| **MaxIL** | $\max(\mathrm{IL}(P_a),\, \mathrm{IL}(P_b))$ | **geometry only** ($P_a, P_b, L, P_0$) | `ILMath.sol` / `il.compute_max_il` |
+| fairRate | $E_Q[\min(\mathrm{IL},\mathrm{MaxIL})]/\mathrm{MaxIL}$ | $a, b, \sigma_{\text{ref}}, T$ | Stylus `FairValueOracle` |
+
+<CardGroup cols={2}>
+<Card title="The IL formula" icon="function" href="/math/il-formula">
+Where $V_{\text{hold}}$ and $V_{\text{lp}}$ come from, the three regimes, and the Q64.96 fixed-point implementation.
+</Card>
+<Card title="FairValue — the Φ-sum" icon="sigma" href="/math/fair-value-phi-sum">
+Pricing the *capped* claim $\min(\mathrm{IL}, \mathrm{MaxIL})$ as an exact closed-form lognormal moment sum.
+</Card>
+<Card title="No-bad-debt math" icon="shield-check" href="/math/no-bad-debt-math">
+The three-line proof that payout ≤ collateral = MaxIL, with its full qualifying clause.
+</Card>
+<Card title="Worked example" icon="calculator" href="/math/worked-example">
+One position, three durations, three prices — MaxIL constant, only fairRate moving.
+</Card>
+</CardGroup>

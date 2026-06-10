@@ -1,0 +1,258 @@
+---
+title: "The three pillars"
+description: "The conceptual spine of Inflexion — on-chain published FairValue, the always-on cvAMM floor, and the MM-competition ceiling — and how createSwapRouted gives the LP the cheaper rail without ever reverting on a bad quote."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+<Info>
+**Read this first.** Everything else in these docs sits on top of three pillars. Once you hold them, the rest of the protocol — the math, the lifecycle, the vaults, the data moat — reads as elaboration. The three are: **(1)** an on-chain *published* fair value (the truth), **(2)** the cvAMM pool (the floor of liquidity, always on), and **(3)** market-maker competition (the ceiling of price). One settlement core sits underneath both rails.
+</Info>
+
+Inflexion is a collateralized bilateral derivatives market on Arbitrum One — live on [Arbitrum Sepolia](/reference/deployments) (chainId `421614`) — that lets a Uniswap v3 LP pay a fixed upfront premium to transfer the **in-range** impermanent-loss risk of a specific position to an underwriter. The underwriter posts collateral and is paid for taking the risk; at expiry the protocol pays the LP $\min(\text{realized\_IL}, \text{MaxIL})$, trustlessly, from that collateral. This is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), not "IL insurance" — and the cap is load-bearing.
+
+The three pillars are how the protocol is organized. They map to three questions any market must answer:
+
+<CardGroup cols={3}>
+  <Card title="What is it worth?" icon="scale-balanced" href="/concepts/fair-value">
+    **Pillar 1 — published FairValue.** An exact, closed-form on-chain price for the claim. The truth both rails are measured against.
+  </Card>
+  <Card title="Is there always a price?" icon="layer-group" href="/protocol/path-a-cvamm">
+    **Pillar 2 — the cvAMM.** A pooled, always-on, signature-free underwriter. The floor of liquidity — no cold start.
+  </Card>
+  <Card title="Can it get cheaper?" icon="gavel" href="/protocol/path-b-mm">
+    **Pillar 3 — MM competition.** Firm EIP-712 signed quotes that win only by beating the pool. The ceiling of price.
+  </Card>
+</CardGroup>
+
+The one-liner that ties them together:
+
+> **Floor + ceiling, one settlement core.** The cvAMM is the floor of liquidity (it always quotes a code-capped price); the MMs are the ceiling of price (they win only by beating it); and a single, rail-agnostic settlement core pays the LP the same way regardless of who underwrote.
+
+---
+
+## Pillar 1 — On-chain published FairValue (the truth)
+
+The protocol does not just settle claims — it **computes and publishes the fair value of the claim on-chain** before anyone trades. That published number is the reference price every other part of the system is measured against.
+
+$$
+\text{FairPremium} \;=\; \text{fairRate} \cdot \text{MaxIL}
+$$
+
+The genius is the factorization: the two terms carry orthogonal information.
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — pure geometry">
+    The maximum in-range IL of the *specific* position, computable at creation from $(P_a, P_b, L, P_0)$. **Frozen at creation, identical across all three durations.** Duration changes nothing about MaxIL.
+  </Card>
+  <Card title="fairRate — all the vol/time">
+    $\text{fairRate} = E_Q[\min(\text{IL}, \text{MaxIL})] / \text{MaxIL}$ — the fraction of MaxIL the claim is worth under the risk-neutral measure. **fairRate carries ALL the vol/time dependence; MaxIL carries none.**
+  </Card>
+</CardGroup>
+
+Because the duration knob lives entirely inside `fairRate`, the cvAMM publishes **three different prices for the same position** — one per duration — all backed by the **same** MaxIL collateral.
+
+### fairRate is an S-curve in $\sigma^2 T$
+
+`fairRate` is an S-curve in $\sigma_{\text{ref}}^2 \cdot T$: it is $\approx 0$ in calm/short regimes (price rarely leaves a wide range) and saturates toward $1$ in violent/long regimes (price almost surely exits the range). The single stochastic input is $\sigma_{\text{ref}}$ — see [the sigma-ref estimator](/math/sigma-ref).
+
+| Range width | 7d | 30d | 90d |
+| ----------- | ----- | ----- | ----- |
+| ±5% | 69.5% | 84.8% | 91.3% |
+| ±10% | 44.9% | 70.8% | 82.9% |
+| ±20% | 18.2% | 47.3% | 67.4% |
+
+<sub>fairRate at σ = 60% (risk-neutral, from the Monte Carlo reference model) — note the ~2–4× movement across durations for a single width, and that it is MaxIL that stays fixed.</sub>
+
+### It is an exact closed form — not a fitted surface
+
+This is the claim that makes Pillar 1 a *truth* and not a guess. The capped v3 payoff $\min(\text{IL}, \text{MaxIL})$ is **piecewise** — a below-$P_a$ linear arm, a convex $c_1 P - 2\sqrt{P} + c_0$ arm inside $[P_a, P_b]$, and an above-$P_b$ linear arm, split by the two cap-crossing prices. Each arm integrated against the lognormal density of $P_T$ is a standard interval moment in the normal CDF $\Phi$. So the whole expectation collapses to a finite **$\Phi$-sum** (~6–10 terms, Black–Scholes class):
+
+- **No Monte Carlo, no lookup table, no calibrated coefficients.** It is evaluated live, per quote.
+- **L-independent.** The $\Phi$-sum runs in normalized units ($P_0 = 1, L = 1$), so it depends only on $a = P_a/P_0$, $b = P_b/P_0$, $\sigma_{\text{ref}}$, and $T$.
+- **Verified exact** against the reference model — closed form ≡ quadrature ≡ MC — to ~5×10⁻¹¹ across width × σ × T.
+
+<Warning>
+**The $\Phi$-sum is NEVER reimplemented off-chain** — this is a hard project rule, not a preference.
+
+- **Why:** an off-chain reimplementation would be a second, drifting source of truth — the whole point of Pillar 1 is that there is exactly *one* published price the chain itself produces.
+- **Mitigation / where the truth lives:** the **production pricer is the Stylus `FairValueOracle`** ([address](/reference/deployments)), machine-precise to ~6.7×10⁻¹⁵. The Solidity `FairValueOracle` (Φ via Abramowitz–Stegun, ~1e-7) is a CI cross-check, **not** a second production oracle. The SDK reads the on-chain `FairPremium` and never approximates it.
+</Warning>
+
+<Note>
+**Theory anchors vs. the pricer — a distinction to keep straight.** Two 2025 academic results explain *why* this claim is priceable and hedgeable: **Lipton–Lucic–Sepp (2025)** (an IL-protection claim is statically replicable by a strip of vanilla options) and **Milionis–Moallemi–Roughgarden (2022)** (LVR has a closed form ∝ instantaneous variance). They are the [theory anchors](/math/theory-anchors), **not** the pricer — the exact $\Phi$-sum is the pricer. Do not conflate them.
+</Note>
+
+Pillar 1 is the load-bearing one for the other two: the cvAMM and every MM price *off the same published `FairPremium`*. Read it in full at [Fair value](/concepts/fair-value) and [the $\Phi$-sum](/math/fair-value-phi-sum); MaxIL has its own page at [MaxIL — the cap and the unit of risk](/concepts/maxil).
+
+---
+
+## Pillar 2 — The cvAMM (the floor of liquidity)
+
+A market that needs a counterparty to *show up* before it can quote has a cold-start problem. Pillar 2 removes it. The cvAMM is a **pooled passive underwriter** — `ConvexityVault`, an ERC-4626-style USDC vault with a **dual-tranche SENIOR/JUNIOR structure from launch** ([deployed](/reference/deployments)). It quotes algorithmically on-chain off the published `FairPremium`, posts collateral from the pool, and is **always quoting**. It is Path A — signature-free, fully on-chain (`createSwapPathA`).
+
+It solves four problems at once:
+
+<CardGroup cols={2}>
+  <Card title="Cold-start" icon="power-off">
+    There is always a price, with **no MM present**. The protocol is complete and solvent on Path A alone.
+  </Card>
+  <Card title="Overcharge" icon="lock">
+    The price is **capped in code** by invariant I10 — $\text{premium} \le \text{FairPremium}\cdot(1+\text{maxLoad})$ — not by trust.
+  </Card>
+  <Card title="Intra-pair diversification" icon="chart-pie">
+    One pool writes many positions whose exits do **not** all cluster at the same price.
+  </Card>
+  <Card title="Depositor viability" icon="layer-group">
+    Each depositor picks an honest risk dose — senior savings account vs. junior vol-seller. See [tranches](/concepts/tranches).
+  </Card>
+</CardGroup>
+
+### The price is capped in code, not by trust
+
+The cvAMM quote is `FairPremium` lifted by a transparent, on-chain load stack and then **hard-clamped**:
+
+$$
+\text{premium} = \text{FairPremium}\cdot\bigl(1 + \underbrace{\text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew}}_{\text{clamped at }\text{maxLoad}}\bigr)
+$$
+
+`totalLoad = min(baseLoad + util_skew + dispersion_skew, maxLoad)`, so the depositor pool can never overcharge the LP beyond the contractual cap. That clamp is **invariant I10** — see [the invariants](/security/invariants) and [the load stack](/math/load-stack). None of these primitives is hardcoded; the regimes and curves come from the calibrated risk-parameter set.
+
+This is why the cvAMM is the **floor of liquidity**: it guarantees a fair, code-capped price exists for every position in every market, at all times, with no external dependency. Deep dive at [Path A — the cvAMM](/protocol/path-a-cvamm).
+
+<ClaimB />
+
+---
+
+## Pillar 3 — MM competition (the ceiling of price)
+
+If Pillar 2 guarantees a price always exists, Pillar 3 guarantees that price can be *beaten*. Sophisticated market makers compete via **firm EIP-712 signed quotes** (with EIP-1271 contract-signer support) priced **below** the pool — Path B (`createSwap`). There is **no last-look**: a quote is a firm bearer instrument, protected only by deterministic on-chain checks at fill (oracle-anchored price band, short validity window, bitmap nonce). See [firm quotes, no last-look](/protocol/path-b-mm).
+
+MMs matter for **two load-bearing reasons** — state both:
+
+<Steps>
+  <Step title="Hedged MMs export short-gamma risk OUT of the system">
+    A closed pool can only *relocate* short-gamma risk — without MMs the protocol becomes a closed pocket of ETH short gamma circulating against itself. An MM who hedges on the global options market (Deribit / Panoptic) makes the **whole system's risk smaller**, not just moved.
+  </Step>
+  <Step title="Forward-looking-vol MMs correct the pool's backward bias">
+    The pool prices off realized $\sigma_{\text{ref}}$ — a structurally **backward-looking** estimator. MMs price off implied / forward vol. They are the mechanism that incorporates forward information the pool structurally cannot see.
+  </Step>
+</Steps>
+
+The MM rail is the **ceiling of price**: because routing always picks the cheaper rail, an MM only ever wins a fill when it **genuinely beats the capped pool price**. It cannot divert flow by merely matching the pool. This is also why the residual forward-vol premium the pool's backward-looking $\sigma_{\text{ref}}$ misses is deliberately left as **MM alpha** — that blindness is the incentive that keeps MMs in the two-sided market.
+
+Pillar 3 is **optional and additive**. The protocol is complete with Pillar 2 alone; every MM that arrives only ever lowers the LP's price.
+
+---
+
+## Floor + ceiling, one settlement core
+
+The three pillars are not three products. They are two *upstream rails* — the pool (floor) and the MMs (ceiling) — feeding **one downstream settlement core**.
+
+```
+                       Pillar 1: FairPremium  (the truth, published on-chain)
+                                  │
+              ┌───────────────────┴───────────────────┐
+        Pillar 2: cvAMM                          Pillar 3: MMs
+     (floor — always quotes,                 (ceiling — win only by
+      code-capped via I10)                    strictly beating the floor)
+              │                                       │
+              └───────────────────┬───────────────────┘
+                       createSwapRouted  →  cheaper rail wins, never reverts
+                                  │
+                       ONE settlement core  →  pays LP min(IL, MaxIL)
+                          (rail-agnostic, non-custodial, I1–I9)
+```
+
+Every difference between Path A and Path B lives **upstream of settle**, in how the swap is priced and how collateral is locked. The settlement core — the `settle()` function, the $\min(\text{IL}, \text{MaxIL})$ cap, the MaxIL formula, the [invariants I1–I9](/security/invariants) — is **identical regardless of which rail opened the swap**. The FULL no-bad-debt guarantee is therefore independent of *how the quote was discovered*; it is enforced at on-chain settlement against the counterparty's own locked collateral.
+
+| | **Path A — cvAMM (floor)** | **Path B — MM (ceiling)** |
+|---|---|---|
+| Counterparty | `ConvexityVault` (pool) | a single MM |
+| Signature | none (signature-free) | EIP-712 / EIP-1271 firm quote |
+| Collateral home | `ConvexityVault` (pooled, dual-tranche) | `UnderwriterVault` (per-MM) |
+| Pricing | on-chain load stack, I10 clamp | `loadBps` over FairPremium, `≤ maxLoadBps` |
+| Premium split | 99% into pool (tranche split), 1% treasury | 99% MM, 1% treasury |
+| Validity clock / nonces / band | none | `validUntil` + bitmap nonce + oracle band |
+| Relayer needed | no (pure on-chain) | yes (off-chain quote book) |
+| Role | **floor of liquidity** (always quotes) | **ceiling of price** (wins only by beating pool) |
+
+### How `createSwapRouted` picks the cheaper rail
+
+The router (`createSwapRouted`) is where floor and ceiling meet. It is the single best illustration of the whole architecture:
+
+<Steps>
+  <Step title="Pool must be wired (the floor must exist)">
+    The market must be `cvammEnabled` — there must be something to fall back to. Otherwise there is no floor and the call reverts.
+  </Step>
+  <Step title="Price both rails off the SAME FairPremium">
+    A single VolOracle poke refreshes $\sigma_{\text{ref}}$, then both rails are priced off the **same** published `FairPremium`: `premiumA = _pricePathAFromFair`, `(usableB, premiumB) = _quoteUsableAndPremiumB`.
+  </Step>
+  <Step title="Evaluate the MM quote WITHOUT touching state">
+    `_quoteUsableAndPremiumB` is the **`view`, non-reverting mirror** of Path-B's gates. It returns `(false, 0)` for any defect — absent / wrong-model / over-load / expired / out-of-band / nonce-used / under-collateralized / bad-sig / dust — and **never mutates a nonce, capacity, or lock**, so an unchosen quote leaves zero trace (preserving [capacity invariant I7](/security/invariants)).
+  </Step>
+  <Step title="Route to the strictly cheaper rail (ties go to the floor)">
+    `useB = usableB && premiumB < premiumA` — the MM wins **only if it STRICTLY beats** the pool. A **tie resolves to Path A**, the dependency-free always-on rail, so an MM cannot divert flow by merely matching.
+  </Step>
+  <Step title="A bad MM quote falls back to the pool — it NEVER reverts">
+    An absent / expired / stale / over-band / over-load / under-collateralized MM quote simply **falls back to the floor**. Only protocol-level failures (market / owner / range / dust / slippage / pool-unwired) can revert the call. Only the executed rail mutates nonce / capacity / lock.
+  </Step>
+</Steps>
+
+The route is auditable on-chain: the router emits `SwapRouted(swapId, pathB, premiumA, premiumB)`, so the cheapest-wins decision is part of the [data moat](/concepts/data-moat).
+
+<Tip>
+**This is the whole thesis in one function.** The LP always gets the cheaper of `{pool, best MM quote}`; the pool guarantees a price always exists; the MMs guarantee it can be beaten; and a bad MM quote can never deny the LP a fill, because the floor is always there to catch it.
+</Tip>
+
+### Seen live, both rails, one core
+
+The 2026-06-05 redeploy ran a full create→settle on **both** rails through the one settlement core:
+
+<Tabs>
+  <Tab title="Path A — the floor">
+    **Swap #1**, V0 \$270,531.28, MaxIL \$1,669.24 → premium **\$9.70** (0.58% of MaxIL). Settled realized IL \$148.64, payout \$148.64 — **paid from the `ConvexityVault`**. The pool quoted and settled with no MM present at all.
+  </Tab>
+  <Tab title="Path B — the ceiling">
+    **Swap #2**, routed: `createSwapRouted` saw the MM's **\$8.93** strictly beat the cvAMM's **\$13.80**, so it chose the MM (loadBps 1000). MaxIL \$3,215.65 locked from **the MM's own collateral**; settled realized IL \$245.66, payout \$245.66 from the `UnderwriterVault`. The floor was there, the ceiling beat it, the same core settled it.
+  </Tab>
+</Tabs>
+
+<Maturity />
+
+---
+
+## The no-bad-debt guarantee — stated correctly
+
+The cap from Pillar 1 (MaxIL) plus FULL collateralization is what makes the LP-payout guarantee a *construction* rather than a hope: $\text{collateral} = \text{MaxIL} \ge \text{payout} = \min(\text{realized\_IL}, \text{MaxIL})$ by construction. But it holds only under its full qualifying clause — never state it unqualified.
+
+<ClaimA />
+
+This is a separate claim from depositor risk (above). LPs are always paid in FULL (structural, code-enforced invariant I1); depositors and MMs can lose principal (volatility sellers in a crash). Both are true; neither implies the other — see [no bad debt](/concepts/no-bad-debt) and [the math](/math/no-bad-debt-math).
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — the cap and the unit of risk" icon="ruler" href="/concepts/maxil">
+    Why MaxIL is both the load-bearing payout cap and the unit that makes positions fungible to an underwriter.
+  </Card>
+  <Card title="Fair value, on-chain" icon="scale-balanced" href="/concepts/fair-value">
+    The published `FairPremium`, the Stylus oracle, and why it is never reimplemented off-chain.
+  </Card>
+  <Card title="The two rails" icon="route" href="/concepts/two-rails">
+    Floor and ceiling in depth — Path A, Path B, and the routed entry point.
+  </Card>
+  <Card title="The $\Phi$-sum" icon="function" href="/math/fair-value-phi-sum">
+    The exact closed form: piecewise payoff arms integrated against the lognormal density.
+  </Card>
+  <Card title="Tranches" icon="layer-group" href="/concepts/tranches">
+    Senior savings account vs. junior first-loss vol-seller — and why capital is not guaranteed.
+  </Card>
+  <Card title="The data moat" icon="chart-line" href="/concepts/data-moat">
+    The five behavioral signals the floor + ceiling flow emits day-one.
+  </Card>
+</CardGroup>

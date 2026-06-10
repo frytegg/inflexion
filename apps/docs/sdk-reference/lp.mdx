@@ -1,0 +1,559 @@
+---
+title: "LpClient reference"
+description: "Every LpClient method — args, returns, read/write, the on-chain function it calls, and its degradation envelope — for buying in-range IL protection (claim A)."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+`LpClient` is the LP-facing surface of [`@inflexion/sdk`](/sdk/overview): it prices, buys,
+inspects, and settles [in-range IL protection](/concepts/in-range-convexity-hedge) on a
+specific Uniswap v3 position. It is the surface that carries **Claim A** — LPs are always
+paid `min(realized_IL, MaxIL)` from the underwriter's collateral, with no bad debt in FULL
+mode — and the only one that holds a signer for LP writes.
+
+Access it as `sdk.lp` from the
+[one-call factory](/sdk/getting-started). It is the only surface wired with
+`engineBaseUrl` / `telemetryUrl` / `fetchImpl`, because it is the only one that talks to
+the Path-B quote engine and emits the latent-demand telemetry ping.
+
+<ClaimA />
+
+## The read contract: graceful degradation
+
+Every read that needs the live spot price `P0` wraps the `OracleManager.getPrice` call.
+If that oracle is stale or the L2 sequencer is reported down, the manager **reverts**, and
+the SDK catches it and returns a typed `NotPriceable` envelope rather than throwing:
+
+```ts
+type Priceable<T> =
+  | ({ priceable: true } & T)
+  | { priceable: false; reason: DegradeReason; detail?: string }
+```
+
+So the calling pattern is always a discriminated-union check, never a `try/catch`:
+
+```ts
+const preview = await lp.previewPremium(tokenId, marketId)
+if (!preview.priceable) {
+  // reason ∈ 'oracle-degraded' | 'market-unknown' | 'position-unknown' | …
+  showDegraded(preview.reason)
+} else {
+  showPremium(preview.best, preview.path)
+}
+```
+
+LP **writes** are the one place a missing signer is a hard error: with no `walletClient`,
+`buyProtection` / `settle` / `poke` throw a clear error *on call* (not at construction),
+so a read-only SDK still constructs and prices fine. See the full
+envelope taxonomy in [SDK degradation](/sdk/degradation).
+
+## Method reference
+
+<Note>
+**Decimals are load-bearing.** dUSDC is the **6-decimal numéraire** — every
+`maxPremium`, premium, `V0`, and `maxIL` is a 6-dec raw `bigint` (`1 dUSDC = 1_000_000n`).
+dWETH is 18-dec, Chainlink feeds are 8-dec, and ratios (`aWad`, `bWad`, σ_ref, loads) are
+`WAD = 1e18`. See [decimals & units](/sdk/addresses-units).
+</Note>
+
+| Method | R/W | Returns | Calls (on-chain) | Degradation |
+| --- | --- | --- | --- | --- |
+| [`getLoadParams`](#getloadparams) | R | `LoadParams` (cached) | Core `loadParams` | throws on no-RPC (cached after 1st) |
+| [`resolveGeometry`](#resolvegeometry) | R | `Priceable<{ geometry }>` | NPM `positions`, Core `markets` / `oracleDerivedSqrtPriceX96`, TickMath, OracleManager `getPrice`, ILMath `computeMaxIL` / `getAmountsForLiquidity` | `market-unknown` / `position-unknown` / `oracle-degraded` |
+| [`listEligiblePositions`](#listeligiblepositions) | R | `EligiblePosition[]` | NPM `balanceOf` / `tokenOfOwnerByIndex` / `positions`, then `resolveGeometry` | `[]` on no-NPM; per-row `inRange:undefined` if oracle degraded |
+| [`previewPremium`](#previewpremium) | R *(+opt poke W)* | `Priceable<PreviewResult>` | FVO `fairPremium`, ConvexityVault `inventory`, Core `loadParams` / `markets`; engine `GET /quote`; opt `VolOracle.poke` | `NotPriceable` if oracle degraded; Path B silently absent if engine unreachable |
+| [`getPayoffCurve`](#getpayoffcurve) | R | `Priceable<PayoffCurve>` | ILMath `computeIL` over a sqrt-price grid | `NotPriceable` if oracle degraded |
+| [`buyProtection`](#buyprotection) | **W** | `Hex` (txHash) | NPM `approve`, dUSDC `allowance` / `approve`, Core `createSwapRouted` / `createSwapPathA` / `createSwap` | throws clear error if no wallet |
+| [`getProtectionStatus`](#getprotectionstatus) | R | `ProtectionStatus \| {available:false, reason}` | Core `swaps` + `settlePreview` (via `simulateContract`), OracleManager `getPrice`, Core `oracleDerivedSqrtPriceX96` | `available:false` on unknown swap; `ilToDate` is itself `Priceable` |
+| [`getClaimableFees`](#getclaimablefees) | R | `ClaimableFees \| {available:false}` | Core `swaps`, NPM `positions` (checkpointed `tokensOwed0/1`) | **under-states**; precise needs subgraph |
+| [`settle`](#settle) | **W** | `Hex` (txHash) | Core `swaps` (recover expiry), Chainlink round-walk, Core `settle(swapId, hintRoundId)` | throws clear error if no wallet |
+| [`autoProtect`](#autoprotect) | **W** *(unless `dryRun`)* | `AutoProtectResult[]` | orchestrates list → preview → buy; scans `swaps` / `nextSwapId` for ACTIVE dedupe | per-row `skipped` / `error`; **never throws** |
+| [`poke`](#poke) | **W** | `Hex` (txHash) | `VolOracle.poke(token)` | throws if no wallet |
+| [`findHintRoundId`](#findhintroundid) | R | `bigint` | Chainlink `latestRoundData` / `getRoundData` backwards walk | returns best round on un-fetchable phase boundary |
+
+---
+
+### `getLoadParams`
+
+Reads and caches the protocol's [load-stack parameters](/math/load-stack) from
+`InflexionCore.loadParams`. These feed the client-side TS-port load
+math (regime bands, util/disp curves, `maxLoadBps` = invariant I10).
+
+<ParamField path="(no args)">
+None.
+</ParamField>
+
+<ResponseField name="returns" type="LoadParams">
+The on-chain load parameters. Cached after the first read; throws only if there is no RPC
+client and the cache is empty.
+</ResponseField>
+
+```ts
+const params = await lp.getLoadParams()
+// params.maxLoadBps is the I10 ceiling every MM quote and pool load is clamped to.
+```
+
+---
+
+### `resolveGeometry`
+
+Resolves a position NFT + a market into the full settlement geometry — the heart of
+pricing. It reads the NFT's ticks, derives `sqrtPaX96` / `sqrtPbX96` from TickMath,
+reads the live `sqrtP0X96` (from the oracle-derived price), converts to the WAD ratios
+`a`/`b`, computes entry amounts and **MaxIL**, and stamps the `inRange` gate.
+
+<ParamField path="tokenId" type="bigint" required>
+The Uniswap v3 position NFT id.
+</ParamField>
+
+<ParamField path="marketId" type="0x${string}" required>
+The `bytes32` market id (token0/token1/fee/duration). See
+[markets](/reference/markets-grid).
+</ParamField>
+
+<ResponseField name="returns" type="Priceable<{ geometry: LpGeometry }>">
+On success, `{ priceable: true, geometry }`. On failure,
+`{ priceable: false, reason }` with `reason ∈ 'market-unknown' | 'position-unknown' | 'oracle-degraded'`.
+
+<Expandable title="LpGeometry">
+<ResponseField name="tokenId" type="bigint" />
+<ResponseField name="token0 / token1" type="0x${string}" />
+<ResponseField name="fee" type="number" />
+<ResponseField name="tickLower / tickUpper" type="number" />
+<ResponseField name="liquidity" type="bigint">
+The position liquidity `L` — **stamped here and stored at creation, never re-read from
+the NFT at settlement** (invariant [I6](/security/invariants)).
+</ResponseField>
+<ResponseField name="sqrtPaX96 / sqrtPbX96 / sqrtP0X96" type="bigint">
+Range bounds and live spot, in Uniswap Q64.96 sqrt-price form.
+</ResponseField>
+<ResponseField name="aWad / bWad" type="bigint">
+`a = (sqrtPa/sqrtP0)²`, `b = (sqrtPb/sqrtP0)²` in WAD — the geometry the
+[Φ-sum](/math/fair-value-phi-sum) and load stack consume.
+</ResponseField>
+<ResponseField name="amount0Entry / amount1Entry" type="bigint">
+Token amounts implied by `L` at entry, from `ILMath.getAmountsForLiquidity`.
+</ResponseField>
+<ResponseField name="maxIL" type="bigint">
+The [MaxIL](/concepts/maxil) cap (6-dec numéraire) — both the payout ceiling and the
+unit of risk.
+</ResponseField>
+<ResponseField name="inRange" type="boolean">
+`sqrtP0 >= sqrtPa && sqrtP0 <= sqrtPb` — the on-chain in-range gate. `createSwap`
+**rejects out-of-range entries**.
+</ResponseField>
+</Expandable>
+</ResponseField>
+
+<Warning>
+**`inRange:false` is informative, not an error.** It tells you the on-chain create call
+will revert because `P0` is outside `[Pa, Pb]`. **Why:** Inflexion hedges *in-range*
+convexity only — out-of-range there is no in-range IL to transfer, so the
+[in-range invariant](/security/invariants) is enforced at creation. **Mitigation:** surface
+"out of range — not eligible" in the UI and offer the LP a position whose range still
+brackets spot.
+</Warning>
+
+---
+
+### `listEligiblePositions`
+
+Enumerates an owner's Uniswap v3 NFTs and prices each one across the requested durations.
+It reads `balanceOf` / `tokenOfOwnerByIndex` / `positions` from the NPM, then runs
+`resolveGeometry` per (position × duration) pair.
+
+<ParamField path="owner" type="0x${string}" required>
+The wallet whose positions to enumerate.
+</ParamField>
+
+<ParamField path="opts.durations" type="number[]">
+Durations (seconds) to price each position against. Defaults to the market grid's
+durations.
+</ParamField>
+
+<ResponseField name="returns" type="EligiblePosition[]">
+One row per (position × duration). Each row carries the resolved geometry plus eligibility
+flags. Returns an **empty array** if the NPM is unreachable. Per row, `inRange` is
+`undefined` when the oracle is degraded for that price (the position can't be priced this
+block).
+</ResponseField>
+
+---
+
+### `previewPremium`
+
+The load-bearing method: _"what dollar premium will I be charged on THIS position if I
+sign in the next block?"_ It is the **best-of `{pool, MM}`** quote, both capped at the same
+MaxIL.
+
+<ParamField path="tokenId" type="bigint" required />
+<ParamField path="marketId" type="0x${string}" required />
+<ParamField path="opts.poke" type="boolean">
+If `true`, sends a `VolOracle.poke(token)` write before reading to refresh the σ_ref EWMA
+(otherwise pure read).
+</ParamField>
+<ParamField path="opts.engineBaseUrl" type="string">
+Override the Path-B quote engine base for this call.
+</ParamField>
+
+<ResponseField name="returns" type="Priceable<PreviewResult>">
+On success the full pricing breakdown; on oracle degradation, `NotPriceable`.
+
+<Expandable title="PreviewResult">
+<ResponseField name="marketId" type="0x${string}" />
+<ResponseField name="maxIL" type="bigint">The shared cap both paths are bounded by.</ResponseField>
+<ResponseField name="fairPremium" type="bigint">
+The on-chain Φ-sum fair value (numéraire) — read, **never reimplemented off-chain**.
+</ResponseField>
+<ResponseField name="fairRateWad / sigmaRefWad" type="bigint">The fair rate and reference vol used.</ResponseField>
+<ResponseField name="premiumA" type="bigint">Path-A pool premium = `ceil(fairPremium·(1+totalLoad))` capped at MaxIL.</ResponseField>
+<ResponseField name="premiumB" type="bigint | undefined">Best live signed MM quote, capped at the same MaxIL. **Undefined** if the engine is unreachable or no quote beats the pool.</ResponseField>
+<ResponseField name="best" type="bigint">The cheaper of the two.</ResponseField>
+<ResponseField name="path" type="'A' | 'B'">Which rail produced `best`.</ResponseField>
+</Expandable>
+</ResponseField>
+
+**How the premium is built:**
+
+<Steps>
+<Step title="Read the on-chain fair value">
+`FairValueOracle.fairPremium(token, aWad, bWad, durationSeconds, maxIL)` →
+`(premium, fairRateWad, sigmaRefWad)`. The [Φ-sum](/math/fair-value-phi-sum) is never
+reimplemented off-chain.
+</Step>
+<Step title="Read pool inventory + params">
+`ConvexityVault.inventory()` → `(total, locked, free, util, conc)` and `loadParams()`.
+</Step>
+<Step title="Finish the load stack client-side (the single permitted duplication)">
+`totalLoad = cvamm.totalLoadWad(sigmaRef, util, conc, params)`, then
+`premiumA = cvamm.premiumFromLoad(fairPremium, totalLoad)` capped at MaxIL — byte-equal
+to `_pricePathAFromFair` on-chain because the deployed `CvammPricing` lib is
+[delegatecall-only](/sdk/cvamm-port).
+</Step>
+<Step title="Fetch the best MM quote (best-effort)">
+`GET ${engineBaseUrl}/quote?marketId=…` for the cheapest live signed quote;
+`premiumB = cvamm.pathBPremium(fairPremium, loadBps, maxIL)` capped at the same MaxIL. An
+unreachable engine leaves `premiumB` undefined and routes Path A — **never an error**.
+</Step>
+<Step title="Pick the cheaper, then fire telemetry">
+`best`/`path` = `min(premiumA, premiumB)`. A fire-and-forget telemetry
+ping (latent-demand [Signal 4](/moat/five-signals)) is sent — never awaited, never throws.
+</Step>
+</Steps>
+
+<Tip>
+`previewPremium` performs no approvals and sends no transaction (unless `poke:true`).
+Treat it as the quote you snapshot to compute `maxPremium` immediately before calling
+[`buyProtection`](#buyprotection).
+</Tip>
+
+---
+
+### `getPayoffCurve`
+
+Computes the LP's settlement payoff across a grid of terminal prices, with the cap
+applied. Drives the payoff chart in the [protect flow](/app/protect).
+
+<ParamField path="tokenId" type="bigint" required />
+<ParamField path="marketId" type="0x${string}" required />
+<ParamField path="opts.points" type="number">
+Number of grid points across the sqrt-price range. Higher = smoother curve.
+</ParamField>
+
+<ResponseField name="returns" type="Priceable<PayoffCurve>">
+On success, the curve of `(price, il, payout)` where `payout = min(il, MaxIL)`, evaluated
+via `ILMath.computeIL` over a sqrt-price grid. `NotPriceable` if the
+oracle is degraded.
+</ResponseField>
+
+The cap is applied here, so the curve flattens at MaxIL — the visual proof
+that [no bad debt](/concepts/no-bad-debt) is structural: the LP never claims more than the
+underwriter's locked collateral.
+
+---
+
+### `buyProtection`
+
+The LP write. Sends approvals (by default) and fires the chosen create call on
+`InflexionCore`.
+
+<ParamField path="tokenId" type="bigint" required>
+The position NFT to protect.
+</ParamField>
+<ParamField path="marketId" type="0x${string}" required>
+Required for the Path-A force path; for routed/Path-B the marketId travels inside the
+quote.
+</ParamField>
+<ParamField path="maxPremium" type="bigint" required>
+The LP's slippage guard (numéraire raw, 6-dec). The on-chain create **reverts** if the
+routed premium would exceed it.
+</ParamField>
+<ParamField path="quote" type="SignedQuote">
+An MM quote envelope. Required when `escapeHatch:'B'`; optional for routed (omit → the
+EMPTY_QUOTE sentinel → router falls back to the pool).
+</ParamField>
+<ParamField path="signature" type="0x${string}">
+The EIP-712 signature for `quote`.
+</ParamField>
+<ParamField path="escapeHatch" type="'A' | 'B'">
+Force a specific rail. Omit for **routed best-of** (recommended). See the create-call
+matrix below.
+</ParamField>
+<ParamField path="approve" type="boolean" default="true">
+When not explicitly `false`, sends NPM + dUSDC approvals to **InflexionCore** before the
+create call.
+</ParamField>
+
+<ResponseField name="returns" type="Hex">
+The create transaction hash. **Throws a clear error if no wallet client is configured.**
+</ResponseField>
+
+#### Which create call fires
+
+| `escapeHatch` | Contract fn | Notes |
+| --- | --- | --- |
+| `undefined` (default) | `createSwapRouted(quoteTuple, signature, tokenId, maxPremium)` | best-of `{pool, MM}`. A missing quote uses the **EMPTY_QUOTE sentinel** (`mm == address(0)`, empty signature) so the router falls back to the pool. |
+| `'A'` | `createSwapPathA(marketId, tokenId, maxPremium)` | force the always-on [cvAMM pool](/protocol/path-a-cvamm). |
+| `'B'` | `createSwap(quoteTuple, signature, tokenId, maxPremium)` | force a specific signed [MM quote](/protocol/path-b-mm); requires `{quote, signature}` or throws. |
+
+<Note>
+**`createSwapRouted` never reverts on a bad MM quote.** A malformed or stale quote falls
+back to the pool on-chain. Only the *executed* rail mutates nonce / capacity / lock — see
+[routing](/protocol/routing).
+</Note>
+
+#### Approvals — the spender is **InflexionCore**
+
+When `buyProtection` runs with `approve` not explicitly `false`, the SDK sends **two**
+approvals before the create call:
+
+- **NPM** `approve(core.inflexionCore, tokenId)` — the position NFT to the core.
+- **dUSDC** — read `allowance(account, core.inflexionCore)`; if `< maxPremium`, send
+  `approve(core.inflexionCore, maxPremium)` — **spender is InflexionCore**.
+
+---
+
+### `getProtectionStatus`
+
+Reads the live state of an existing protection (swap): status enum, which rail
+underwrote it, and the IL-to-date with the cap applied.
+
+<ParamField path="swapId" type="bigint" required>
+The id returned in the `SwapCreated` event from `buyProtection`.
+</ParamField>
+
+<ResponseField name="returns" type="ProtectionStatus | {available:false, reason}">
+`available:false` if the swap id is unknown.
+
+<Expandable title="ProtectionStatus">
+<ResponseField name="status" type="number">
+`0 = UNINITIALIZED`, `1 = ACTIVE`, `2 = SETTLED`.
+</ResponseField>
+<ResponseField name="isPathA" type="boolean">
+`mm == convexityVault` — i.e. underwritten by the [pool](/protocol/path-a-cvamm).
+</ResponseField>
+<ResponseField name="ilToDate" type="Priceable<{ il, payout, capHit }>">
+The realized IL so far, the capped `payout`, and `capHit = payout < il`. Itself a
+`Priceable` — it degrades if the oracle is down without failing the whole status read.
+</ResponseField>
+<ResponseField name="noBadDebtFull" type="true">
+The Claim-A marker (qualified — see disclosure above).
+</ResponseField>
+</Expandable>
+</ResponseField>
+
+`ilToDate.payout` is computed from `settlePreview` via `simulateContract` against the
+oracle-derived spot, so it mirrors exactly what `settle` would pay this block.
+
+---
+
+### `getClaimableFees`
+
+Estimates the Uniswap fees the LP can still collect on the underlying position, from the
+NFT's checkpointed `tokensOwed0/1`.
+
+<ParamField path="swapId" type="bigint" required />
+
+<ResponseField name="returns" type="ClaimableFees | {available:false}">
+`{ available:false }` if the swap is unknown; otherwise the checkpointed owed amounts.
+</ResponseField>
+
+<Warning>
+**This figure UNDER-states actual claimable fees.** **Why:** `tokensOwed0/1` only reflects
+fees checkpointed at the last NFT interaction, not fees accrued since. **Mitigation:** the
+precise figure needs the [subgraph](/integrate/subgraph)'s fee accounting, which is
+pending; until then treat this as a conservative lower bound and label it as such in the
+UI.
+</Warning>
+
+<Maturity />
+
+---
+
+### `settle`
+
+The LP (or anyone) settlement write. Recovers the swap's expiry, finds the bracketing
+Chainlink round (round-walk, or your hint), then calls `Core.settle` to pay the LP
+`min(realized_IL, MaxIL)` from the underwriter's collateral.
+
+<ParamField path="swapId" type="bigint" required />
+<ParamField path="opts.hintRoundId" type="bigint">
+A Chainlink round id that brackets expiry. If omitted, the SDK walks Chainlink rounds
+backwards to find it (`findHintRoundId`).
+</ParamField>
+
+<ResponseField name="returns" type="Hex">
+The settlement transaction hash. **Throws a clear error if no wallet client is configured.**
+</ResponseField>
+
+<Note>
+**`settle` always succeeds within the liveness window** (invariant
+[I8](/security/forks)): `expiry + LIVENESS_WINDOW + MAX_STALENESS + GRACE_PERIOD`. The
+round-walk + grace period is the [oracle-deadlock fork](/security/forks) resolution — a
+late or briefly-stale feed cannot strand a settlement.
+</Note>
+
+---
+
+### `autoProtect`
+
+Orchestrates the whole flow — list → preview → buy — across an owner's eligible positions,
+with ACTIVE-protection dedupe. **Never throws**: every row is a structured success /
+`skipped` / `error` result.
+
+<ParamField path="owner" type="0x${string}" required>
+The wallet whose positions to auto-protect.
+</ParamField>
+<ParamField path="maxPremium" type="bigint">
+Per-position premium ceiling (numéraire raw). Rows whose best premium exceeds it are
+`skipped`.
+</ParamField>
+<ParamField path="durations" type="number[]">
+Durations to consider per position.
+</ParamField>
+<ParamField path="dryRun" type="boolean">
+If `true`, prices and plans but **sends no transaction** — pure read.
+</ParamField>
+
+<ResponseField name="returns" type="AutoProtectResult[]">
+One row per candidate. Each row is a success (with txHash), a `skipped` row (already
+ACTIVE, out of range, or over `maxPremium`), or an `error` row. The method scans
+`swaps` / `nextSwapId` for existing ACTIVE protection to avoid double-buying.
+</ResponseField>
+
+<ResponseField name="behavior" type="W (unless dryRun)">
+Writes one create tx per actionable row. Requires a wallet unless `dryRun:true`.
+</ResponseField>
+
+---
+
+### `poke`
+
+Refreshes the σ_ref EWMA for a token before pricing, by calling `VolOracle.poke(token)`.
+
+<ParamField path="token" type="0x${string}" required>
+The volatile token whose σ_ref to refresh.
+</ParamField>
+
+<ResponseField name="returns" type="Hex">
+The poke transaction hash. **Throws if no wallet client is configured.**
+</ResponseField>
+
+Use this (or `previewPremium({ poke:true })`) when σ_ref may be stale and you want the
+freshest fair value before signing.
+
+---
+
+### `findHintRoundId`
+
+A read helper that walks Chainlink rounds backwards from latest to find the round that
+brackets a target timestamp — the `hintRoundId` `settle` needs.
+
+<ParamField path="oracleToken" type="0x${string}" required>
+The token whose Chainlink feed to walk.
+</ParamField>
+<ParamField path="expiry" type="bigint" required>
+The target timestamp (the swap's expiry).
+</ParamField>
+<ParamField path="opts.maxWalk" type="number">
+Cap on how many rounds to walk backwards.
+</ParamField>
+
+<ResponseField name="returns" type="bigint">
+The bracketing round id. On an un-fetchable phase boundary it returns the best available
+round rather than throwing.
+</ResponseField>
+
+---
+
+## Worked example — preview, buy (routed), settle
+
+```ts
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient, engineBaseUrl })
+const lp = sdk.lp
+
+// 1. Price it — Path-A pool + best engine MM quote, both capped at MaxIL.
+const preview = await lp.previewPremium(demo.lpPositionTokenId, demo.marketId_fee500_7d)
+if (!preview.priceable) throw new Error(`not priceable: ${preview.reason}`)
+console.log(preview.best, preview.path)        // e.g. 8_930_000n (=$8.93), 'B'
+
+// 2. maxPremium = best + 1% slippage (raw 6-dec; round up).
+const maxPremium = (preview.best * 10_100n) / 10_000n + 1n
+
+// 3. Buy — default approvals (NPM approve + dUSDC approve to InflexionCore).
+const txHash = await lp.buyProtection({
+  tokenId: demo.lpPositionTokenId,
+  marketId: demo.marketId_fee500_7d,
+  maxPremium,
+  // omit quote/signature → createSwapRouted picks the cheaper of pool vs MM on-chain
+})
+
+// 4. Inspect, then settle after expiry (round-walk finds the bracketing round).
+const status = await lp.getProtectionStatus(2n)
+if (status.available && status.ilToDate.priceable) {
+  console.log(status.ilToDate.payout, status.ilToDate.capHit)   // capped payout, cap-hit flag
+}
+const settleTx = await lp.settle(2n)
+```
+
+To route a *specific* MM quote (Path B), pass `{ quote, signature, escapeHatch: 'B' }`
+where `quote` is the [`SignedQuote`](/integrate/quote-signing) and `signature` the EIP-712
+sig.
+
+## Approvals & decimals at a glance
+
+| Action | Spender | Approval flow | Decimals |
+| --- | --- | --- | --- |
+| `buyProtection` | **InflexionCore** | NPM `approve(core, tokenId)` + dUSDC `approve(core, maxPremium)` (auto unless `approve:false`) | dUSDC 6-dec |
+| `settle` / `poke` | — | **no approval** | — |
+
+## Framing that must stay exact
+
+- **In-range convexity hedge, not "IL insurance".** Entry requires `Pa ≤ P0 ≤ Pb`; the
+  `inRange` gate rejects out-of-range at creation. See
+  [the hedge](/concepts/in-range-convexity-hedge).
+- **Payout = `min(realized_IL, MaxIL)`; the cap is load-bearing** for
+  [no bad debt](/concepts/no-bad-debt). `getPayoffCurve` / `ilToDate` apply it.
+- **The Φ-sum is read on-chain, never reimplemented** — only the deterministic
+  [load stack](/math/load-stack) is mirrored off-chain (parity-locked), because the
+  deployed lib is [delegatecall-only](/sdk/cvamm-port).
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="LpClient guide" icon="book-open" href="/sdk/lp-client">
+    The narrative walkthrough of the LP surface, with the routing flow explained.
+  </Card>
+  <Card title="Degradation envelopes" icon="shield-halved" href="/sdk/degradation">
+    `Priceable` / `Degraded` / `WriteResult` — the full envelope taxonomy.
+  </Card>
+  <Card title="Lifecycle" icon="timeline" href="/protocol/lifecycle">
+    Create → active → settle, end to end.
+  </Card>
+  <Card title="Routing" icon="route" href="/protocol/routing">
+    How `createSwapRouted` picks pool vs MM and never reverts on a bad quote.
+  </Card>
+</CardGroup>

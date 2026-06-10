@@ -1,0 +1,258 @@
+---
+title: "Cross-cutting UX"
+description: "The five things that behave the same on every dApp page: the transaction state machine, the three different approval spenders, why 'pending' is not an error, and why pool pricing is a parity-locked TS port of a delegatecall-only library."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+import AddressTable from '/snippets/address-table.mdx'
+
+Most of what you need to know to *use* a page lives on that page — [Protect](/app/protect), [Earn](/app/earn), [Underwrite](/app/underwrite), [Dashboard](/app/dashboard), [Markets](/app/markets), [Data](/app/data). This page is the opposite: the handful of behaviors that are **identical across all of them**, so you learn them once. Get these four right and nothing in the app will surprise you.
+
+<CardGroup cols={2}>
+  <Card title="Transaction states" icon="spinner" href="#transaction-states">
+    One state machine drives every write button: `signing → pending → success / error`.
+  </Card>
+  <Card title="Three approval spenders" icon="key" href="#the-three-approval-spenders">
+    The recurring gotcha — premium, deposit, and collateral approve **three different** contracts.
+  </Card>
+  <Card title="Pending is not error" icon="hourglass-half" href="#pending-is-not-error">
+    A missing data source is a typed, self-describing state — never a crash, never a fake number.
+  </Card>
+  <Card title="Pool pricing is a TS port" icon="code-branch" href="#cvammpricing-is-delegatecall-only">
+    `CvammPricing` is delegatecall-only on-chain, so the SDK mirrors it with a parity-locked port.
+  </Card>
+</CardGroup>
+
+## Transaction states
+
+Every write in the app — buy protection, settle, deposit, request/withdraw, post or withdraw MM collateral, cancel nonces — goes through **one hook**: `useTx`. It drives the button label, waits for the receipt, and normalizes the two different shapes a write can return.
+
+### The state machine
+
+`TxStatus` is a five-state enum:
+
+```ts lib/use-tx.ts
+export type TxStatus = 'idle' | 'signing' | 'pending' | 'success' | 'error'
+```
+
+A click walks it forward deterministically:
+
+<Steps>
+  <Step title="idle">
+    The resting state. The button is live and clickable. `reset()` returns here after a success or error.
+  </Step>
+  <Step title="signing">
+    Set the instant you click, **before** the wallet popup resolves. You are being asked to sign in your wallet. The button is busy.
+  </Step>
+  <Step title="pending">
+    Set once a tx hash exists and the app is waiting on the receipt — `publicClient.waitForTransactionReceipt({ hash })`. The tx is in the mempool / being mined.
+  </Step>
+  <Step title="success">
+    The receipt landed. The page's queries invalidate so the new state appears — e.g. on `/protect`, the eligible-positions, owner-swaps, and preview queries refetch so your new protection shows up.
+  </Step>
+  <Step title="error">
+    Anything threw. The message is trimmed to its first line and stored — see [readable errors](#readable-errors) below.
+  </Step>
+</Steps>
+
+The hook also exposes `isBusy = status === 'signing' || status === 'pending'`, which is what disables a button while a write is in flight so you cannot double-submit.
+
+### Two return shapes, one normalizer
+
+A write fn returns **either** a `txHash` (a `Hex` string, from `LpClient` / `MmClient`) **or** a `WriteResult`-like object (from `DepositorClient`). `useTx` collapses both:
+
+- a raw `Hex` string is taken as the hash directly;
+- a `WriteResult` is unpacked by its `status` field — and crucially, two statuses are converted into thrown errors so the UI never silently no-ops:
+
+```ts lib/use-tx.ts
+if (res.status === 'error') throw new Error(res.detail ?? 'transaction failed')
+if (res.status === 'deferred-no-wallet') throw new Error('Connect a wallet to sign.')
+```
+
+That `deferred-no-wallet` branch is how the depositor flow's graceful **write degradation** surfaces to a human: the `DepositorClient` returns `WriteResult { status: 'deferred-no-wallet' }` (carrying the unsigned tx for an external signer) instead of crashing at construction, and `useTx` turns it into a clear *"Connect a wallet to sign."* on click — see [the SDK degradation contract](/sdk/degradation). LP and MM writes throw their own clear error on call for the same reason.
+
+### Readable errors
+
+viem's revert messages are notoriously verbose — multi-line dumps with ABI snippets and request bodies. `useTx` keeps only the first line:
+
+```ts lib/use-tx.ts
+// Trim viem's verbose multi-line revert dumps to the first line.
+setError(msg.split('\n')[0])
+```
+
+So when a junior withdraw reverts `JuniorBelowLocked`, or an MM quote is rejected for a bad signature, or a routed premium would exceed your `maxPremium` slippage guard, you see a single readable line — not a wall of stack trace.
+
+<Note>
+  Because `isBusy` and the trimmed `error` come from the same hook everywhere, the *feel* of a transaction is identical on every page. Learn it once on [Protect](/app/protect) and you already know it on [Earn](/app/earn) and [Underwrite](/app/underwrite).
+</Note>
+
+## The three approval spenders
+
+This is the single most common integration mistake, so it gets its own section. **dUSDC** is the numéraire for everything — premiums, deposits, and MM collateral — but the three flows approve **three different contracts**. Approve the wrong one and the subsequent call simply reverts on insufficient allowance.
+
+| Action | Token approved | **Spender** | Approval flow |
+| --- | --- | --- | --- |
+| **LP buys protection** | dUSDC (+ the position NFT) | **InflexionCore** | NPM `approve(core, tokenId)` **and** dUSDC `approve(core.inflexionCore, maxPremium)`, auto-sent when `approve !== false` |
+| **Depositor deposits** | dUSDC | **ConvexityVault** | dUSDC `approve(core.convexityVault, amount)` (auto when `autoApprove:true`), then `deposit(tranche, amount)` |
+| **MM posts collateral** | dUSDC | **UnderwriterVault** | a **separate, direct** ERC-20 `approve(underwriterVault, amount)` + `deposit(amount)` — not part of `signQuote` |
+
+The exact addresses live in the registry, never inline — see [the deployment addresses](/reference/deployments):
+
+<AddressTable />
+
+### Why they differ — and the design behind it
+
+This is not an oversight; it reflects three genuinely different custody relationships.
+
+<AccordionGroup>
+  <Accordion title="LP premium → InflexionCore" icon="shield-halved">
+    The LP's premium and the position NFT both flow to **InflexionCore**, the state machine that actually creates the swap. `buyProtection` (with default `approve: true`) auto-sends **two** approvals before the create call: NPM `approve(core.inflexionCore, tokenId)` for the position NFT, then — if `allowance(account, core.inflexionCore) < maxPremium` — dUSDC `approve(core.inflexionCore, maxPremium)`. The spender is Core because Core is what pulls the premium and escrows the NFT when it calls [`createSwapRouted`](/protocol/routing). The Protect page auto-approves for you.
+  </Accordion>
+  <Accordion title="Depositor deposit → ConvexityVault (not Core)" icon="piggy-bank">
+    A depositor's capital goes straight into the **pooled cvAMM vault** (`ConvexityVault`), the Path-A underwriter — it never touches Core. With `autoApprove: true` the SDK checks `allowance` and, if short, sends dUSDC `approve(core.convexityVault, amount)` before `deposit(tranche, amount)`. The `/earn` hint text says this explicitly, and the success toast restates the risk: *"Deposit confirmed. Capital is NOT guaranteed."* This is the gotcha most people hit — **approving Core for a deposit will not work.**
+  </Accordion>
+  <Accordion title="MM collateral → UnderwriterVault (a separate flow)" icon="gavel">
+    An MM posts collateral to the **per-MM `UnderwriterVault`** before its signed quotes can be filled. This is deliberately **not** part of `signQuote` and there is **no `MmClient` helper for it** — the SDK exposes the ABI + address and the `/underwrite` page calls the documented functions directly via the wallet client rather than inventing a method. Deposit is two txs: ERC-20 `approve(underwriterVault, amount)` (only if the allowance is short), then `UnderwriterVault.deposit(amount)`. On a Path-B fill, the MM's own collateral is locked at MaxIL and pays the LP at settlement.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  **Limit:** there is no single "approve dUSDC to the protocol" step — the right spender depends on which role you are acting in.
+
+  **Why:** the three roles have three different custody endpoints. LP premium settles through the **state machine** (Core); depositor capital enters the **pooled vault** (ConvexityVault); MM collateral enters a **per-MM vault** (UnderwriterVault). Routing them all to one contract would conflate three distinct trust relationships.
+
+  **Mitigation:** in the dApp you rarely touch this directly — Protect and Earn **auto-approve the correct spender** for you, and the MM collateral panel hard-codes the right two-tx flow. If you integrate via the [SDK](/sdk/overview), let the clients do the approval (`approve: true` / `autoApprove: true`) and they will always target the right contract. There is **no approval step** for `settle`, `requestWithdrawal`, `withdraw`, or `cancelNonces`.
+</Warning>
+
+A separate but related rule the MM collateral hint surfaces: **locked collateral must stay instantly liquid** — *"Collateral must stay instantly liquid — never lock it elsewhere"*. That is the rule forbidding routing locked collateral to utilization-gated venues; see [the collateral models](/protocol/collateral-models).
+
+## Pending is not error
+
+The whole app runs against a deployment whose **subgraph is not yet indexed**. Rich on-chain events (`SwapPriced`, `QuoteFilled`, the lifecycle events) have been emitted since deploy block `274081134`, but the indexer is still pending deployment. Anything historical, aggregate, or time-series therefore has no data source today.
+
+What the app does with that is the point. It does **not** throw, freeze, or fabricate a number. Every such surface degrades into a **typed, honest, self-describing state**.
+
+<Steps>
+  <Step title="Reads return a typed envelope, never a throw">
+    Any read needing a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders a calm *pending* / *degraded* state — never an error. See [the degradation cheat-sheet](/sdk/degradation).
+  </Step>
+  <Step title="The pending note names its future route">
+    A `PendingNote` prints the reason and, where applicable, the **exact future API route + query** the surface will be served from once the subgraph deploys — straight off the typed `ApiPending` envelope. It is a promise with an address, not a placeholder.
+  </Step>
+  <Step title="Live-but-degraded oracle states are honest too">
+    If the **live** oracle reverts (stale feed / sequencer down), a position renders *"not priceable now"* — the protection still exists and becomes quotable when the oracle recovers — and **Buy is disabled** rather than producing a wrong number. The IL-to-date on an active protection degrades the same way: *"The protection is intact — payout is still computed at settlement from the price-at-expiry"*.
+  </Step>
+</Steps>
+
+### What is live vs pending today
+
+The honest split, identical wherever a surface appears:
+
+<Tabs>
+  <Tab title="Live now (RPC)">
+    - Premium preview and the payoff-with-cap chart
+    - Buy and settle on **Path A** (the cvAMM pool)
+    - Vault deposit / withdraw (depositor)
+    - Market pricing and the current **clearing-load surface**
+    - σ_ref (the reference vol) and the regime badge
+    - The book (on-chain swap scan) and **coarse** fills
+  </Tab>
+  <Tab title="Pending the subgraph">
+    - Per-market history and volume; MM win-rate / share
+    - NAV history
+    - The time-series [data-moat signals](/concepts/data-moat) (Signals 2–5)
+    - **Precise** MM fill attribution (the `QuoteFilled` join)
+    - Full fee accounting — `getClaimableFees` **under-states** today
+
+    None of these is an error — each degrades to a typed `pending` state.
+  </Tab>
+</Tabs>
+
+<Warning>
+  **Limit:** MM fill attribution is **coarse** on-chain — a recent-fills feed can show *that* an MM filled, but not *which signed quote* did it.
+
+  **Why:** `isNonceUsed(mm, nonce)` is set on **both** fill and cancel, and `SwapCreated` carries no `quoteId` / `nonce`, so a nonce cannot be joined to a specific quote. The feed badges itself *"coarse"* to say so.
+
+  **Mitigation:** the **precise** path already exists — the `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`) has been emitted since the 2026-06-05 deploy; precise per-quote attribution lights up the moment the subgraph indexes it. The on-chain data is already there; only the indexer is pending.
+</Warning>
+
+<Info>
+  **Why it is built this way.** An app that shows fabricated history looks polished but is dishonest. An app that crashes on a missing backend looks broken. Inflexion does neither: a missing data source becomes a *typed, self-describing pending state* that says exactly what is missing and where it will come from. Treating "pending" as a first-class, honest state — not a bug and not a fake number — is itself the trust signal the product is built around.
+</Info>
+
+<Maturity />
+
+## CvammPricing is delegatecall-only
+
+When you see a **pool premium** or a **clearing load** anywhere in the app — the premium preview on [Protect](/app/protect), the "pool load to beat" on [Underwrite](/app/underwrite), the heat-matrix on [Data](/app/data) — that number is computed **client-side**, by a TypeScript port, not by calling the deployed pricing library. This is intentional and worth understanding, because it is the one place the architecture permits the same logic to live in two languages.
+
+### The split: Φ-sum on-chain, load stack ported
+
+The [pricing stack](/protocol/pricing-stack) has two layers, and they are treated very differently:
+
+1. **FairValue (the Φ-sum)** — the exact closed-form fair premium. It is read **on-chain** from the Stylus [`FairValueOracle`](/concepts/fair-value) (`fairPremium` / `fairRate`) and is **never reimplemented off-chain**.
+2. **The load stack** — the deterministic, `pure` markup over fair value (base load by σ_ref regime + utilization skew + dispersion skew, clamped to `maxLoadBps`). This *is* mirrored off-chain, by the SDK's `cvamm` math port, because the deployed `CvammPricing` library **cannot be read directly**.
+
+The on-chain library `libs.cvammPricing` (`0x4a053d29…`) exposes public functions intended for **delegatecall from Core** during pricing. A direct `eth_call` to it **reverts** — Solidity guards deployed libraries against being called as standalone contracts; this was confirmed on the 2026-06-05 deploy. So there is no way to ask the deployed library "what's the load?" from the client.
+
+The answer is a **parity-locked TypeScript port**: the `cvamm` namespace in the SDK is a permanent, byte-equal mirror of the deployed Solidity load math, held in lockstep by `math.parity.test.ts`. It is the **only** duplication the architecture allows — the load math, never the FairValue Φ-sum.
+
+```ts Computing the pool premium client-side
+import { createInflexionSdk } from '@inflexion/sdk'
+// `cvamm` is the parity-locked TS port of the delegatecall-only CvammPricing library
+import * as cvamm from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+
+// 1. The FairValue Φ-sum is READ on-chain — never reimplemented.
+//    (previewPremium / getMarketPricing / getCurrentLoadSurface do this internally.)
+// 2. The load stack is finished client-side with the TS port:
+const totalLoad = cvamm.totalLoadWad(sigmaRef, util, conc, params)
+const premiumA  = cvamm.premiumFromLoad(fairPremium, totalLoad) // ceil(fairPremium·(1+totalLoad)), capped at MaxIL
+// This is exactly `_pricePathAFromFair` on-chain.
+```
+
+The SDK already does exactly this inside `previewPremium`, `getMarketPricing`, and `getCurrentLoadSurface` — you never call `cvamm.*` yourself unless you are building a custom surface. See [the cvAMM port reference](/sdk/cvamm-port).
+
+<Warning>
+  **Limit:** the deployed `CvammPricing` library is **delegatecall-only** — you cannot `eth_call` `libs.cvammPricing` to get the pool load, and an integrator who tries will get a revert.
+
+  **Why:** Solidity protects deployed libraries from being invoked as standalone contracts; the library only runs on-chain via Core's delegatecall during pricing. This is correct behavior, not a bug.
+
+  **Mitigation:** use the SDK's **parity-locked `cvamm` TS port**, which is held byte-equal to the deployed Solidity by `math.parity.test.ts` and is the single sanctioned duplication. The FairValue Φ-sum is **still** read live on-chain — only the deterministic load markup is ported — so the load-bearing fair value is never reimplemented.
+</Warning>
+
+## The framing that travels with every page
+
+Two claims appear on every risk surface in the app, and they are **never merged**. If you are an **LP**, Claim A is yours; if you are a **depositor or market maker**, Claim B is yours.
+
+<ClaimA />
+
+<ClaimB />
+
+The `/earn` disclosure puts it bluntly: the no-bad-debt guarantee *"is for the protected LP, not for you"*. See [no bad debt](/concepts/no-bad-debt) and [the tranches](/concepts/tranches) for the full treatment.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Before you start" icon="list-check" href="/app/prerequisites">
+    Wallet, network, demo tokens, and an eligible in-range position.
+  </Card>
+  <Card title="Protect an LP position" icon="shield-halved" href="/app/protect">
+    Buy in-range IL protection — the full transaction state machine in action.
+  </Card>
+  <Card title="Earn in the cvAMM" icon="piggy-bank" href="/app/earn">
+    Deposit into the pooled vault — and meet the ConvexityVault spender.
+  </Card>
+  <Card title="Underwrite as a market maker" icon="gavel" href="/app/underwrite">
+    Post collateral to the UnderwriterVault and sign firm per-market quotes.
+  </Card>
+  <Card title="The SDK degradation contract" icon="code" href="/sdk/degradation">
+    The typed envelopes behind every "pending" state, in full.
+  </Card>
+  <Card title="Status & caveats" icon="clipboard-list" href="/reference/status-caveats">
+    The complete honest ledger of what's live, pending, and why.
+  </Card>
+</CardGroup>

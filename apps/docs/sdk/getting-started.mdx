@@ -1,0 +1,338 @@
+---
+title: "Install & instantiate"
+description: "createInflexionSdk(config) — every config field, the full resolution order, the two instantiation modes (wagmi-inject vs server/key-based), and the env fallbacks — with copy-pasteable setups for the browser and Node."
+---
+
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+`@inflexion/sdk` is the typed access layer over the [live deployment](/reference/deployments). It is the **only** layer that holds a signer and the only one that can answer the load-bearing question — _"what dollar premium will I be charged on **this** position if I sign in the next block?"_ — by combining a fresh on-chain [`FairValueOracle`](/concepts/fair-value) read with the position's geometry.
+
+One call wires everything: `createInflexionSdk(config)` builds one public (read) client plus one optional wallet (write) client, then injects them into all five stakeholder surfaces — [`lp`](/sdk/lp-client), [`depositor`](/sdk/depositor-client), [`mm`](/sdk/mm-client), [`data`](/sdk/data-client), and the read-only [`greeks`/`hedge`](/sdk/greeks-hedge).
+
+<Note>
+  **No address is ever passed in.** Every contract address loads from the on-chain address registry — a hard rule, not a convenience. See [addresses & units](/sdk/addresses-units) and [the deployments registry](/reference/deployments).
+</Note>
+
+## Install
+
+The SDK is a workspace package in the Inflexion monorepo. It ships ESM with `viem` as the only hard runtime dependency on the read/write side; the EIP-712 quote helpers are re-exported from the engine.
+
+<CodeGroup>
+```bash pnpm
+pnpm add @inflexion/sdk viem
+```
+
+```bash npm
+npm install @inflexion/sdk viem
+```
+
+```bash yarn
+yarn add @inflexion/sdk viem
+```
+</CodeGroup>
+
+<Info>
+  **Quote helpers are also exposed at a subpath.** The EIP-712 [`SignedQuote`](/integrate/quote-signing) helpers re-export from both `@inflexion/sdk` and `@inflexion/sdk/quote`. Import from the subpath when you only need signing/verification and want to keep your bundle tight.
+</Info>
+
+## The one-call factory
+
+```ts
+function createInflexionSdk(config: InflexionSdkConfig = {}): InflexionSdk
+```
+
+The whole config is optional. With **no args at all** the SDK still constructs — it resolves the RPC and signer from the environment and degrades gracefully if either is absent. The design has two properties you can rely on everywhere:
+
+<CardGroup cols={2}>
+  <Card title="Reads are graceful" icon="shield-check">
+    Anything that needs a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a **typed degraded envelope** (`{ available: false, reason }` / `{ priceable: false, reason }` / `precision: 'coarse'`) — it **never throws**. See [degradation](/sdk/degradation).
+  </Card>
+  <Card title="Writes degrade, never crash at construction" icon="pen">
+    Construction never throws on a missing signer. With no `walletClient`, LP/MM writes throw a **clear error on call** (the one place a missing signer is a hard error); `DepositorClient` instead returns `WriteResult { status: 'deferred-no-wallet' }` carrying the unsigned tx for an external signer.
+  </Card>
+</CardGroup>
+
+## Every config field
+
+`InflexionSdkConfig`. Every field is optional; precedence rules are in [Resolution order](#resolution-order).
+
+<ParamField path="rpcUrl" type="string">
+  Explicit RPC URL for the read client. Falls back to env, then to the chain's default public RPC.
+</ParamField>
+
+<ParamField path="transport" type="Transport">
+  A custom viem `Transport` (for example a test mock). **Overrides `rpcUrl`.**
+</ParamField>
+
+<ParamField path="publicClient" type="PublicClient">
+  A pre-built viem read client. **Overrides `rpcUrl` and `transport`** — this is the recommended browser path, since it reuses the client wagmi already holds and avoids a second RPC connection.
+</ParamField>
+
+<ParamField path="walletClient" type="WalletClient">
+  A pre-built viem write client. **Overrides `privateKey` and `account`.** This is how the browser injects the connected wallet.
+</ParamField>
+
+<ParamField path="privateKey" type="Hex">
+  A raw signer key for writes (server/key-based mode). Falls back to env. **Absent ⇒ writes are deferred**, not crashed.
+</ParamField>
+
+<ParamField path="account" type="Account">
+  A pre-built viem `Account` for writes. **Overrides `privateKey`.**
+</ParamField>
+
+<ParamField path="engineBaseUrl" type="string">
+  Base URL of the off-chain [matching engine](/integrate/engine). Used for Path-B MM quotes and the `previewPremium` latent-demand telemetry ping. Only the `lp` surface receives it.
+</ParamField>
+
+<ParamField path="telemetryUrl" type="string">
+  Override for the telemetry endpoint. Defaults to `${engineBaseUrl}/telemetry/preview`.
+</ParamField>
+
+<ParamField path="fetchImpl" type="typeof fetch">
+  An injected `fetch` implementation (tests / non-browser runtimes). Defaults to the global `fetch` when present.
+</ParamField>
+
+<ParamField path="chainId" type="number" default="421614">
+  The EIP-712 chain id used for [quote signing](/integrate/quote-signing). Defaults to the live chain, `421614`. Only the `mm` surface receives it.
+</ParamField>
+
+## Resolution order
+
+This is the graceful-degradation contract. It is fully deterministic — higher-precedence fields win, and missing fields fall back to env, then to a safe default.
+
+### Read client
+
+```
+config.publicClient
+  ?? makePublicClient({ rpcUrl, transport })
+```
+
+If you pass `publicClient`, it is used verbatim. Otherwise the SDK builds one. The effective `rpcUrl` is resolved in this order:
+
+<Steps>
+  <Step title="config.rpcUrl">
+    The explicit URL you passed.
+  </Step>
+  <Step title="process.env.ARBITRUM_SEPOLIA_RPC">
+    The canonical env var for this network.
+  </Step>
+  <Step title="process.env.SEPOLIA_RPC">
+    A secondary env fallback.
+  </Step>
+  <Step title="the chain's default public RPC">
+    A safe last resort so reads always have a transport.
+  </Step>
+</Steps>
+
+A `transport` you pass overrides `rpcUrl` (it is injected directly into the viem client).
+
+### Write client
+
+```
+config.walletClient
+  ?? makeWalletClient({ account, privateKey, transport, rpcUrl })
+```
+
+`makeWalletClient` **returns `undefined`** when no signer is available — no `account`, no `privateKey` arg, and no env key. When that happens the SDK degrades every write rather than crashing at construction. The signer key is resolved in this order:
+
+<Steps>
+  <Step title="config.account">
+    A pre-built viem account wins outright.
+  </Step>
+  <Step title="config.privateKey">
+    A raw key arg, from which an account is derived.
+  </Step>
+  <Step title="process.env.DEPLOYER_PRIVATE_KEY">
+    The canonical deployer/server key.
+  </Step>
+  <Step title="process.env.PRIVATE_KEY">
+    A secondary env fallback. If none of these is present, the write client is `undefined`.
+  </Step>
+</Steps>
+
+### Chain id
+
+```
+chainId = config.chainId ?? CHAIN_ID   // CHAIN_ID === 421614
+```
+
+<Warning>
+  **Never put a raw private key in the browser.** The key-based path (and the engine's positional `signQuote(privateKey, ...)` helper) is **server-only**. In the browser, inject a `walletClient` and sign with the connected wallet — see [mode (a)](#mode-a-browser-wagmi-inject-pre-built-clients) below and [quote signing](/integrate/quote-signing).
+</Warning>
+
+## What the factory returns
+
+`InflexionSdk`:
+
+```ts
+{
+  publicClient,    // always present
+  walletClient?,   // undefined unless a signer resolved
+  chainId,         // resolved EIP-712 chain id
+  lp,              // LpClient        — buy IL protection (claim A)
+  depositor,       // DepositorClient — passive/active underwriting (claim B)
+  mm,              // MmClient        — Path-B market making
+  data,            // DataClient      — the data moat (read-only)
+  greeks,          // GreeksEngine    — read-only analytics
+  hedge,           // HedgeSuggester  — read-only analytics (never sends a tx)
+}
+```
+
+Only the surfaces that need an extra config field receive one: `lp` gets `engineBaseUrl` / `telemetryUrl` / `fetchImpl`; `mm` gets `chainId`; `depositor` / `data` / `greeks` / `hedge` get just the clients. The five surfaces are documented in [the LP](/sdk/lp-client), [depositor](/sdk/depositor-client), [MM](/sdk/mm-client), [data](/sdk/data-client), and [greeks/hedge](/sdk/greeks-hedge) clients.
+
+## The two instantiation modes
+
+<Tabs>
+  <Tab title="(a) Browser / wagmi — inject clients">
+    The recommended path. Inject the pre-built viem clients wagmi already holds; passing `publicClient` overrides `rpcUrl`/`transport` so you avoid opening a second RPC connection. The wallet client appears only once connected — omit it until then and writes throw a clear error on call.
+
+    ```ts apps/web/lib/use-sdk.ts
+    'use client'
+    import { useMemo } from 'react'
+    import { usePublicClient, useWalletClient, useAccount } from 'wagmi'
+    import { createInflexionSdk, type InflexionSdk } from '@inflexion/sdk'
+
+    export function useInflexionSdk(): InflexionSdk {
+      const publicClient = usePublicClient()             // reads
+      const { data: walletClient } = useWalletClient()   // writes (undefined until connected)
+      const { address } = useAccount()
+
+      return useMemo(
+        () =>
+          createInflexionSdk({
+            publicClient,                                // overrides rpcUrl/transport
+            ...(walletClient ? { walletClient } : {}),   // omit → writes throw a clear error on call
+            chainId: 421614,                             // EIP-712 chainId for quote signing
+            engineBaseUrl: process.env.NEXT_PUBLIC_ENGINE_URL,
+            fetchImpl: fetch,
+          }),
+        [publicClient, walletClient, address],
+      )
+    }
+    ```
+
+    <Tip>
+      **Do not pass `account` explicitly.** wagmi's `useWalletClient()` already carries `.account` and `.chain`; `walletClient.account` is used directly. Spreading `walletClient` only when truthy keeps the SDK in graceful-write mode while the wallet is disconnected.
+    </Tip>
+  </Tab>
+
+  <Tab title="(b) Server / key-based — build from env or key">
+    Let the SDK build both clients from the environment or an explicit key. This is the only place a raw private key is acceptable — a server, a relayer, a script — never the browser.
+
+    ```ts server.ts
+    import { createInflexionSdk } from '@inflexion/sdk'
+
+    const sdk = createInflexionSdk({
+      rpcUrl: process.env.ARBITRUM_SEPOLIA_RPC,
+      privateKey: process.env.DEPLOYER_PRIVATE_KEY as `0x${string}`, // → funded write client
+      engineBaseUrl: process.env.ENGINE_URL,
+    })
+    // sdk.lp / sdk.depositor / sdk.mm / sdk.data / sdk.greeks / sdk.hedge are all wired.
+    ```
+
+    With **no args at all**, the SDK still constructs — it resolves the RPC and signer from env (per the [resolution order](#resolution-order)) and degrades gracefully if either is absent:
+
+    ```ts no-args (env-resolved)
+    import { createInflexionSdk } from '@inflexion/sdk'
+
+    // ARBITRUM_SEPOLIA_RPC + DEPLOYER_PRIVATE_KEY (or PRIVATE_KEY) read from env.
+    const sdk = createInflexionSdk()
+    ```
+  </Tab>
+
+  <Tab title="(c) Read-only — no signer at all">
+    Pass only a read client (or nothing). Every read surface works; every write degrades. Perfect for indexers, dashboards, and the [data moat](/sdk/data-client).
+
+    ```ts read-only.ts
+    import { createInflexionSdk } from '@inflexion/sdk'
+    import { createPublicClient, http } from 'viem'
+    import { arbitrumSepolia } from 'viem/chains'
+
+    const publicClient = createPublicClient({
+      chain: arbitrumSepolia,
+      transport: http(process.env.ARBITRUM_SEPOLIA_RPC),
+    })
+
+    const sdk = createInflexionSdk({ publicClient })
+    // sdk.walletClient === undefined → LP/MM writes throw a clear error;
+    // depositor writes return { status: 'deferred-no-wallet' }.
+
+    const surface = await sdk.data.getCurrentLoadSurface({ markets })
+    ```
+  </Tab>
+</Tabs>
+
+## Environment variables
+
+The factory resolves these when the corresponding config field is absent. Set them in your shell, `.env`, or deployment platform — see [env vars](/reference/env-vars) for the full app-side list.
+
+| Purpose | Config field | Env fallback (in order) | If unresolved |
+| --- | --- | --- | --- |
+| Read RPC | `rpcUrl` | `ARBITRUM_SEPOLIA_RPC` → `SEPOLIA_RPC` | chain's default public RPC |
+| Signer key | `privateKey` | `DEPLOYER_PRIVATE_KEY` → `PRIVATE_KEY` | write client `undefined` → writes degrade |
+| Path-B engine | `engineBaseUrl` | _(no implicit env in the SDK — app uses `NEXT_PUBLIC_ENGINE_URL`)_ | Path B silently absent; `previewPremium` routes Path A only |
+| Telemetry | `telemetryUrl` | _(defaults to `${engineBaseUrl}/telemetry/preview`)_ | fire-and-forget ping is skipped |
+
+<Note>
+  **In the browser, only `NEXT_PUBLIC_`-prefixed env vars are visible.** The app reads the engine URL from `NEXT_PUBLIC_ENGINE_URL` and passes it as `engineBaseUrl` (see [mode (a)](#mode-a-browser-wagmi-inject-pre-built-clients)). The bare `ARBITRUM_SEPOLIA_RPC` / `*_PRIVATE_KEY` fallbacks are **server-side** conveniences — they never apply when you inject a `publicClient`/`walletClient` from wagmi.
+</Note>
+
+## A first call — confirm it's wired
+
+A construction-only smoke test. Reads are graceful, so this never throws even if the oracle is degraded — it returns a typed envelope you can branch on.
+
+```ts smoke-test.ts
+import { createInflexionSdk, demo } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ rpcUrl: process.env.ARBITRUM_SEPOLIA_RPC })
+
+console.log('chainId:', sdk.chainId)                 // 421614
+console.log('has signer:', Boolean(sdk.walletClient)) // false here → writes will degrade
+
+// One live RPC read — the current clearing-load surface (no subgraph needed).
+const surface = await sdk.data.getCurrentLoadSurface({
+  markets: [{ marketId: demo.marketId_fee500_7d }],  // geometry optional → neutral ref geometry
+})
+for (const row of surface.rows) {
+  if (row.available) {
+    console.log(row.marketId, row.fairPremium, row.poolPremium, row.regime)
+  } else {
+    console.log(row.marketId, 'degraded:', row.reason) // 'oracle-degraded' | 'market-unknown'
+  }
+}
+```
+
+<Warning>
+  **What needs which backend — read this once.**
+
+  **Limit:** Path-B previews need the engine; all history/aggregate surfaces need the subgraph (not yet indexed).
+
+  **Why:** the engine relays firm MM quotes off-chain (no last look); the rich on-chain events (`SwapPriced`, `QuoteFilled`) are emitted from deploy block `274081134`, but the indexer deploy is still pending.
+
+  **Mitigation:** if `engineBaseUrl` is unset, [`previewPremium`](/sdk/lp-client) silently routes Path A only — never an error. If the subgraph is absent, every [DataClient](/sdk/data-client) history method returns a typed `ApiPending` envelope naming the future route — never a fabricated number. **Live today over RPC alone:** premium preview, current load surface, σ_ref, market pricing, vault state, protection status, position geometry, the book, and coarse fills. See [status & caveats](/reference/status-caveats) and [degradation](/sdk/degradation).
+</Warning>
+
+<Maturity />
+
+## Where to go next
+
+<CardGroup cols={3}>
+  <Card title="Addresses & units" icon="hashtag" href="/sdk/addresses-units">
+    The registry imports, dUSDC = 6-dec numéraire, WAD = 1e18, and the `sqrtPriceX96` conversions.
+  </Card>
+  <Card title="LP client" icon="shield-halved" href="/sdk/lp-client">
+    `previewPremium`, `buyProtection`, `settle` — buying in-range IL protection (claim A).
+  </Card>
+  <Card title="Depositor client" icon="piggy-bank" href="/sdk/depositor-client">
+    Deposit/withdraw the cvAMM tranches; every result carries the capital-not-guaranteed claim (claim B).
+  </Card>
+  <Card title="MM client" icon="gavel" href="/sdk/mm-client">
+    Per-market signed quotes, the pool-load-to-beat, and the I10 / below-pool guards.
+  </Card>
+  <Card title="Data client" icon="chart-line" href="/sdk/data-client">
+    The live load surface plus the typed-pending history surfaces of the data moat.
+  </Card>
+  <Card title="Degradation" icon="signal-bars-weak" href="/sdk/degradation">
+    The full `Degraded` / `Priceable` / `ApiPending` envelope contract — why nothing throws.
+  </Card>
+</CardGroup>

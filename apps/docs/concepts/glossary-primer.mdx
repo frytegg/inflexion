@@ -1,0 +1,163 @@
+---
+title: "Concepts at a glance"
+description: "A compact, plain-language primer of the core symbols and terms — P, Pa/Pb, L, V_hold/V_lp, V0, MaxIL, fairRate, FairPremium, sigma_ref, load, tranches — before you hit the math."
+---
+
+This page is the fast on-ramp: the dozen-or-so symbols and terms you need _before_ the formulas make sense. Each entry is one or two lines with just enough of the **why** to be useful. When you want the exhaustive treatment — every field, every invariant, every citation — go to the [full glossary](/reference/glossary).
+
+<Tip>
+Read this top-to-bottom once. Almost every other page assumes you know what `MaxIL`, `fairRate`, and the two tranches are. Once they click, [the math overview](/math/overview) and [the worked example](/math/worked-example) read quickly.
+</Tip>
+
+## The one-sentence frame
+
+Inflexion lets a Uniswap v3 LP pay a fixed upfront **premium** to transfer the **in-range** impermanent-loss risk of a _specific_ position to an underwriter, who posts collateral; at expiry the protocol pays the LP $\min(\text{realized\_IL}, \text{MaxIL})$, trustlessly, from that collateral. It is an [in-range convexity hedge](/concepts/in-range-convexity-hedge), not "IL insurance" — the cap is the load-bearing piece, not a footnote.
+
+## Prices and the position
+
+<ParamField path="P" type="price (token0 in token1)">
+  The price of the volatile asset in the numéraire — e.g. ETH in USDC. Everything downstream is a function of how `P` moves.
+</ParamField>
+
+<ParamField path="P0" type="entry price">
+  The oracle price at `createSwap` — **not** the LP's original mint price. The hedge covers IL accruing **from creation onward**; any IL borne before that stays the LP's (entry-snapshot semantics).
+</ParamField>
+
+<ParamField path="P_T" type="settlement price">
+  The price at expiry `T`, pinned to the Chainlink round active at `T` to kill settle-timing games. `realized_IL` is measured at `P_T`. See [price pinning](/security/price-pinning).
+</ParamField>
+
+<ParamField path="Pa, Pb" type="range bounds (price)">
+  The position's lower (`Pa`) and upper (`Pb`) range bounds. Entry **requires** $P_a \le P_0 \le P_b$ — an out-of-range position is rejected at creation (`PositionOutOfRange`). This is what makes the risk a clean _in-range_ convexity exposure.
+</ParamField>
+
+<ParamField path="L" type="Uniswap v3 liquidity">
+  The liquidity of the position. **Read once at creation and stored** in the `SwapRecord`; settlement uses the stored `L`, never re-read from the NFT — so an external `increaseLiquidity` cannot inflate the payout (invariant [I6](/security/invariants)).
+</ParamField>
+
+## The two values that define IL
+
+The whole product hinges on comparing two value paths at expiry.
+
+<ParamField path="V_hold(T)" type="value if you had just held">
+  What the entry tokens would be worth at `P_T` if the LP had _not_ provided liquidity: $V_{\text{hold}} = \text{amount0}_{\text{entry}} \cdot P_T + \text{amount1}_{\text{entry}}$. Affine (a straight line) in `P_T`.
+</ParamField>
+
+<ParamField path="V_lp(T)" type="value of the LP position">
+  What the actual LP position is worth at `P_T`. Strictly **concave** while in range — and that concavity, sitting under the straight `V_hold` line, is exactly what makes IL convex (and therefore priceable like an option).
+</ParamField>
+
+The gap between them is the loss being hedged:
+
+$$
+\text{realized\_IL} \;=\; \max\!\big(0,\; V_{\text{hold}}(T) - V_{\text{lp}}(T)\big)
+$$
+
+Always computed as `V_hold > V_lp ? V_hold − V_lp : 0` — never an unchecked subtraction, so it can never go negative (invariant [I3](/security/invariants)). If the LP would have been better off in the position, the payout is just zero — [it is a hedge, not a lottery](/concepts/in-range-convexity-hedge) (invariant I4). See the [IL formula](/math/il-formula) for the full derivation.
+
+<ParamField path="V0" type="position value at entry (numéraire)">
+  The position's value in the numéraire (token1) at entry. It is the **capacity unit** — Path B capacity (`maxNotionalV0`) is denominated in `V0`, not collateral — and a dust floor (`MIN_POSITION_V0`) rejects tiny positions.
+</ParamField>
+
+## MaxIL — the cap *and* the unit of risk
+
+This is the single most important term on the page.
+
+<ParamField path="MaxIL" type="max in-range IL of this specific position">
+  $\text{MaxIL} = \max\big(\text{IL}(P_a),\, \text{IL}(P_b)\big)$ — the largest in-range IL the position can suffer. It is **pure geometry** (computable from `Pa, Pb, L, P0`), **frozen at creation**, and **identical across all three durations**.
+</ParamField>
+
+MaxIL wears two hats, both load-bearing:
+
+<CardGroup cols={2}>
+  <Card title="The cap" icon="shield-halved">
+    `covered_payoff = min(realized_IL, MaxIL)`, and FULL collateral `= MaxIL`. So the payout can never exceed the posted collateral on **any** price path — the no-bad-debt guarantee is structural, not oracle-dependent.
+  </Card>
+  <Card title="The unit of risk" icon="ruler">
+    Pricing as a `% of MaxIL` makes the underwriter's return-on-collateral range-width-independent. That removes adverse selection against wide ranges and makes positions **fungible to an underwriter within a market**.
+  </Card>
+</CardGroup>
+
+<Note>
+MaxIL is a **normalization unit, not a risk metric**. Two positions with identical MaxIL can carry very different risk (distance-to-edge, delta) — so MaxIL alone never sets the price; the geometry does. Full treatment on [the MaxIL page](/concepts/maxil) and [its derivation](/math/maxil-derivation).
+</Note>
+
+Reference magnitudes for a geometric-symmetric range:
+
+| Range | MaxIL as % of V0 |
+| --- | --- |
+| ±5%  | ≈ 1.27% |
+| ±10% | ≈ 2.56% |
+| ±20% | ≈ 5.23% |
+| ±50% | ≈ 13.76% |
+
+## Pricing: fairRate, FairPremium, sigma_ref, load
+
+How the premium gets built, from fair value outward.
+
+<ParamField path="fairRate" type="fraction of MaxIL the claim is worth">
+  $\text{fairRate} = \mathbb{E}_{Q}[\min(\text{IL}, \text{MaxIL})] \,/\, \text{MaxIL}$ — the fraction of MaxIL the claim is worth under the risk-neutral measure. An **S-curve in $\sigma^2 T$**: near 0 when calm/short, toward 1 when violent/long. It carries **all** the vol/time dependence; MaxIL carries none. It has an **exact closed form** (no fitted coefficients) — see [the Φ-sum](/math/fair-value-phi-sum).
+</ParamField>
+
+<ParamField path="FairPremium" type="fair value of the claim">
+  $\text{FairPremium} = \text{fairRate} \cdot \text{MaxIL}$ — **published on-chain** by the Stylus [FairValueOracle](/concepts/fair-value), which reads `σ_ref` from the VolOracle. The Φ-sum is **never reimplemented off-chain**; the SDK reads the on-chain value and never approximates it.
+</ParamField>
+
+<ParamField path="sigma_ref (σ_ref)" type="reference volatility">
+  $\sigma_{\text{ref}} = \max(\sigma_{\text{short}},\, \sigma_{\text{long}},\, \text{floor})$ — a poke-based, time-aware EWMA of Chainlink-tick log-returns over two horizons plus a hard floor. The **only** stochastic input to fairRate. The `max(...)` is deliberate: raw realized vol _understates_ risk right before a regime change, so the conservative max never collapses to a deceptively calm number just before a jump. See [σ_ref](/math/sigma-ref).
+</ParamField>
+
+<ParamField path="load (totalLoad)" type="multiplier over FairPremium">
+  The underwriter's charge **over** fair value: $\text{premium} = \text{FairPremium}\cdot(1 + \text{baseLoad} + \text{util\_skew} + \text{dispersion\_skew})$, hard-capped at $\text{FairPremium}\cdot(1+\text{maxLoad})$ (invariant [I10](/security/invariants)). Every load primitive comes from the calibrated risk-parameter set — **none is hardcoded**. See [the load stack](/math/load-stack).
+</ParamField>
+
+<Note>
+The split: **FairPremium** is what the claim is _worth_; the **load** is what an underwriter _charges on top_. The pool (Path A) prices algorithmically with the full load stack; an MM (Path B) signs a firm quote at `FairPremium·(1 + loadBps)`. The LP gets [the cheaper of the two](/protocol/routing).
+</Note>
+
+## The underwriters and the two tranches
+
+<ParamField path="Path A — the cvAMM pool" type="ConvexityVault">
+  An always-on, signature-free pooled underwriter (a dual-tranche ERC-4626 vault). The **floor of liquidity**: it quotes a price into every market off FairPremium plus inventory skews. See [Path A](/protocol/path-a-cvamm).
+</ParamField>
+
+<ParamField path="Path B — MM competition" type="UnderwriterVault per MM">
+  Sophisticated market makers compete with firm EIP-712 signed quotes **below** the pool, no last-look. The **ceiling of price**. See [Path B](/protocol/path-b-mm).
+</ParamField>
+
+The pool's capital is split into two tranches with very different risk:
+
+<ParamField path="Senior tranche" type="Tranche enum 0">
+  Base yield plus a small premium slice; **structurally protected from underwriting loss** while junior buffers (a "convexity savings account"). Protected, not risk-free — it still bears the systemic tail.
+</ParamField>
+
+<ParamField path="Junior tranche" type="Tranche enum 1">
+  Captures most of the load for a high APY, but is **first-loss and unhedged** — it absorbs the entire underwriting tail first (a "pure vol-selling tranche").
+</ParamField>
+
+<ClaimB />
+
+## Two separate guarantees — never merged
+
+These are distinct claims. Both are true; neither implies the other.
+
+<ClaimA />
+
+The LP-side claim (no bad debt, structural and code-enforced) and the depositor-side reality (principal can be lost) live on different sides of the book. Read [no-bad-debt](/concepts/no-bad-debt) and [tranches](/concepts/tranches) for the full picture.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="The exhaustive glossary" icon="book" href="/reference/glossary">
+    Every term, every field, every invariant.
+  </Card>
+  <Card title="MaxIL, in depth" icon="ruler" href="/concepts/maxil">
+    Why the cap is correct (not a defect) and why it makes positions fungible.
+  </Card>
+  <Card title="The three pillars" icon="columns" href="/concepts/three-pillars">
+    On-chain FairValue, the cvAMM floor, MM-competition ceiling.
+  </Card>
+  <Card title="The math overview" icon="square-root-variable" href="/math/overview">
+    The IL formula, the Φ-sum, the load stack — with worked numbers.
+  </Card>
+</CardGroup>

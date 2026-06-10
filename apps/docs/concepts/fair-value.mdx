@@ -1,0 +1,214 @@
+---
+title: "On-chain published fair value"
+description: "FairPremium = fairRate · MaxIL, where fairRate is the exact closed-form Φ-sum S-curve in σ²·T — published on-chain by the Stylus FairValueOracle, never reimplemented off-chain."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+Inflexion is the first protocol to **price impermanent-loss risk on-chain** and *publish* that price as a public good. Pillar 1 of the [three pillars](/concepts/three-pillars) is the **`FairValueOracle`**: a production contract that computes, live per quote, the fair value of a capped in-range IL claim and exposes it to both rails of the market.
+
+This page is the conceptual tour. It explains *what* the fair value is, *why* it factorizes the way it does, and *why* it is an **exact closed form** rather than a fitted surface, a Monte-Carlo simulation, or a lookup table. The full term-by-term derivation lives in [the Φ-sum derivation](/math/fair-value-phi-sum).
+
+## The headline identity
+
+Everything reduces to one multiplication:
+
+$$
+\textbf{FairPremium} \;=\; \textbf{fairRate} \;\cdot\; \textbf{MaxIL}
+$$
+
+Two factors, two completely separate jobs:
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — pure geometry" icon="ruler-combined" href="/concepts/maxil">
+    The maximum in-range IL of the *specific* position, computable at creation from `(Pa, Pb, L, P0)`. Frozen at creation, **identical across all three durations**, and carries **none** of the vol/time dependence.
+  </Card>
+  <Card title="fairRate — pure stochastics" icon="wave-square" href="/math/fair-value-phi-sum">
+    The *fraction of MaxIL* the claim is worth under the risk-neutral measure. An S-curve in `σ²·T`. It carries **all** of the vol/time dependence; geometry enters it only through the normalized range edges.
+  </Card>
+</CardGroup>
+
+A one-line mental model that runs through the whole pricing stack: **MaxIL is the *how much capital* (geometry); `fairRate` is the *how risky* (stochastics); the [load stack](/math/load-stack) is the *how scarce* (inventory state). They multiply.**
+
+<Info>
+**One position, three prices, one collateral.** Because `fairRate` carries all the time dependence and `MaxIL` carries none, a single Uniswap position prices to **three different `FairPremium` values** (7 / 30 / 90 days) — all backed by the **same** MaxIL. Only `fairRate` moves with duration. See the [worked example](#worked-example-one-position-three-prices) below.
+</Info>
+
+## fairRate: the S-curve in σ²·T
+
+`fairRate` is defined as the risk-neutral expectation of the capped payoff, normalized by the cap:
+
+$$
+\textbf{fairRate} \;=\; \frac{\mathbb{E}_{\mathbb{Q}}\!\left[\min(\mathrm{IL},\, \mathrm{MaxIL})\right]}{\mathrm{MaxIL}} \;\in\; [0,\,1]
+$$
+
+It is dimensionless — the *probability-weighted fraction* of the cap you expect to be paid. As a function of total variance `σ²·T`, it traces a clean **S-curve** between two asymptotes:
+
+- **As `σ²·T → 0`** (calm and/or short): `fairRate → 0`. Price barely moves, almost never leaves the range, the cap is irrelevant — the claim is near-worthless.
+- **As `σ²·T → ∞`** (violent and/or long): `fairRate → 1`. Price almost surely exits the range and the claim almost surely pays the full MaxIL — you are effectively pre-paying a near-certain loss.
+
+The entire pricing surface lives in the S-shape *between* those asymptotes, and it is governed jointly by total variance and by how wide / close-to-edge the range geometry is.
+
+### Reference points (σ = 60%, risk-neutral)
+
+These are the verified outputs of the reference IL ground truth, reproduced by `cvamm.fair_rate`. Read each row as the S-curve walking *up* `σ²·T` with duration:
+
+| Range width | 7d    | 30d   | 90d   |
+| ----------- | ----- | ----- | ----- |
+| ±5%         | 69.5% | 84.8% | 91.3% |
+| ±10%        | 44.9% | 70.8% | 82.9% |
+| ±20%        | 18.2% | 47.3% | 67.4% |
+
+A **wide / short** position (±20% / 7d) is worth only **18%** of MaxIL — the cheapest fraction, and the most convexity value for the LP. A **tight / long** position (±5% / 90d) is worth **91%** of MaxIL — effectively pre-paying a near-certain loss. The product carries the most convexity value for wide/short positions and the least for tight/long ones.
+
+<Tip>
+This is *why* premium is quoted as a **% of MaxIL** rather than a % of position value. Because MaxIL is the collateral the underwriter posts, charging `X%` of MaxIL gives the underwriter the same return-on-collateral **regardless of range width** — so it is indifferent to width, and depth never fragments. The full argument is on [the MaxIL page](/concepts/maxil).
+</Tip>
+
+## Why it is an EXACT closed form
+
+This is the most important claim behind pricing IL on-chain. The answer: **`fairRate` has no calibrated coefficients.** It is not fit to data, not simulated, and not interpolated from a table. The only stochastic input is `σ_ref` (the [volatility reference](/math/sigma-ref)).
+
+<Warning>
+**`fairRate` is NOT** a fitted surface, a Monte-Carlo estimate, or a lookup table — it is a finite, exact sum of normal-CDF terms (`Φ`), evaluated live per quote.
+</Warning>
+
+The mechanism, in one paragraph. The capped v3 payoff `min(IL, MaxIL)` is **piecewise in the terminal price** `P_T` — three arms, split by the range edges and the two cap-crossing prices:
+
+- **below `Pa`** — IL is **linear and decreasing** in `P_T` (the position has rotated fully into token0), capped flat at MaxIL once it crosses the lower cap price;
+- **inside `[Pa, Pb]`** — IL is the **convex** arm `c₁·P − 2L·√P + c₀`, and is **never capped** (a convex function on the range sits below its endpoint chord, which is ≤ MaxIL);
+- **above `Pb`** — IL is **linear and increasing** in `P_T` (rotated fully into token1, while a hold grows), capped flat at MaxIL above the upper cap price.
+
+Under risk-neutral GBM, `P_T` is lognormal, so **each arm integrated against the density is a standard lognormal interval moment** expressible in the normal CDF `Φ`. The building block is one closed expression:
+
+$$
+\mathbb{E}\!\left[ P_T^{\,p}\cdot \mathbf{1}\{K_1 < P_T < K_2\}\right]
+= P_0^{\,p}\,e^{\frac12 p(p-1)\sigma^2 T}\,\bigl(\Phi(d(K_1)) - \Phi(d(K_2))\bigr)
+$$
+
+$$
+\text{with}\quad d(K) = \frac{\ln(P_0/K) + (p - \tfrac12)\,\sigma^2 T}{\sigma\sqrt{T}}
+$$
+
+The arms use only the moments `p ∈ {0, ½, 1}`, and the integration limits are the finite set `K ∈ {0, Pa, Pb, PcapL, PcapR, +∞}`. Summing the arms gives:
+
+$$
+\textbf{FairPremium} = \mathbb{E}_{\mathbb{Q}}\!\left[\min(\mathrm{IL}, \mathrm{MaxIL})\right]
+\;=\; \text{a finite } \Phi\text{-sum (}\approx\text{6–10 terms, Black–Scholes class)}
+$$
+
+No Monte Carlo. No lookup table. No fitted coefficients. Evaluated live, per quote.
+
+<Note>
+**The Φ-sum is `L`-independent.** It runs in normalized units `P0 = 1`, `L = 1`, so it depends only on `a = Pa/P0`, `b = Pb/P0`, `σ_ref`, and `T` — *not* on the position's liquidity. This `L`-independence in the fair-rate sense is exactly what makes positions [fungible to an underwriter within a market](/concepts/maxil), and why an MM quote is **per-market, never per-NFT**.
+</Note>
+
+### Verified exact against the settle-path math
+
+The closed form is checked equal to the reference IL implementation — which is itself verified equal to dense quadrature and to Monte Carlo — so the *pricer* can never drift from the *settlement* math:
+
+- **Closed form vs reference quadrature / MC:** `max_abs_err ≈ 5.1×10⁻¹¹`. The heavy calibration run restates this as `≡` the reference IL implementation to `3.3×10⁻⁹` — both far inside any tolerance.
+- **Stylus Φ-sum vs a 50-digit `mpmath` reference:** the production Rust matches the high-precision fixtures to **≤ 1×10⁻¹² on `fairRate`**.
+
+## The Stylus FairValueOracle is production
+
+A hard design rule: **the Φ-sum is never reimplemented off-chain.** The SDK reads the on-chain `FairPremium` and never approximates it. The on-chain pricer is the **Stylus `FairValueOracle`** — a Rust/WASM contract whose integer fixed-point `erf` is machine-precise precisely because Stylus *bans WASM floating point at activation*.
+
+<CardGroup cols={2}>
+  <Card title="Production — Stylus FairValueOracle" icon="microchip">
+    Rust/WASM, machine-precise `Φ`-sum (≤ 1×10⁻¹² on `fairRate` vs the 50-digit reference). The single source of fair value for **both** rails — the router pokes once and prices Path A and Path B off the same `FairPremium`. Address in [the deployment registry](/reference/deployments).
+  </Card>
+  <Card title="CI cross-check — Solidity oracle" icon="vial">
+    The Solidity `FairValueOracle` uses an Abramowitz–Stegun `Φ` (~1.5×10⁻⁷, ÷MaxIL-amplified at the tight tier). It is a **revm-testable CI cross-check, not a second production oracle.**
+  </Card>
+</CardGroup>
+
+At swap creation the protocol calls `FairValueOracle.fairPremium(oracleToken, a, b, durationSeconds, maxIL)`, which returns `(premium, fairRateWad, sigmaRefWad)`. The same read feeds both the cvAMM load stack (Path A) and the MM `loadBps` derivation (Path B), so the [routing](/protocol/routing) compares two prices built from one fair value.
+
+<Tip>
+Both rails build their premium **on top of** this published number — Path A as `FairPremium · (1 + load stack)` clamped by invariant I10, Path B as `FairPremium · (1 + loadBps)` with `loadBps ≤ maxLoadBps`. The fair value is the floor both rails are honest about. See [the pricing stack](/protocol/pricing-stack).
+</Tip>
+
+## The only residual approximation
+
+The Φ-sum is *exact given the model*. There is exactly one modeling assumption, and it is stated plainly:
+
+<Warning>
+**Limit:** the closed form assumes risk-neutral **geometric Brownian motion with `μ = 0, r = 0`** (forward = `P0`). No on-chain formula removes this assumption — it is the price of having an exact, coefficient-free expression.
+
+**Why it's acceptable:** GBM with zero drift is the standard, model-light risk-neutral baseline for a short-dated claim, and the residual it leaves is forward-looking-vol information, not a structural error.
+
+**Mitigation — two layers:**
+1. **A conservative `σ_ref`.** The vol input is `max(σ_short, σ_long, floor)` with the floor deliberately set *above* calm ETH vol, so the pool is net-conservative; over the heavy run, realized payout/premium came in at **0.654**. See [σ_ref](/math/sigma-ref).
+2. **MM alpha by design.** The residual forward-vol premium is *deliberately* left for [Path-B market makers](/protocol/path-b-mm), who price off implied / forward vol and correct the pool's structural backward-looking bias. That blindness is the incentive that keeps MMs in the two-sided market — a feature, not a bug.
+</Warning>
+
+It is worth being precise about what `σ_ref` is and is not load-bearing for. A wrong or too-low `σ_ref` makes the pool **under-charge load**, so premium income stops covering payouts and NAV compresses — junior absorbs it first, senior in the tail. It is **not** load-bearing for the FULL no-bad-debt invariant: in FULL, `collateral = MaxIL ≥ payout` *regardless of what σ was*, so a vol-oracle fault can cost depositors money but can **never** create LP bad debt. These are two separate guarantees and are never merged.
+
+<ClaimA />
+
+## Worked example: one position, three prices
+
+A 50,000 USDC position, ±10% geometric range, `σ_ref = 60%`, `baseLoad = +15%`, skews = 0. **MaxIL = 1,280 USDC (2.56% of V0) — identical for all three durations.** Only `fairRate` moves.
+
+| Duration | fairRate | FairPremium | cvAMM publishes (@ +15% load) |
+| -------- | -------- | ----------- | ----------------------------- |
+| 7d       | 44.9%    | 574 USDC    | 661 USDC (1.32% of V0)        |
+| 30d      | 70.8%    | 906 USDC    | 1,042 USDC (2.08% of V0)      |
+| 90d      | 82.9%    | 1,061 USDC  | 1,221 USDC (2.44% of V0)      |
+
+The collateral the underwriter posts (MaxIL = 1,280 USDC) is the same across the table; the S-curve does all the work. Over 90 days the ±10% band is touched ~75% of the time versus ~24% over 7 days — which is the `fairRate` column, made concrete.
+
+### Live on-chain
+
+The pricer priced live swaps on the Arbitrum Sepolia stack (2026-06-05):
+
+<CodeGroup>
+```text Path A — cvAMM (swap #1)
+V0          = $270,531.28
+MaxIL       = $1,669.24
+premium     = $9.70   (0.58% of MaxIL — a wide/short position, low fairRate)
+realized IL = $148.64
+payout      = $148.64  (paid from the ConvexityVault)
+```
+
+```text Path B — MM won the route (swap #2)
+premiumA (cvAMM) = $13.80
+premiumB (MM)    = $8.93   (loadBps 1000) — strictly beat the pool → routed to MM
+MaxIL            = $3,215.65
+realized IL      = $245.66
+payout           = $245.66  (paid from the MM's own collateral)
+```
+</CodeGroup>
+
+Both rails priced off the **same** published `FairPremium`; `createSwapRouted` gave the LP the cheaper of the two. The full address registry and lifecycle record live in [the deployment reference](/reference/deployments).
+
+## Theory anchors — not the pricer
+
+An important distinction: two academic results are the anchors for *why* the claim is priceable and hedgeable. They are **not** the on-chain pricer — the exact Φ-sum is. Do not conflate them.
+
+<AccordionGroup>
+  <Accordion title="Lipton, Lucic & Sepp (2025) — static replication">
+    An IL-protection claim is **statically replicable by a strip of vanilla options**, so it has a model-light fair value and a *concrete hedge*. This is the theory anchor for *why the claim is priceable and hedgeable*. It is not the formula Inflexion evaluates on-chain. See [theory anchors](/math/theory-anchors).
+  </Accordion>
+  <Accordion title="Milionis, Moallemi & Roughgarden (2022) — LVR">
+    The AMM's adverse-selection cost (**loss-versus-rebalancing**) has a **closed form proportional to instantaneous variance** — equivalently the *theta* of the replicating short-option position. A v3 LP is structurally **short gamma** (concave `V_lp`), and IL is the realization of that short-gamma / LVR cost. Inflexion sells the LP the long-convexity leg that offsets it, capped at MaxIL. See [the in-range convexity hedge](/concepts/in-range-convexity-hedge).
+  </Accordion>
+</AccordionGroup>
+
+## Where this sits in the stack
+
+<CardGroup cols={2}>
+  <Card title="MaxIL — the cap and unit of risk" icon="lock" href="/concepts/maxil">
+    The geometry factor: why the cap is load-bearing and why it makes positions fungible.
+  </Card>
+  <Card title="The Φ-sum derivation [DEEP]" icon="function" href="/math/fair-value-phi-sum">
+    The full term-by-term derivation of the closed form deferred from this page.
+  </Card>
+  <Card title="σ_ref — the volatility oracle" icon="chart-line" href="/math/sigma-ref">
+    The only stochastic input: `max(σ_short, σ_long, floor)` and why the max is mandatory.
+  </Card>
+  <Card title="The pricing stack" icon="layer-group" href="/protocol/pricing-stack">
+    How both rails build their premium on top of the published FairPremium.
+  </Card>
+</CardGroup>

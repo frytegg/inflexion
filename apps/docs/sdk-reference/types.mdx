@@ -1,0 +1,506 @@
+---
+title: "Types reference"
+description: "Every degradation, result, and core domain type the SDK exports — Degraded<T>, Priceable<T>, ApiPending, NonceStatus, WriteResult, and the LpGeometry / PreviewResult / VaultState / quote shapes — field by field."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+import ClaimB from '/snippets/claim-b-disclosure.mdx'
+import Maturity from '/snippets/maturity-disclaimer.mdx'
+
+<Info>
+This is the **field-by-field** type reference for `@inflexion/sdk`. For the _conceptual_ treatment of why reads never throw and writes never crash at construction, read [Degradation envelopes](/sdk/degradation) first — this page is the dense lookup behind it. Two contracts run through every type: a **read** returns a typed degraded envelope you must narrow before touching the payload; a **write** either throws a clear error on call (LP/MM) or returns a `WriteResult` carrying the unsigned tx (Depositor). Every shape below is one of those two stories.
+</Info>
+
+All types are exported from the SDK barrel — `export * from './types.js'`, the quote helpers from `./quote.js`, and the math port namespaced as `cvamm`. Import directly:
+
+```ts
+import type {
+  Degraded, Priceable, NotPriceable, DegradeReason, ApiPending,
+  NonceStatus, WriteResult, LpGeometry, PreviewResult, ProtectionStatus,
+  VaultState, DepositorPosition, LoadParams, MarketConfig,
+} from '@inflexion/sdk'
+import { SignedQuoteTypes, quoteDomain, CHAIN_ID } from '@inflexion/sdk'
+```
+
+---
+
+## 1. The five envelope types
+
+Everything fallible the SDK returns is one of exactly five shapes. Three are **read** envelopes (`Degraded<T>`, `Priceable<T>`, `ApiPending`), one is a read **precision** flag (`NonceStatus`), and one is the **write-result** union (`WriteResult`).
+
+| Type | Discriminant | Success branch | Degraded branch |
+| --- | --- | --- | --- |
+| `Degraded<T>` | `available` | `{ available: true } & T` | `{ available: false; reason: string }` |
+| `Priceable<T>` | `priceable` | `{ priceable: true } & T` | `NotPriceable` |
+| `NotPriceable` | `priceable: false` | — | `{ priceable: false; reason: DegradeReason; detail? }` |
+| `ApiPending` | `available: false` | — (never succeeds yet) | `{ available: false; reason: 'no-history-source'; endpoint; query; detail? }` |
+| `NonceStatus` | `precision` | always returns | precision degrades `'coarse' → 'precise'` |
+| `WriteResult` | `status` | `{ status: 'sent'; txHash; tx }` | `{ status: 'deferred-no-wallet' \| 'error'; tx; detail? }` |
+
+### 1.1 `Degraded<T>`
+
+```ts
+type Degraded<T> = ({ available: true } & T) | { available: false; reason: string }
+```
+
+The general-purpose read envelope for failures that are environmental (no RPC, an uninitialised vol oracle) rather than price-specific. Narrow on `available`.
+
+<ResponseField name="available" type="boolean" required>
+  Discriminant. `true` ⇒ the payload `T` is present and safe to read; `false` ⇒ only `reason` is present.
+</ResponseField>
+<ResponseField name="reason" type="string">
+  Present **only** on the `available: false` branch. In practice drawn from [`DegradeReason`](#3-degradereason) — typically `'no-rpc'` or `'vol-uninitialized'`.
+</ResponseField>
+
+Returned by `depositor.getVaultState`, `getPosition`, `getRegime`, and `data.getSurfaceSigmaRef`.
+
+### 1.2 `Priceable<T>` / `NotPriceable`
+
+```ts
+type Priceable<T> = ({ priceable: true } & T) | NotPriceable
+type NotPriceable  = { priceable: false; reason: DegradeReason; detail?: string }
+```
+
+Distinct from `Degraded<T>` because the dominant failure is the live price $P_0$ being unavailable. Every read that derives $P_0$ catches an `OracleManager.getPrice` revert (stale feed, sequencer down) and returns `NotPriceable { reason: 'oracle-degraded' }` rather than throwing.
+
+<ResponseField name="priceable" type="boolean" required>
+  Discriminant. `true` ⇒ payload `T` present; `false` ⇒ a `NotPriceable`.
+</ResponseField>
+<ResponseField name="reason" type="DegradeReason">
+  On the failure branch. The closed [`DegradeReason`](#3-degradereason) union — for `Priceable` typically `'oracle-degraded'`, `'market-unknown'`, or `'position-unknown'`.
+</ResponseField>
+<ResponseField name="detail" type="string">
+  Optional human-readable elaboration on the failure (e.g. the underlying revert string).
+</ResponseField>
+
+Returned by `lp.resolveGeometry`, `previewPremium`, `getPayoffCurve`, the nested `ilToDate` inside `getProtectionStatus`, and `hedge.greeks` / `suggestHedgeChecked`.
+
+<Tip>
+Envelopes nest. `getProtectionStatus` returns `ProtectionStatus | { available: false; reason }`, and its `ilToDate` field is **itself** a `Priceable<{ il; payout; capHit }>`. A swap can be _known_ while its mark-to-market IL is _not priceable_ this block.
+</Tip>
+
+### 1.3 `ApiPending`
+
+```ts
+type ApiPending = {
+  available: false
+  reason: 'no-history-source'
+  endpoint: string  // the FUTURE API route this would call
+  query: unknown    // the exact query that WOULD be sent
+  detail?: string
+}
+```
+
+The most deliberate envelope in the SDK. Every DataClient **history** method returns it until the subgraph is deployed. Rather than fabricate a number, it returns the **future route and the exact query** that would be sent — so the UI renders "coming from `<route>`" today and the API is wired in later with **zero re-derivation**.
+
+<ResponseField name="available" type="false" required>
+  Always `false`. These surfaces have no live source yet.
+</ResponseField>
+<ResponseField name="reason" type="'no-history-source'" required>
+  Fixed literal — the [`DegradeReason`](#3-degradereason) for the subgraph-not-deployed case.
+</ResponseField>
+<ResponseField name="endpoint" type="string" required>
+  The future API route this call _will_ hit (e.g. `'/data/load-surface'`). Render it as the pending source.
+</ResponseField>
+<ResponseField name="query" type="unknown" required>
+  The exact query object that _would_ be sent — the caller's args, normalised. The API can be wired with no re-derivation.
+</ResponseField>
+<ResponseField name="detail" type="string">
+  Optional note (e.g. "off-chain telemetry by design" for `getDemandRequests`).
+</ResponseField>
+
+| Method | `endpoint` | Backed by |
+| --- | --- | --- |
+| `getLoadSurfaceHistory` | `/data/load-surface` | subgraph |
+| `getQuoteCompetition` | `/data/quote-competition` | subgraph + engine `COMPETITION_LOG` |
+| `getDemandRequests` | `/data/demand-requests` | engine `DEMAND_LOG` (off-chain, **pending by design**) |
+| `getNavHistory` | `/pool/nav-history` | subgraph (carries Claim B) |
+| `getNetGamma` | `/data/net-gamma` | off-chain compute |
+
+<Maturity />
+
+### 1.4 `NonceStatus`
+
+```ts
+type NonceStatus = { spent: boolean; precision: 'coarse' | 'precise'; detail: string }
+```
+
+Not a pass/fail envelope — it **always** returns — but it carries a **precision** flag that degrades, and that distinction is load-bearing for MMs.
+
+<ResponseField name="spent" type="boolean" required>
+  Whether the nonce bit is set on-chain via `Core.isNonceUsed(mm, nonce)`.
+</ResponseField>
+<ResponseField name="precision" type="'coarse' | 'precise'" required>
+  `'coarse'` today: the bit is set on **both** a fill and a cancel, and `SwapCreated`/`SwapRouted` carry no `quoteId`/`nonce`, so filled cannot be distinguished from cancelled on-chain alone. `'precise'` once the subgraph indexes the now-live `QuoteFilled` event.
+</ResponseField>
+<ResponseField name="detail" type="string" required>
+  Human-readable elaboration (e.g. `'nonce bit set (fill OR cancel)'`).
+</ResponseField>
+
+<Warning>
+**MM fill attribution is COARSE on-chain — structural, not a bug.**
+
+- **Limit.** `mm.isQuoteFilled(mm, nonce)` returns `precision: 'coarse'`.
+- **Why.** The bitmap nonce is set on both fill and cancel; `SwapCreated`/`SwapRouted` carry no `quoteId`/`nonce`.
+- **Mitigation.** The precise path is the now-live `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy, queryable as `precision: 'precise'` once the [subgraph](/integrate/subgraph) indexes. Meanwhile `capacityRemaining` reads the exact on-chain `consumedNotional` ([invariant I7](/security/invariants)) for the number that actually matters.
+</Warning>
+
+### 1.5 `WriteResult`
+
+```ts
+type WriteResult = {
+  tx: { to: Hex; data: Hex; value: bigint } // the (un)signed calldata
+  txHash?: Hex                              // present only when status === 'sent'
+  status: 'sent' | 'deferred-no-wallet' | 'error'
+  detail?: string
+}
+```
+
+The DepositorClient write union. The factory **always constructs**, even with no signer — `makeWalletClient` returns `undefined` rather than crashing.
+
+<ResponseField name="tx" type="{ to: Hex; data: Hex; value: bigint }" required>
+  The transaction calldata. On `'deferred-no-wallet'` this is the **unsigned** tx for an external signer; on `'sent'`/`'error'` it is the calldata that was submitted.
+</ResponseField>
+<ResponseField name="txHash" type="Hex">
+  Present **only** when `status === 'sent'` — the broadcast transaction hash.
+</ResponseField>
+<ResponseField name="status" type="'sent' | 'deferred-no-wallet' | 'error'" required>
+  `'sent'` — broadcast (txHash present). `'deferred-no-wallet'` — no signer; calldata returned in `tx` for external signing. `'error'` — an on-chain revert surfaced as a value, not a throw (e.g. the `JuniorBelowLocked` gate on `withdraw`).
+</ResponseField>
+<ResponseField name="detail" type="string">
+  On `'error'`, the revert reason / underlying message.
+</ResponseField>
+
+<Note>
+**Per-surface write semantics differ by intent.** Only DepositorClient returns `WriteResult`. LP/MM writes (`lp.buyProtection`, `lp.settle`, `lp.poke`, `mm.cancelNonces`) **throw a clear error on the call** when there is no wallet — there is no sensible "deferred" semantics for "buy this protection now". See [guardrails](/sdk/guardrails).
+</Note>
+
+---
+
+## 2. `StagedWrite` — multi-step deferred writes
+
+```ts
+type StagedWrite = {
+  sent: WriteResult            // step already broadcast
+  staged: { to: Hex; data: Hex; value: bigint }[]  // steps returned UNSENT
+  detail?: string
+}
+```
+
+`depositor.rebalance(from, to, shares)` returns a `StagedWrite`: step 1 (`requestWithdrawal`) is **sent**, while steps 2 (`withdraw`) and 3 (`deposit`) are returned **unsent** across the on-chain cooldown — the caller resubmits them once `withdrawalCooldown` elapses. The pattern keeps a cooldown-gated, multi-tx flow honest without the SDK holding state across the wait.
+
+---
+
+## 3. `DegradeReason` — the closed union
+
+Every `reason` on a `Priceable` / `Degraded` / `ApiPending` failure is drawn from one closed union, so the UI can exhaustively switch on it:
+
+```ts
+type DegradeReason =
+  | 'oracle-degraded'    // OracleManager.getPrice reverted (stale / sequencer down)
+  | 'no-rpc'             // no read client could be built
+  | 'rich-events-absent' // an indexed event the surface needs isn't on-chain yet
+  | 'no-history-source'  // subgraph/API not deployed (ApiPending uses this)
+  | 'vol-uninitialized'  // VolOracle.sigmaRef reverts — σ_ref not seeded for the token
+  | 'market-unknown'     // Core.markets returns token0 == address(0)
+  | 'position-unknown'   // NPM.positions has no such tokenId
+```
+
+| Reason | Trigger | Fallback |
+| --- | --- | --- |
+| `oracle-degraded` | `OracleManager.getPrice` reverts | retry next block; the [settlement-liveness fork](/security/forks) guarantees `settle` still succeeds |
+| `no-rpc` | no read client (no `rpcUrl`/transport/`publicClient`, no env) | provide an RPC — see [getting started](/sdk/getting-started) |
+| `rich-events-absent` | a needed indexed event isn't emitted on-chain yet | use the coarse on-chain path; precise lands with the [subgraph](/integrate/subgraph) |
+| `no-history-source` | the subgraph/API is not deployed | render the `ApiPending` "coming from `<route>`" state |
+| `vol-uninitialized` | `VolOracle.sigmaRef` reverts (token never seeded) | `lp.poke(token)` / requote after the EWMA seeds |
+| `market-unknown` | `Core.markets(marketId).token0 == 0` | check the [markets grid](/reference/markets-grid) |
+| `position-unknown` | `NPM.positions(tokenId)` has no entry | confirm the tokenId and owner |
+
+---
+
+## 4. Core domain types
+
+The success-branch payloads carried inside the envelopes above. All dUSDC figures are **6-decimal raw bigints** (`1 dUSDC = 1_000_000n`); all WAD ratios are `1e18`; `sqrtPriceX96` is Uniswap Q64.96. See [decimals & units](/reference/decimals-units).
+
+### 4.1 `LpGeometry`
+
+The frozen geometry of a position-for-market — the unit the protocol prices. Returned inside `Priceable<{ geometry: LpGeometry }>` from `lp.resolveGeometry`.
+
+<ParamField path="tokenId" type="bigint">Uniswap v3 position NFT id.</ParamField>
+<ParamField path="token0" type="Hex">Position token0 address (from `NPM.positions`).</ParamField>
+<ParamField path="token1" type="Hex">Position token1 address.</ParamField>
+<ParamField path="fee" type="number">Pool fee tier (e.g. `500`).</ParamField>
+<ParamField path="tickLower" type="number">Lower tick of the range.</ParamField>
+<ParamField path="tickUpper" type="number">Upper tick of the range.</ParamField>
+<ParamField path="liquidity" type="bigint">Position liquidity $L$ — read **at creation** and frozen on-chain (invariant I6: settlement never re-reads the NFT).</ParamField>
+<ParamField path="sqrtPaX96" type="bigint">Lower-bound sqrt price (Q64.96), from `tickLower`.</ParamField>
+<ParamField path="sqrtPbX96" type="bigint">Upper-bound sqrt price (Q64.96), from `tickUpper`.</ParamField>
+<ParamField path="sqrtP0X96" type="bigint">Entry sqrt price (Q64.96), the oracle-derived $P_0$.</ParamField>
+<ParamField path="aWad" type="bigint">$a = (\sqrt{P_a}/\sqrt{P_0})^2$ in WAD — the lower normalised price ratio.</ParamField>
+<ParamField path="bWad" type="bigint">$b = (\sqrt{P_b}/\sqrt{P_0})^2$ in WAD — the upper normalised price ratio.</ParamField>
+<ParamField path="amount0Entry" type="bigint">token0 amount implied at entry by $L$ and $P_0$ (`ILMath.getAmountsForLiquidity`).</ParamField>
+<ParamField path="amount1Entry" type="bigint">token1 amount at entry.</ParamField>
+<ParamField path="maxIL" type="bigint">**MaxIL** — the load-bearing payout cap _and_ the unit of risk, pure geometry, dUSDC 6-dec (`ILMath.computeMaxIL`). See [MaxIL](/concepts/maxil).</ParamField>
+<ParamField path="inRange" type="boolean">`sqrtP0 >= sqrtPa && sqrtP0 <= sqrtPb` — the `createSwap` in-range gate. Out-of-range entries are rejected at creation.</ParamField>
+
+<Note>
+$a$ and $b$ are the whole of the geometry the [Φ-sum fair value](/math/fair-value-phi-sum) needs. Because [MaxIL is L-independent in the fair-rate sense](/concepts/maxil), two positions sharing $(a, b, \text{duration})$ are **fungible** to an underwriter — which is why an [MM quote is per-market, never per-NFT](/protocol/path-b-mm).
+</Note>
+
+### 4.2 `EligiblePosition`
+
+A row from `lp.listEligiblePositions` — one `(position × duration)` pair. Carries the `LpGeometry` (or the price-degraded state) plus the resolved `marketId` and a convenience `inRange?: boolean` that is `undefined` when the oracle is degraded.
+
+### 4.3 `PreviewResult`
+
+The priced quote returned inside `Priceable<PreviewResult>` from `lp.previewPremium`. All premiums are dUSDC 6-dec, capped at MaxIL.
+
+<ParamField path="marketId" type="Hex">The resolved market.</ParamField>
+<ParamField path="maxIL" type="bigint">The cap — every premium is `min(·, maxIL)`.</ParamField>
+<ParamField path="fairPremium" type="bigint">The on-chain Φ-sum fair premium from `FairValueOracle.fairPremium` — **never reimplemented off-chain**.</ParamField>
+<ParamField path="fairRateWad" type="bigint">The fair rate (WAD) — fair premium per unit MaxIL.</ParamField>
+<ParamField path="sigmaRefWad" type="bigint">The reference volatility σ_ref (WAD) the price was struck against.</ParamField>
+<ParamField path="premiumA" type="bigint">Path-A pool premium: `cvamm.premiumFromLoad(fairPremium, totalLoad)` capped at MaxIL — exactly `_pricePathAFromFair` on-chain.</ParamField>
+<ParamField path="premiumB" type="bigint">Path-B MM premium: `cvamm.pathBPremium(fairPremium, loadBps, maxIL)`. **Present only** when a live signed MM quote beat the pool; absent if the engine is unreachable.</ParamField>
+<ParamField path="best" type="bigint" required>The cheaper of `premiumA` / `premiumB` — what the LP actually pays.</ParamField>
+<ParamField path="path" type="'A' | 'B'" required>Which rail produced `best`. Path B only when an MM quote won.</ParamField>
+
+<Tip>
+The math: $\text{premiumA} = \min(\lceil \text{fairPremium} \cdot (1 + \text{totalLoad}) \rceil,\ \text{MaxIL})$ and $\text{premiumB} = \min(\lceil \text{fairPremium} \cdot (1 + \text{loadBps}/10000) \rceil,\ \text{MaxIL})$ — same fair value, same cap, different load. See [the pricing stack](/protocol/pricing-stack).
+</Tip>
+
+### 4.4 `ProtectionStatus`
+
+Returned by `lp.getProtectionStatus` as `ProtectionStatus | { available: false; reason }`.
+
+<ParamField path="status" type="number" required>On-chain swap status: `0` UNINITIALIZED, `1` ACTIVE, `2` SETTLED.</ParamField>
+<ParamField path="isPathA" type="boolean" required>`mm == convexityVault` — the swap was underwritten by the pool, not an MM.</ParamField>
+<ParamField path="ilToDate" type="Priceable<{ il; payout; capHit }>" required>Mark-to-market IL — **itself a `Priceable`**, so it can be `not priceable` while the swap is known. `payout = min(il, maxIL)`; `capHit = payout < il`.</ParamField>
+<ParamField path="noBadDebtFull" type="true" required>Carries [Claim A](/concepts/no-bad-debt) — the qualified no-bad-debt guarantee — on the LP surface only.</ParamField>
+
+<ClaimA />
+
+### 4.5 `PayoffCurve`
+
+Returned inside `Priceable<PayoffCurve>` from `lp.getPayoffCurve` — `ILMath.computeIL` evaluated over a sqrt-price grid with the cap applied. Each point carries the price and the capped payout `min(IL(P_T), MaxIL)`.
+
+### 4.6 `ClaimableFees`
+
+Returned by `lp.getClaimableFees` as `ClaimableFees | { available: false }`. Reads checkpointed `tokensOwed0/1` from `NPM.positions`.
+
+<Warning>
+**`ClaimableFees` UNDER-states.**
+
+- **Limit.** The on-chain figure is only the last-checkpointed `tokensOwed`, not live accrual.
+- **Why.** Precise fee accounting needs indexed pool events.
+- **Mitigation.** The precise figure lands with the [subgraph](/integrate/subgraph); until then treat the value as a conservative lower bound.
+</Warning>
+
+---
+
+## 5. Depositor domain types
+
+### 5.1 `VaultState`
+
+Returned inside `Degraded<VaultState>` from `depositor.getVaultState`. Every success branch carries `capitalNotGuaranteed: true`.
+
+<ParamField path="totalAssets" type="bigint">Total pool assets, dUSDC 6-dec.</ParamField>
+<ParamField path="seniorAssets" type="bigint">Senior-tranche assets.</ParamField>
+<ParamField path="juniorAssets" type="bigint">Junior-tranche assets (first-loss buffer).</ParamField>
+<ParamField path="totalLocked" type="bigint">Collateral locked against active swaps. Invariant I5: `locked ≤ deposited`; junior-first waterfall keeps `totalLocked ≤ juniorAssets`.</ParamField>
+<ParamField path="freeAssets" type="bigint">Idle, instantly-liquid collateral.</ParamField>
+<ParamField path="utilWad" type="bigint">Utilisation $= \text{locked}/\text{total}$ (WAD).</ParamField>
+<ParamField path="concWad" type="bigint">Concentration (HHI dispersion) of locked collateral (WAD).</ParamField>
+<ParamField path="baseLoadWad" type="bigint">Base load by σ_ref [regime](#5-3-loadparams) band (WAD).</ParamField>
+<ParamField path="utilSkewWad" type="bigint">Utilisation-skew load component (WAD).</ParamField>
+<ParamField path="dispSkewWad" type="bigint">Dispersion-skew load component (WAD).</ParamField>
+<ParamField path="totalLoadWad" type="bigint">$\text{baseLoad} + \text{utilSkew} + \text{dispSkew}$, clamped to `maxLoadBps` (= [invariant I10](/security/invariants)).</ParamField>
+<ParamField path="lockedByMarket" type="Record<Hex, bigint>">Colour map keyed by **caller-supplied** marketIds. Free collateral is pool-wide fungible, so this is HHI/concentration colour, **not** a per-market budget.</ParamField>
+<ParamField path="sigmaRefWad" type="bigint">σ_ref EWMA (WAD).</ParamField>
+<ParamField path="regime" type="Regime">The current volatility regime band.</ParamField>
+<ParamField path="instYieldWad" type="bigint">Instantaneous yield (WAD). **Subgraph-only ⇒ omitted live**.</ParamField>
+<ParamField path="capitalNotGuaranteed" type="true" required>Carries [Claim B](/concepts/tranches) on every depositor state read.</ParamField>
+
+<ClaimB />
+
+### 5.2 `DepositorPosition`
+
+Returned inside `Degraded<DepositorPosition>` from `depositor.getPosition(owner)`. Carries `seniorShares` / `juniorShares` and their `convertToAssets` valuations (`seniorAssets` / `juniorAssets`), plus `capitalNotGuaranteed: true`.
+
+### 5.3 `LoadParams`
+
+The cached on-chain load-curve parameters, read from `Core.loadParams` by every surface. Carries the regime bands, the base-load-by-regime table, the utilisation-knee + convex-exponent curve, the dispersion cap, and `maxLoadBps` — the [I10](/security/invariants) ceiling every quote's `loadBps` must respect. These are read on-chain, **never hardcoded**; the off-chain [`cvamm` port](/sdk/cvamm-port) consumes them to reproduce the load stack byte-equal.
+
+### 5.4 `Tranche` / `TRANCHE_ENUM`
+
+```ts
+type Tranche = 'senior' | 'junior'
+const TRANCHE_ENUM = { senior: 0, junior: 1 } as const
+```
+
+The string tranche selector and its on-chain enum mapping. Junior is **first-loss**; senior is protected from underwriting loss only (the junior-first waterfall) — never from the systemic tail. See [tranches](/concepts/tranches).
+
+### 5.5 `Regime`
+
+The volatility-regime enum derived from σ_ref against the `LoadParams` bands (`cvamm.regimeOf`). Selects the base-load band in the [load stack](/math/load-stack).
+
+---
+
+## 6. MM domain types
+
+### 6.1 `MarketConfig`
+
+Returned by `mm.getMarketConfig(marketId)` as `MarketConfig | undefined` (`undefined` when `token0 == address(0)`). The immutable, post-freeze market parameters: `token0`, `token1`, `fee`, `durationSeconds`, oracle token. Cached because configs are immutable after freeze.
+
+### 6.2 `PricingGeometry` (input) and `MmMarketPricing` (result)
+
+**`PricingGeometry`** is the geometry input to `mm.getMarketPricing`:
+
+<ParamField path="aWad" type="bigint" required>Lower price ratio $a$ (WAD).</ParamField>
+<ParamField path="bWad" type="bigint" required>Upper price ratio $b$ (WAD).</ParamField>
+<ParamField path="durationSeconds" type="bigint" required>Hedge tenor.</ParamField>
+<ParamField path="maxIL" type="bigint" required>The cap / unit of risk, dUSDC 6-dec.</ParamField>
+<ParamField path="oracleToken" type="Hex">Optional override for the σ_ref token.</ParamField>
+
+**`MmMarketPricing`** is the result: `fairPremium`, `fairRateWad`, `sigmaRefWad`, `poolPremium` (= $\lceil \text{fairPremium}\cdot(1+\text{totalLoad})\rceil$ capped at MaxIL — the floor an MM must undercut), `maxIL`, `load: LoadBreakdown`, `totalLoadBps`, the per-component `baseLoadWad` / `utilSkewWad` / `dispSkewWad`, `util`, `conc`, and `regime`.
+
+### 6.3 `PoolLoadTick` / `LoadBreakdown`
+
+`PoolLoadTick` is the geometry-**free** "load to beat" from `mm.getPoolLoadToBeat` / `streamPoolLoadToBeat`: the pure pool floor an MM must undercut — `totalLoadBps` plus the `baseLoad` / `util` / `disp` decomposition — needing no position geometry, because the load **percentage** is geometry-independent. `LoadBreakdown` is that per-component decomposition. See [why a quote is per-market](/protocol/path-b-mm).
+
+### 6.4 `Greeks`
+
+The finite-difference greeks from `mm.greeksForSwap`, `hedge.greeks`, and `getBook({ withGreeks: true })`. δ/γ finite-difference the deployed `ILMath.computeIL` of the **capped** payoff $\min(\text{IL}(P_T), \text{MaxIL})$ (reported per unit price-ratio $P/P_0$, decimals-independent); vega/θ finite-difference the on-chain `FairValueOracle.fairRate(a, b, σ, T)` (vega per 1.0 vol, theta per year) — never a reimplemented Φ-sum. See [greeks & hedging](/sdk/greeks-hedge).
+
+### 6.5 `SigmaComponents`
+
+Returned by `mm.getSigmaComponents(token)` as `SigmaComponents | undefined` — the EWMA decomposition behind σ_ref from `VolOracle.sigmaComponents`.
+
+### 6.6 Other MM result shapes
+
+- **`BookResult`** — `mm.getBook(mm, opts?)`: the MM's swap book from an on-chain `nextSwapId`/`swaps` scan, optionally with greeks.
+- **`SignQuoteResult`** — `mm.signQuote(...)`: `{ envelope, belowPoolChecked, poolLoadBps?, i10Ok: true }`.
+- **`MmQuoteError`** — thrown by `signQuote`; `code ∈ { 'i10-exceeded', 'not-below-pool', 'pool-load-unreadable', 'no-signer', 'bad-nonce' }`.
+- **`StreamHandle`** — the `{ stop() }` returned by every polling stream (`watchFills`, `quoteStream`, `streamPoolLoadToBeat`).
+
+---
+
+## 7. The `SignedQuote` type — the EIP-712 shape
+
+Re-exported via `@inflexion/sdk` and `@inflexion/sdk/quote`. The field order, types, and domain MUST match `InflexionCore.SIGNED_QUOTE_TYPEHASH` exactly or `createSwap` / `createSwapRouted` rejects the signature. See [quote signing](/integrate/quote-signing).
+
+```ts
+SignedQuote: [
+  { name: 'mm',               type: 'address' },
+  { name: 'marketId',         type: 'bytes32' },
+  { name: 'loadBps',          type: 'uint16'  },  // ≤ loadParams.maxLoadBps (I10)
+  { name: 'minMaxILRatioBps', type: 'uint16'  },
+  { name: 'maxMaxILRatioBps', type: 'uint16'  },
+  { name: 'quotePrice',       type: 'uint128' },  // oracle price signed against (Fork-2 band anchor)
+  { name: 'priceBandBps',     type: 'uint16'  },
+  { name: 'model',            type: 'uint8'   },  // CollateralModel: FULL=0, PARTIAL=1
+  { name: 'partialRatioBps',  type: 'uint16'  },
+  { name: 'maxNotionalV0',    type: 'uint128' },
+  { name: 'validUntil',       type: 'uint64'  },  // absolute ts; on-chain bound to now + [5,15]s
+  { name: 'quoteId',          type: 'bytes32' },
+  { name: 'nonce',            type: 'uint256' },  // bitmap (word<<8)|bit
+]
+```
+
+<ParamField path="mm" type="Hex (address)" required>The market maker EOA / contract that signed and posts collateral.</ParamField>
+<ParamField path="marketId" type="Hex (bytes32)" required>The market the quote prices. **Per-market, never per-NFT** — the quote carries no `tokenId`.</ParamField>
+<ParamField path="loadBps" type="number (uint16)" required>The MM's load over the on-chain fair premium. Must satisfy `≤ loadParams.maxLoadBps` ([I10](/security/invariants)) and (to win) be below the live pool load.</ParamField>
+<ParamField path="minMaxILRatioBps" type="number (uint16)" required>Lower bound of the MaxIL-ratio band the MM will fill.</ParamField>
+<ParamField path="maxMaxILRatioBps" type="number (uint16)" required>Upper bound of the MaxIL-ratio band.</ParamField>
+<ParamField path="quotePrice" type="bigint (uint128)" required>The oracle price the MM signed against — the Fork-2 band anchor. `createSwap` reverts iff live $P$ deviates beyond `priceBandBps` ([I9](/security/invariants)).</ParamField>
+<ParamField path="priceBandBps" type="number (uint16)" required>The allowed deviation of live price from `quotePrice` at fill.</ParamField>
+<ParamField path="model" type="number (uint8)" required>`CollateralModel`: `FULL = 0`, `PARTIAL = 1`. **FULL is the only supported mode in v1**.</ParamField>
+<ParamField path="partialRatioBps" type="number (uint16)" required>PARTIAL-mode collateral ratio (unused while v1 is FULL-only).</ParamField>
+<ParamField path="maxNotionalV0" type="bigint (uint128)" required>Capacity in numéraire (dUSDC 6-dec). On-chain `consumedNotional[quoteId] ≤ maxNotionalV0` ([I7](/security/invariants)).</ParamField>
+<ParamField path="validUntil" type="bigint (uint64)" required>Absolute expiry timestamp; on-chain bound to `now + [5,15]s`.</ParamField>
+<ParamField path="quoteId" type="Hex (bytes32)" required>The capacity-tracking id `consumedNotional` is keyed by.</ParamField>
+<ParamField path="nonce" type="bigint (uint256)" required>Bitmap nonce `(word << 8) | bit`, `bit ∈ [0, 255]`. Build with `encodeNonce(word, bit)`.</ParamField>
+
+<Warning>
+**TS field types are not uniform — get them right or signing fails.** `quotePrice`, `maxNotionalV0`, `validUntil`, and `nonce` are **bigint**; `loadBps` and the other `*Bps` plus `model` are plain `number` (`< 2^53`, safe). On the wire (`QuoteWire`) bigints become **decimal strings** — convert back to bigint with `decodeQuote` before re-signing or verifying.
+</Warning>
+
+### Supporting quote types & helpers
+
+| Symbol | Shape / signature |
+| --- | --- |
+| `CollateralModel` | `{ FULL: 0, PARTIAL: 1 }` — FULL only in v1 |
+| `QuoteEnvelope` | `{ quote: SignedQuote; signature: Hex }` — the publishable object |
+| `QuoteWire` | `SignedQuote` with bigints as decimal strings (WS/log shape) |
+| `SignedQuoteTypes` | the EIP-712 `types` object (field order = struct order) |
+| `quoteDomain(chainId, verifyingContract)` | `{ name: 'Inflexion', version: '1', chainId, verifyingContract }` |
+| `quoteDigest(quote, chainId, vc): Hex` | the on-chain `hashTypedData` digest |
+| `encodeQuote` / `decodeQuote` | `SignedQuote ⇄ QuoteWire` |
+| `encodeNonce(word, bit)` / `decodeNonce(nonce)` | `(word<<8)\|bit` ⇄ `{ word, bit }` |
+
+---
+
+## 8. Worked example — narrowing every envelope
+
+```ts
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient, walletClient })
+
+// Priceable<T>: narrow on .priceable
+const preview = await sdk.lp.previewPremium(demo.lpPositionTokenId, demo.marketId_fee500_7d)
+if (!preview.priceable) {
+  ui.showNotPriceable(preview.reason, preview.detail) // 'oracle-degraded' | 'market-unknown' | 'position-unknown'
+} else {
+  ui.showPrice(preview.best, preview.path)            // bigint (6-dec), 'A' | 'B'
+}
+
+// Degraded<T>: narrow on .available — success carries claim B
+const state = await sdk.depositor.getVaultState()
+if (state.available) {
+  ui.showVault(state.utilWad, state.regime, state.capitalNotGuaranteed) // true
+} else {
+  ui.showDegraded(state.reason)                       // 'no-rpc' | 'vol-uninitialized'
+}
+
+// ApiPending: never succeeds yet — render the future route
+const hist = await sdk.data.getNavHistory({})
+if (!hist.available) ui.showPending(`coming from ${hist.endpoint}`) // '/pool/nav-history'
+
+// NonceStatus: always returns — branch on precision, not on a discriminant
+const status = await sdk.mm.isQuoteFilled(MM_ADDRESS, nonce)
+if (status.precision === 'coarse') {
+  const cap = await sdk.mm.capacityRemaining(quoteId, maxNotionalV0) // exact (I7) regardless
+}
+
+// WriteResult: branch on status — never wrap in try/catch
+const res = await sdk.depositor.deposit('junior', 10_000_000_000n)
+if (res.status === 'deferred-no-wallet') signElsewhere(res.tx)
+if (res.status === 'error')             console.warn('reverted:', res.detail)
+if (res.status === 'sent')              console.log('tx:', res.txHash)
+```
+
+---
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Degradation envelopes" icon="layer-group" href="/sdk/degradation">
+    The conceptual treatment — why reads never throw and writes fail clearly.
+  </Card>
+  <Card title="Guardrails" icon="shield-halved" href="/sdk/guardrails">
+    The write-safety model — `build*` calldata, deferred results, never-merge claims.
+  </Card>
+  <Card title="LP reference" icon="user-shield" href="/sdk-reference/lp">
+    Every LpClient method that produces `LpGeometry`, `PreviewResult`, `ProtectionStatus`.
+  </Card>
+  <Card title="Data reference" icon="chart-line" href="/sdk-reference/data">
+    The one live surface and the five `ApiPending` behavioral signals.
+  </Card>
+  <Card title="Quote helpers" icon="signature" href="/sdk-reference/quote-helpers">
+    `signQuote`, `quoteDigest`, `verifyQuote`, and the `SignedQuote ⇄ QuoteWire` codec.
+  </Card>
+  <Card title="Decimals & units" icon="ruler" href="/reference/decimals-units">
+    Why every premium/collateral figure is a 6-dec raw bigint and ratios are WAD.
+  </Card>
+</CardGroup>

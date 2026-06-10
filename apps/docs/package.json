@@ -1,0 +1,10 @@
+{
+  "name": "@inflexion/docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "docs.inflexion.xyz — Mintlify documentation site. Built/hosted by Mintlify Cloud from docs.json. Preview locally with the global Mintlify CLI (`npm i -g mint`, then `mint dev`).",
+  "scripts": {
+    "dev": "mint dev",
+    "check-links": "mint broken-links"
+  }
+}

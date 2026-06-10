@@ -1,0 +1,280 @@
+---
+title: "GreeksEngine & HedgeSuggester"
+description: "Read-only MM analytics: delta/gamma by finite-differencing the deployed ILMath.computeIL, vega/theta from the on-chain FairValueOracle.fairRate, and a three-leg hedge suggestion — all carrying the load-bearing analytics-only caveat."
+---
+
+import ClaimA from '/snippets/claim-a-disclosure.mdx'
+
+The capped IL claim an underwriter writes is **long-gamma, long-vega convexity**: the LP is long it, the underwriter (cvAMM pool or MM) is short it. `GreeksEngine` and `HedgeSuggester` are the read-only surface that quantifies that short exposure and proposes how an MM might hedge its residual risk. Both are **pure analytics** — they never hold a signer, never build a tx, and every number they return is derived from the protocol's **own deployed math**, not a parallel pricing model.
+
+That last property is the whole point. Greeks computed off a reimplemented Black-Scholes would drift from what the protocol actually pays at settlement. Instead, price greeks finite-difference the deployed `ILMath.computeIL` (the literal settlement function), and vol greeks finite-difference the on-chain [`FairValueOracle.fairRate`](/math/fair-value-phi-sum) (the Φ-sum, never reimplemented off-chain). The Greeks are exact *with respect to the reference math* — only the grid spacing is an approximation.
+
+<Note>
+  These two classes are wired into the SDK as `sdk.greeks` (a `GreeksEngine`) and `sdk.hedge` (a `HedgeSuggester`); both receive only the read client, no `engineBaseUrl`, no `chainId`, and no `walletClient`. They are read-only by construction — there is no code path on this surface that sends a transaction.
+</Note>
+
+## Method reference
+
+| Method | On | Args | Returns | Notes |
+| --- | --- | --- | --- | --- |
+| `greeks` | `GreeksEngine` | `position: PositionGeometry, durationSeconds, sigmaRefWad, opts?` | `Priceable<Greeks>` | δ/γ via finite-diff `ILMath.computeIL`; vega/θ via finite-diff `FVO.fairRate` |
+| `bookGreeks` | `GreeksEngine` | `positions[], opts?` | `{ greeks, counted, skipped }` | aggregates `greeks`; skips degraded rows, never throws |
+| `suggestHedge` | `HedgeSuggester` | `HedgeInput, opts?` | `HedgeSuggestion` | strip (BL) + on-chain inverse + delta overlay; carries `caveat` |
+| `suggestHedgeChecked` | `HedgeSuggester` | `HedgeInput, opts?` | `Priceable<{ suggestion }>` | same, explicit envelope to branch on degradation |
+| `executeOnPanoptic` | _module fn_ | `suggestion` | `PanopticPlan` (`executed: false`) | pure; **never submits a tx** |
+
+`GreeksOptions` tunes the finite-difference stencils:
+
+<ParamField path="points" type="number" default="64">
+  Interior grid points across `[Pa, Pb]` for the replication strip (`DEFAULT_POINTS = 64`).
+</ParamField>
+<ParamField path="priceBumpRel" type="number" default="0.01">
+  Relative price bump for the central-difference δ/γ (1% by default).
+</ParamField>
+<ParamField path="sigmaBumpWad" type="bigint" default="0.01 WAD">
+  Absolute σ bump (WAD) for vega — `10_000_000_000_000_000n`, i.e. one vol point.
+</ParamField>
+<ParamField path="durationBumpRel" type="number" default="0.01">
+  Relative `T` bump for theta (1% of the position's duration).
+</ParamField>
+
+## Price greeks — delta & gamma from `ILMath.computeIL`
+
+The realized payoff at expiry price $P_T$ is the **capped IL**:
+
+$$
+\text{Payout}(P_T) \;=\; \min\!\bigl(\,\mathrm{IL}(P_T),\; \mathrm{MaxIL}\,\bigr)
+$$
+
+where $\mathrm{IL}$ is exactly what [`ILMath.computeIL`](/math/il-formula) returns on-chain. `priceGreeks` evaluates this function by **calling the deployed contract** at three points around the entry price $P_0$ — a central stencil — and reading off the first and second differences.
+
+```ts
+// the capped payoff evaluated on-chain (pure read)
+const payoutAtRatio = async (ratioWad: bigint): Promise<number> => {
+  const sqrtPT = sqrtPForRatio(position.sqrtP0X96, ratioWad)
+  const il = await this.client.readContract({
+    address: this.addrs.ilMath,
+    abi: ilMathAbi,
+    functionName: 'computeIL',
+    args: [sqrtPT, position.sqrtPaX96, position.sqrtPbX96,
+           position.liquidity, position.amount0Entry, position.amount1Entry],
+  })
+  const ilf = toFloat(il)
+  return ilf > maxILf ? maxILf : ilf // min(IL, MaxIL) — the cap is applied here
+}
+```
+
+The grid is parameterised by the **price ratio** $r = P_T / P_0$ (WAD). `sqrtPForRatio` maps a ratio back to a `sqrtPriceX96` via $\sqrt{P_T} = \sqrt{P_0}\cdot\sqrt{r}$, then feeds it to `computeIL`. With $P_0$ pinned at $r = 1$, the relative bump *is* the absolute step in ratio space, so the central differences are clean:
+
+$$
+\delta \;=\; \frac{\partial\,\text{Payout}}{\partial r}\Big|_{r=1}
+\;\approx\; \frac{\text{Payout}(1+h) - \text{Payout}(1-h)}{2h},
+\qquad
+\gamma \;=\; \frac{\partial^2\,\text{Payout}}{\partial r^2}\Big|_{r=1}
+\;\approx\; \frac{\text{Payout}(1+h) - 2\,\text{Payout}(1) + \text{Payout}(1-h)}{h^2}
+$$
+
+with $h = $ `priceBumpRel` (default $0.01$). The three reads fire concurrently.
+
+<Info>
+  **Units.** δ and γ are reported **per unit price-RATIO** ($P/P_0$, dimensionless) — the natural, decimals-independent convention. The payoff values themselves are in the **6-decimal numéraire** (dUSDC) because `computeIL` returns raw dUSDC; see [decimals & units](/sdk/addresses-units). This means γ > 0 over the in-range region (the claim is long-gamma) and decays toward zero once the cap binds — the payoff goes flat at `MaxIL`, so its second difference vanishes there.
+</Info>
+
+## Vol greeks — vega & theta from `FairValueOracle.fairRate`
+
+Delta and gamma describe the payoff's shape *given* a price; vega and theta describe how the **fair premium** moves with volatility and time. The fair premium is the protocol's own published fair value:
+
+$$
+\text{Premium} \;=\; \frac{\mathrm{fairRate}(a, b, \sigma, T)}{\mathrm{WAD}} \cdot \mathrm{MaxIL}
+$$
+
+where `fairRate` is the [closed-form Φ-sum](/math/fair-value-phi-sum) evaluated by the Stylus `FairValueOracle`. `volGreeks` finite-differences this premium directly against the live oracle — it never reconstructs the Φ-sum off-chain:
+
+```ts
+// premium from the on-chain fair rate (NEVER a reimplemented Φ-sum)
+const premiumAt = async (sigma: bigint, dur: bigint): Promise<number> => {
+  const rate = await this.client.readContract({
+    address: this.addrs.fairValueOracle,
+    abi: fairValueOracleAbi,
+    functionName: 'fairRate',
+    args: [position.aWad, position.bWad, sigma, dur],
+  })
+  const prem = (toFloat(rate) / toFloat(WAD)) * maxILf
+  return prem > maxILf ? maxILf : prem // a fairRate ≤ 1 holds in-range
+}
+```
+
+**Vega** is the central difference in σ, reported per **1.0 of vol**:
+
+$$
+\nu \;=\; \frac{\partial\,\text{Premium}}{\partial \sigma}
+\;\approx\; \frac{\text{Premium}(\sigma + \Delta\sigma) - \text{Premium}(\sigma - \Delta\sigma)}{2\,\Delta\sigma}
+$$
+
+with $\Delta\sigma = $ `sigmaBumpWad` (default $0.01$ WAD). The down-bump is floored at zero so a small σ never underflows.
+
+**Theta** is the central difference in $T$, computed in seconds then **rescaled to per-year**:
+
+$$
+\theta \;=\; \frac{\partial\,\text{Premium}}{\partial T}\Big|_{\text{per year}}
+\;\approx\; \frac{\text{Premium}(T + \Delta T) - \text{Premium}(T - \Delta T)}{2\,\Delta T_{\text{sec}}} \cdot 31{,}536{,}000
+$$
+
+where $\Delta T = $ `durationBumpRel` of the duration (floored at 1 second) and $31{,}536{,}000 = 365 \times 24 \times 60 \times 60$ seconds/year. The sign convention is $\partial\text{Payout}/\partial T$: **positive theta** means value rises with more time, exactly as a long-gamma claim does.
+
+The `Greeks` struct returned:
+
+<ResponseField name="delta" type="number">∂Payout/∂P0 — per unit price ratio.</ResponseField>
+<ResponseField name="gamma" type="number">∂²Payout/∂P0² — per unit price ratio squared; positive in-range.</ResponseField>
+<ResponseField name="vega" type="number">∂Premium/∂σ — per 1.0 of vol.</ResponseField>
+<ResponseField name="theta" type="number">∂Premium/∂T — per year.</ResponseField>
+
+### Worked example — greeks for one position, then a book
+
+```ts title="greeks for a single position"
+import { createInflexionSdk, demo, tokens } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+
+// Resolve the position geometry (a/b, sqrt prices, MaxIL) from the MM surface.
+const geom = await sdk.mm.getPositionGeometry(demo.lpPositionTokenId, 7n * 24n * 3600n)
+if (!geom.priceable) throw new Error(`not priceable: ${geom.reason}`)
+
+const sigmaRef = await sdk.mm.getSigmaRef(tokens.demoWeth) // bigint | undefined
+if (sigmaRef === undefined) throw new Error('vol-uninitialized')
+
+const g = await sdk.greeks.greeks(geom.geometry, 7n * 24n * 3600n, sigmaRef)
+if (g.priceable) {
+  console.log({ delta: g.delta, gamma: g.gamma, vega: g.vega, theta: g.theta })
+} else {
+  console.log('degraded:', g.reason) // 'oracle-degraded'
+}
+```
+
+`bookGreeks` sums δ/γ/ν/θ across positions and **degrades per-row** — a single unpriceable position is skipped and counted, never thrown:
+
+```ts title="aggregate greeks across an MM's book"
+const book = await sdk.greeks.bookGreeks([
+  { position: g1.geometry, durationSeconds: 7n * 24n * 3600n, sigmaRefWad: sigmaRef },
+  { position: g2.geometry, durationSeconds: 7n * 24n * 3600n, sigmaRefWad: sigmaRef },
+])
+console.log(book.greeks)          // { delta, gamma, vega, theta } summed
+console.log(book.counted, book.skipped) // e.g. 2, 0
+```
+
+## The three-leg hedge suggestion
+
+`suggestHedge` turns the book greeks into a concrete, approximate static hedge with **three legs**. It accepts a single position or an array (a whole book) as `HedgeInput`, computes everything off the same `computeIL` grid, and attaches the verbatim caveat to every result.
+
+<Steps>
+  <Step title="Replication strip — vanilla long-gamma options (Breeden-Litzenberger)">
+    The convex capped payoff $f(P) = \min(\mathrm{IL}(P), \mathrm{MaxIL})$ is statically replicated by a strike ladder. By **Breeden-Litzenberger**, the option density needed at strike $K$ is the second derivative $f''(K)$. The suggester discretises $f$ over a shared price-ratio grid in $[a_{\min}, b_{\max}]$ (summing each position's on-chain `computeIL`), reads off the second differences as per-strike option notionals, and assigns the natural option **type** per side: **puts** below $P_0$ (the down-move IL wing), **calls** above.
+
+    $$
+    \text{notional}(K_i) \;=\; f''(K_i)\cdot h
+    \;\approx\; \frac{f(K_{i+1}) - 2f(K_i) + f(K_{i-1})}{h^2}\cdot h,
+    \qquad
+    \text{type} = \begin{cases} \text{put} & K_i < 1 \\ \text{call} & K_i \ge 1 \end{cases}
+    $$
+
+    Nodes where the density is effectively zero — the **capped / OTM-flat** regions — are skipped. Carr-Madan is the integral form of the same idea; Lipton-Lucic-Sepp static replication is the [theory anchor](/math/theory-anchors) only — the *number* comes from the deployed math.
+  </Step>
+  <Step title="On-chain inverse — a long-gamma range">
+    The underwriter is **short** the LP's in-range convexity, so the offsetting on-chain position is a **long-gamma range** over the same $[P_a, P_b]$ — a Panoptic long strangle or a GammaSwap borrowed-LP position. The suggester returns the book-aggregate edges (`rangeLow = min a/P0`, `rangeHigh = max b/P0`) plus a size proxy $= \sum L$ (total liquidity), against which the MM right-sizes for funding. Venue is `'panoptic'` (default) or `'gammaswap'`.
+  </Step>
+  <Step title="Delta overlay — flatten residual delta with a perp/spot">
+    After legs 1 and 2 there is a residual **book delta**. The MM is short the claim, so its book delta is $-\delta_{\text{claim}}$; the overlay trades $+\delta_{\text{claim}}$ of the underlying to flatten it. The side is `sign(g.delta)` (positive delta ⇒ long the underlying), the size is `|g.delta|`, and the instrument is `'perp'` (default) or `'spot'`.
+  </Step>
+</Steps>
+
+The `HedgeSuggestion` returned:
+
+<ResponseField name="strip" type="HedgeLeg[]">
+  Per-strike options: `{ strike, type: 'call' | 'put', notional }`. Empty when geometry is unpriceable or the payoff is flat.
+</ResponseField>
+<ResponseField name="onChainInverse" type="OnChainInverse">
+  `{ venue, direction: 'long-gamma', rangeLow, rangeHigh, sizeL, note }`.
+</ResponseField>
+<ResponseField name="deltaOverlay" type="DeltaOverlay">
+  `{ instrument: 'perp' | 'spot', side: 'long' | 'short', size }`.
+</ResponseField>
+<ResponseField name="caveat" type="string">
+  The verbatim `HEDGE_CAVEAT` — always attached. See below.
+</ResponseField>
+
+### Worked example — suggest and inspect a hedge
+
+```ts title="three-leg hedge for an MM's book"
+import { createInflexionSdk, executeOnPanoptic } from '@inflexion/sdk'
+
+const sdk = createInflexionSdk({ publicClient })
+
+// Prefer the checked variant to branch on a degraded read.
+const checked = await sdk.hedge.suggestHedgeChecked(
+  { position: geom.geometry, durationSeconds: 7n * 24n * 3600n, sigmaRefWad: sigmaRef },
+  { venue: 'panoptic', overlayInstrument: 'perp', stripStrikes: 8 },
+)
+
+if (checked.priceable) {
+  const { strip, onChainInverse, deltaOverlay, caveat } = checked.suggestion
+  for (const leg of strip) console.log(leg.type, leg.strike, leg.notional) // BL strikes
+  console.log(onChainInverse.venue, onChainInverse.rangeLow, onChainInverse.rangeHigh, onChainInverse.sizeL)
+  console.log(deltaOverlay.instrument, deltaOverlay.side, deltaOverlay.size)
+  console.log(caveat) // ALWAYS render this verbatim
+
+  // Read-only execution plan — NEVER sends a tx (executed === false).
+  const plan = executeOnPanoptic(checked.suggestion)
+  console.log(plan.executed) // false, by design
+} else {
+  console.log('degraded:', checked.reason) // 'oracle-degraded' — show the empty-hedge state
+}
+```
+
+<Tip>
+  Use `suggestHedge` when you always want a structurally-valid object back (on a degraded read it returns an **empty strip + zero overlay** but still attaches the caveat). Use `suggestHedgeChecked` when you want the explicit `Priceable` envelope so the UI can render a degraded state rather than a silently-empty hedge.
+</Tip>
+
+## The load-bearing caveat — analytics, not advice
+
+Every suggestion carries `HEDGE_CAVEAT` **verbatim**, and `executeOnPanoptic` always returns `executed: false`. This is not boilerplate — it is the precise statement that keeps the hedge analytics from being mistaken for a solvency mechanism, the single most important framing on this surface.
+
+<Warning>
+  **Limit:** the suggested hedge is **APPROXIMATE** relative to the fixed-maturity IL claim — there is mismatched expiry, funding, and discretisation between a perpetual-option / on-chain-inverse strip and the protocol's frozen-at-creation claim.
+
+  **Why:** the hedge replicates a convex payoff with a discrete strike ladder and a perpetual venue; no static hedge perfectly matches a fixed-maturity, capped, in-range claim. It is the **MM's own residual-risk choice**.
+
+  **Mitigation — and this is the load-bearing part:** the hedge is **NOT relied upon for pool solvency**. [Invariant I1](/security/invariants) (no bad debt, FULL) is **structural and oracle-independent** — the position is fully collateralised at `MaxIL` at creation, so the LP is paid `min(realized_IL, MaxIL)` regardless of whether the MM hedges, hedges badly, or never hedges at all. The hedge is the underwriter optimising *its own* P&L; it has zero bearing on whether the LP gets paid.
+</Warning>
+
+`executeOnPanoptic` makes the read-only contract explicit: it returns a `PanopticPlan` describing the inverse long-gamma range the MM *may* choose to open, with `executed: false`, and the same caveat copied through. The SDK does not execute on-chain hedges — it has no signer on this surface and never builds a transaction.
+
+This is why the [no-bad-debt claim](/concepts/no-bad-debt) lives on the **LP surface** and not here: the hedge analytics are about the underwriter's residual risk, a separate concern from the LP's payment guarantee.
+
+<ClaimA />
+
+## Degradation behaviour
+
+Like the rest of the SDK, this surface **never throws on a missing read** ([the degradation envelope](/sdk/degradation)):
+
+- `greeks` returns `{ priceable: false, reason: 'oracle-degraded', detail }` if any on-chain read fails — the FVO or RPC is unreachable.
+- `bookGreeks` skips degraded positions, counting them in `skipped`, and still returns a summed `Greeks` for the priceable rows.
+- `suggestHedgeChecked` returns a `Priceable` envelope; on degradation, `reason: 'oracle-degraded'`. `suggestHedge` instead returns a structurally-valid empty hedge (empty strip, zero overlay, caveat attached) so a caller never crashes.
+
+All of these greeks/hedge surfaces are **live today** — they read `ILMath` and the Stylus `FairValueOracle` directly and need no subgraph. See [what's live](/sdk/degradation) and the [deployed addresses](/reference/deployments).
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="MM client" icon="signature" href="/sdk/mm-client">
+    Path-B pricing, the per-market quote (load + MaxIL-ratio band + capacity), and `greeksForSwap` on an active book.
+  </Card>
+  <Card title="The Φ-sum" icon="function" href="/math/fair-value-phi-sum">
+    The closed-form fair value `fairRate` finite-differences for vega/theta — read on-chain, never reimplemented.
+  </Card>
+  <Card title="IL formula" icon="chart-line" href="/math/il-formula">
+    `ILMath.computeIL` — the reference settlement math the price greeks differentiate.
+  </Card>
+  <Card title="Theory anchors" icon="book" href="/math/theory-anchors">
+    Breeden-Litzenberger, Carr-Madan, and Lipton-Lucic-Sepp static replication.
+  </Card>
+</CardGroup>
