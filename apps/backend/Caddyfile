@@ -1,0 +1,14 @@
+# Reverse proxy with automatic HTTPS (Let's Encrypt) for the Inflexion backend.
+#
+# Set BACKEND_DOMAIN in the repo-root .env to either:
+#   - a domain you control, with an A record pointing at the VM's public IP
+#     (e.g. api.inflexion.xyz), or
+#   - "<vm-public-ip>.sslip.io" if you have no domain — sslip.io resolves that name
+#     to the embedded IP, so Caddy can still obtain a real Let's Encrypt certificate.
+#
+# Caddy listens on :80 (ACME challenge + redirect) and :443 (TLS) and proxies to the
+# combined API+engine container. The engine lives under /engine on the same origin.
+{$BACKEND_DOMAIN} {
+	encode gzip
+	reverse_proxy backend:8088
+}
