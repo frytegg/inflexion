@@ -9,6 +9,11 @@
  * (`FairPremium · (1 + loadBps)`), so `/quote` returns the signed quote + its
  * `loadBps`; it does not (yet) compute a dollar premium (that needs the LP's
  * position geometry + an RPC read — added with the SDK in P4.b).
+ *
+ * `createEngineParts` exposes the bare request handler + WS attach so the relayer
+ * can be mounted in-process behind a shared HTTP server (the combined `apps/backend`
+ * deploy), where the API reads the same telemetry files the engine writes.
+ * `startEngine` is the standalone server (local dev + tests) built on those parts.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { type Address, isAddress } from 'viem'
@@ -44,6 +49,15 @@ export interface EngineConfig {
   maxValiditySkewS?: number
   /** Injectable clock (seconds) for tests; defaults to wall clock. */
   nowSec?: () => number
+}
+
+export interface EngineParts {
+  /** node:http request listener for the relayer's HTTP routes. */
+  handler: (req: IncomingMessage, res: ServerResponse) => void
+  /** Attach the MM quote-stream WebSocket to a server (shares the http listener). */
+  attachWs: (server: Server) => WebSocketServer
+  store: QuoteStore
+  telemetry: TelemetrySink
 }
 
 export interface EngineHandle {
@@ -110,13 +124,17 @@ function readJsonBody(
   })
 }
 
-export function startEngine(cfg: EngineConfig): EngineHandle {
+/**
+ * Build the relayer's request handler + WS attach without binding a port. Lets the
+ * engine be mounted in-process (combined deploy) or run standalone (`startEngine`).
+ */
+export function createEngineParts(cfg: EngineConfig): EngineParts {
   const now = cfg.nowSec ?? (() => Math.floor(Date.now() / 1000))
   const maxSkewS = cfg.maxValiditySkewS ?? 60
   const store = new QuoteStore(cfg.logPath)
   const telemetry = new TelemetrySink(cfg.demandLogPath, cfg.competitionLogPath)
 
-  const http = createServer((req: IncomingMessage, res: ServerResponse) => {
+  const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     // CORS — the browser dApp (different origin) reads GET /quote (previewPremium)
     // and publishes POST /quote (MM signing). Allow any origin; no credentials.
@@ -211,53 +229,68 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
       return
     }
     json(res, 404, { error: 'not found' })
-  })
+  }
 
-  const wss = new WebSocketServer({ server: http })
-  wss.on('connection', (ws) => {
-    ws.on('message', (data) => {
-      void (async () => {
-        let msg: { type?: string; quote?: QuoteWire; signature?: `0x${string}` }
-        try {
-          msg = JSON.parse(data.toString())
-        } catch {
-          ws.send(JSON.stringify({ type: 'error', error: 'invalid json' }))
-          return
-        }
-        if (msg.type !== 'quote' || msg.quote === undefined || msg.signature === undefined) {
+  const attachWs = (server: Server): WebSocketServer => {
+    const wss = new WebSocketServer({ server })
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        void (async () => {
+          let msg: { type?: string; quote?: QuoteWire; signature?: `0x${string}` }
+          try {
+            msg = JSON.parse(data.toString())
+          } catch {
+            ws.send(JSON.stringify({ type: 'error', error: 'invalid json' }))
+            return
+          }
+          if (msg.type !== 'quote' || msg.quote === undefined || msg.signature === undefined) {
+            ws.send(
+              JSON.stringify({ type: 'error', error: "expected {type:'quote', quote, signature}" }),
+            )
+            return
+          }
+          const env: QuoteEnvelope = { quote: decodeQuote(msg.quote), signature: msg.signature }
+          if (!isAddress(env.quote.mm)) {
+            ws.send(JSON.stringify({ type: 'error', error: 'bad mm address' }))
+            return
+          }
+          // Day-one Signal 2 (quote competition): log EVERY received quote — winners
+          // AND losers/withdrawn — with `accepted` set per-outcome below. The chain
+          // only ever sees the realized fill, so the full competing field is lost
+          // unless captured here. Logging is best-effort and never blocks the ack.
+          if (!freshnessOk(env, now(), maxSkewS)) {
+            telemetry.logQuote(env.quote, false, now(), 'stale-or-far-validUntil')
+            ws.send(JSON.stringify({ type: 'rejected', reason: 'stale-or-far-validUntil' }))
+            return
+          }
+          const ok = await verifyQuote(env, cfg.chainId, cfg.verifyingContract)
+          if (!ok) {
+            telemetry.logQuote(env.quote, false, now(), 'bad-signature')
+            ws.send(JSON.stringify({ type: 'rejected', reason: 'bad-signature' }))
+            return
+          }
+          telemetry.logQuote(env.quote, true, now())
+          store.put(env, now())
           ws.send(
-            JSON.stringify({ type: 'error', error: "expected {type:'quote', quote, signature}" }),
+            JSON.stringify({
+              type: 'ack',
+              marketId: env.quote.marketId,
+              loadBps: env.quote.loadBps,
+            }),
           )
-          return
-        }
-        const env: QuoteEnvelope = { quote: decodeQuote(msg.quote), signature: msg.signature }
-        if (!isAddress(env.quote.mm)) {
-          ws.send(JSON.stringify({ type: 'error', error: 'bad mm address' }))
-          return
-        }
-        // Day-one Signal 2 (quote competition): log EVERY received quote — winners
-        // AND losers/withdrawn — with `accepted` set per-outcome below. The chain
-        // only ever sees the realized fill, so the full competing field is lost
-        // unless captured here. Logging is best-effort and never blocks the ack.
-        if (!freshnessOk(env, now(), maxSkewS)) {
-          telemetry.logQuote(env.quote, false, now(), 'stale-or-far-validUntil')
-          ws.send(JSON.stringify({ type: 'rejected', reason: 'stale-or-far-validUntil' }))
-          return
-        }
-        const ok = await verifyQuote(env, cfg.chainId, cfg.verifyingContract)
-        if (!ok) {
-          telemetry.logQuote(env.quote, false, now(), 'bad-signature')
-          ws.send(JSON.stringify({ type: 'rejected', reason: 'bad-signature' }))
-          return
-        }
-        telemetry.logQuote(env.quote, true, now())
-        store.put(env, now())
-        ws.send(
-          JSON.stringify({ type: 'ack', marketId: env.quote.marketId, loadBps: env.quote.loadBps }),
-        )
-      })()
+        })()
+      })
     })
-  })
+    return wss
+  }
+
+  return { handler, attachWs, store, telemetry }
+}
+
+export function startEngine(cfg: EngineConfig): EngineHandle {
+  const parts = createEngineParts(cfg)
+  const http = createServer(parts.handler)
+  const wss = parts.attachWs(http)
 
   http.listen(cfg.port)
 
@@ -266,5 +299,5 @@ export function startEngine(cfg: EngineConfig): EngineHandle {
       wss.close(() => http.close(() => resolve()))
     })
 
-  return { http, wss, store, telemetry, close }
+  return { http, wss, store: parts.store, telemetry: parts.telemetry, close }
 }
