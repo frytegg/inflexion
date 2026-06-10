@@ -18,7 +18,7 @@ import { type Address } from 'viem'
 import { startEngine } from './server.js'
 import { DEFAULT_VERIFYING_CONTRACT } from './addresses.js'
 
-const PORT = Number(process.env['PORT'] ?? 8787)
+const PORT = Number(process.env['ENGINE_PORT'] ?? process.env['PORT'] ?? 8787)
 const CHAIN_ID = Number(process.env['CHAIN_ID'] ?? 421614)
 const VERIFYING_CONTRACT = (process.env['VERIFYING_CONTRACT'] ??
   DEFAULT_VERIFYING_CONTRACT) as Address
