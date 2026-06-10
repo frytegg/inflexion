@@ -1,0 +1,16 @@
+{
+  "name": "@inflexion/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Combined hosted backend: the public REST API (@inflexion/api) at / and the Path-B quote relayer (@inflexion/engine) at /engine, on a single port, sharing the telemetry sinks so all five data-moat signals are live.",
+  "main": "./src/index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env src/index.js",
+    "dev": "node --env-file-if-exists=../../.env --watch src/index.js"
+  },
+  "dependencies": {
+    "@inflexion/api": "workspace:*",
+    "@inflexion/engine": "workspace:*"
+  }
+}
