@@ -83,8 +83,8 @@ The page is two regions:
 <CardGroup cols={2}>
 <Card title="Left / center — pool-wide state" icon="chart-line">
 **Vault overview** (total / locked / free / utilization, the regime badge, the load stack) +
-**Tranche split** (senior vs junior cards) + **NAV history** (the depositor-risk time series, pending
-the subgraph).
+**Tranche split** (senior vs junior cards) + **NAV history** (the depositor-risk time series, served
+live from the subgraph via the API).
 </Card>
 <Card title="Right rail — your actions" icon="wallet">
 **My position** (your senior + junior NAV, shares, any pending withdrawal) + **Deposit** (pick tranche,
@@ -319,28 +319,27 @@ executed across the cooldown. The cooldown applies to a tranche switch too.
 
 ---
 
-## NAV history — the depositor-risk surface (honest pending)
+## NAV history — the depositor-risk surface (live from the subgraph)
 
 The NAV-history chart is the **depositor-risk time series**: how the vault's net asset value per share
 has moved over time — the visible record of premium accrual vs underwriting drawdown. It is rendered from
 `data.getNavHistory({ bucket: '1d' })`.
 
-Today it is **pending**, and the page says so plainly rather than faking a curve.
+It is **served live** from the subgraph via the hosted API, reconstructed from indexed deposit /
+withdraw / settlement events since the redeploy block `274081134`.
 
-<Warning>
-**Limit → Why → Mitigation: NAV history is pending.**
+<Info>
+**NAV history is live.** NAV history is **subgraph / API-backed** — it is reconstructed from indexed
+deposit / withdraw / settlement events, not from a single live `eth_call`. The subgraph is deployed and
+indexing (events have been emitted on-chain since deploy block `274081134`), so `getNavHistory` is served
+from `/pool/nav-history` on the hosted API.
 
-- **Limit:** the NAV-history chart shows a typed `PendingNote`, not a line, right now.
-- **Why:** NAV history is **subgraph / API-backed** — it is reconstructed from indexed deposit /
-  withdraw / settlement events, not from a single live `eth_call`. The subgraph deploy is pending
-  (events have been emitted on-chain since deploy block `274081134`), so `getNavHistory` returns an
-  `ApiPending` envelope.
-- **Mitigation:** the SDK never fabricates history. The `ApiPending` envelope names the **exact future
-  route** (`/pool/nav-history`) and the query it will be served from, so the UI renders
-  *"coming from `/pool/nav-history`"* and the surface lights up automatically once the subgraph indexes —
-  zero re-derivation needed. A pending state is a deliberate trust signal, not a bug:
-  [pending ≠ error](/sdk/degradation).
-</Warning>
+The graceful-degradation path is still a design property: if `SUBGRAPH_URL` were unset, `getNavHistory`
+would return a typed `ApiPending` envelope naming the exact route (`/pool/nav-history`) and the query it
+is served from — a deliberate trust signal, never a fabricated curve and never an error:
+[pending ≠ error](/sdk/degradation). On the free hosting tier the backend sleeps after ~15 min idle, so
+the first request after a cold start can take a few seconds.
+</Info>
 
 <Maturity />
 
@@ -371,24 +370,26 @@ delegatecall-only.
 </Accordion>
 <Accordion title="NAV history — premium accrual vs underwriting drawdown over time">
 The cumulative answer to "did the premiums outrun the payouts?" — the depositor-risk surface proper.
-**Pending the subgraph** (framed above). When live it carries claim B.
+**Live from the subgraph via the API** (framed above). It carries claim B.
 </Accordion>
 <Accordion title="Where the deeper risk telemetry lives — /data">
 Net gamma (the total convexity the protocol is short, pool + every MM), pool-vs-MM spread, and the
 clearing-load history are part of the [data moat](/concepts/data-moat) and surface on
 [/app/data](/app/data). Net gamma in particular is the systemic-risk readout a serious depositor wants:
-how much convexity the whole protocol is short, and whether `Σ free` covers `Σ locked`. Signal 1
-(clearing-load surface) is LIVE; the rest are structural-now, dynamic-with-volume.
+how much convexity the whole protocol is short, and whether `Σ free` covers `Σ locked`. All five
+data-moat signals are LIVE (the queries/structures are served now); their *dynamics* mature with MM
+competition and volume.
 </Accordion>
 </AccordionGroup>
 
 <Info>
-**What is LIVE vs pending on this page:**
+**What is LIVE on this page:**
 
 - **LIVE via RPC, no subgraph needed:** vault state (total / locked / free / utilization), the regime
   badge, the full load stack, σ_ref, your position (NAV / shares), deposit, request, withdraw.
-- **Pending the subgraph:** NAV history (framed above), and the deeper time-series moat signals on
-  [/app/data](/app/data).
+- **LIVE via the subgraph (served through the hosted API):** NAV history (framed above), and the deeper
+  time-series moat signals on [/app/data](/app/data). The dataset is still young, so their *dynamics*
+  mature with MM competition and volume.
 </Info>
 
 ---

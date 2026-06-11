@@ -192,15 +192,13 @@ This is the floor/ceiling routing, demonstrated end to end.
 
 ## What is live, and what degrades to pending
 
-<Warning>
-**The subgraph is not yet indexed — and that is a typed, honest state, not a bug.**
+<Note>
+**The subgraph is deployed and indexing — history and aggregate surfaces are live.**
 
-**Limit:** anything historical or aggregate (per-market volume, NAV history, the time-series [data-moat signals](/concepts/data-moat), precise MM fill attribution) is not yet available.
+Anything historical or aggregate (per-market volume, NAV history, the time-series [data-moat signals](/concepts/data-moat), precise MM fill attribution) is served live from the subgraph via the hosted API. The rich on-chain events (`SwapPriced`, `QuoteFilled`) have been indexed since deploy block `274081134`, including the lifecycle swaps.
 
-**Why:** the rich on-chain events (`SwapPriced`, `QuoteFilled`) have been emitted since deploy block `274081134`, but the indexer is still pending deployment.
-
-**Mitigation:** every such surface degrades to a typed `pending` state that names the route it will be served from — never a fake number, never a thrown error. On `/protect` specifically, everything in the buy-and-settle flow is **live today over RPC**: premium preview, the payoff chart, eligible-position discovery, buy (Path A), and settle. **Path B previews need the engine running** (`NEXT_PUBLIC_ENGINE_URL`); without it the preview shows Path A only and `premiumB` is undefined. See [status & caveats](/reference/status-caveats).
-</Warning>
+On `/protect` specifically, everything in the buy-and-settle flow is **live over RPC**: premium preview, the payoff chart, eligible-position discovery, buy (Path A), and settle. **Path B previews need the engine running** (`NEXT_PUBLIC_ENGINE_URL`, hosted at `https://inflexion-backend.onrender.com/engine`); without it the preview shows Path A only and `premiumB` is undefined. Graceful degradation is a design property: if a backing route is unset, the surface returns a typed `pending` body that names the route it will be served from — never a fake number, never a thrown error. See [status & caveats](/reference/status-caveats).
+</Note>
 
 A few `/protect` reads degrade honestly even when the chain is healthy:
 

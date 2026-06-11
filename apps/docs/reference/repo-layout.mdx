@@ -20,7 +20,7 @@ The repo splits into `packages/*` (libraries and services), `apps/*` (the two de
     `@inflexion/sdk` — the LP / MM-quoter / cvAMM-depositor / data surfaces. The integration entry point.
   </Card>
   <Card title="packages/subgraph" icon="diagram-project" href="/integrate/subgraph">
-    The Graph subgraph (schema + mappings). Deploy is <b>pending</b> (described below).
+    The Graph subgraph (schema + mappings). <b>Deployed and indexing</b> on The Graph Studio.
   </Card>
   <Card title="packages/api" icon="globe" href="/integrate/api-overview">
     Public REST API (Railway/Fly) over the subgraph, with live-read fallbacks.
@@ -44,8 +44,8 @@ packages/contracts/   Foundry — Solidity + Stylus; test/ (unit, fork, Invarian
   stylus/FairValueOracle/  Rust Stylus PRODUCTION fairRate Φ-sum pricer (DEPLOYED)
 packages/engine/      Off-chain Path-B matching relayer (Node/TS): WS quote intake, ranking, signed-payload API
 packages/sdk/         @inflexion/sdk — LP / MM-quoter / cvAMM-depositor / data surfaces
-packages/subgraph/    The Graph subgraph (schema + mappings) — deploy PENDING
-packages/api/         Public REST API (Railway/Fly) over the subgraph
+packages/subgraph/    The Graph subgraph (schema + mappings) — DEPLOYED + indexing on The Graph Studio
+packages/api/         Public REST API (hosted on Render) over the subgraph
 apps/web/             React + Vite, wagmi/viem, RainbowKit, Apollo, shadcn/ui, Recharts
 apps/docs/            docs.inflexion.xyz (Mintlify)
 quant/                Python → cvAMM params schema (params.cvamm.schema.json); gates PARTIAL; legacy/ = multi-asset
@@ -75,10 +75,10 @@ Each package owns one surface of the protocol. The dependency direction is rough
     The typed integration entry point, with four surfaces: LP, MM-quoter, cvAMM-depositor, and data. It **hardcodes nothing** — `addresses.ts` loads the [deployment registry](/reference/deployments) and re-exports typed groups. It **never reimplements the Φ-sum** off-chain — it reads the on-chain FairPremium; the only off-chain duplication permitted is the *load* math, kept as a parity-locked TS mirror because the deployed Solidity libraries are delegatecall-only. Start at [the SDK overview](/sdk/overview).
   </Accordion>
   <Accordion title="packages/subgraph — The Graph">
-    Schema + mappings that index `InflexionCore` events into the queryable history that powers fill attribution and the moat dataset. **The deploy is pending** — three additions (`QuoteFilled`, `SwapPriced`, `CvammPricing.loadComponents()`) are coded on `main` and await a single redeploy. See [the subgraph integration page](/integrate/subgraph) and [pending state, below](#pending-state-the-subgraph).
+    Schema + mappings that index `InflexionCore` events into the queryable history that powers fill attribution and the moat dataset. **Deployed and indexing** on The Graph Studio — including the three additions (`QuoteFilled`, `SwapPriced`, `CvammPricing.loadComponents()`) — with on-chain history backfilled from the redeploy block. History/aggregate surfaces are served live via the API. See [the subgraph integration page](/integrate/subgraph).
   </Accordion>
   <Accordion title="packages/api — the public REST API">
-    A thin REST service (deployable to Railway/Fly) over the subgraph, with live-read fallbacks so it degrades to a typed `pending` state rather than erroring while the subgraph is undeployed. Reads `SUBGRAPH_URL` and an RPC from `process.env`. See [the API overview](/integrate/api-overview).
+    A thin REST service — hosted at `https://inflexion-backend.onrender.com` (REST API at `/`, engine at `/engine`) — over the subgraph, with live-read fallbacks. Reads `SUBGRAPH_URL` and an RPC from `process.env`; if `SUBGRAPH_URL` is unset it degrades to a typed `pending` state rather than erroring. See [the API overview](/integrate/api-overview).
   </Accordion>
   <Accordion title="apps/web — the dApp">
     React + Vite, wagmi/viem, RainbowKit, Apollo, shadcn/ui, Recharts. Hosts the [Protect](/app/protect), [Earn](/app/earn), [Underwrite](/app/underwrite), [Markets](/app/markets), and [Data](/app/data) surfaces. The market grid mirrors the on-chain `marketId` derivation exactly — see [marketId parity](/integrate/marketid-parity).
@@ -153,16 +153,20 @@ The Rust/Stylus crates under `packages/contracts/stylus/` — including the **pr
 
 This is a build-environment constraint, not a protocol limitation — the FairValueOracle is deployed and production, and Stylus is *why* the exact closed-form Φ-sum is affordable on-chain at all ([three pillars](/concepts/three-pillars)).
 
-## Pending state: the subgraph
+## Live state: the subgraph & backend
 
-One package ships in a deliberately degraded state, and it is framed end-to-end so no surface ever errors on it.
+The subgraph is **deployed and indexing** on The Graph Studio, and the backend (REST API + Path-B engine) is **hosted**, so every history / aggregate / time-series surface is live. The structures and queries are mature today; what matures with use is the *dataset*.
+
+<Note>
+  The subgraph is deployed (slug `inflexion-arb-sepolia`) and has backfilled on-chain history from the redeploy block — the three additions (`QuoteFilled`, `SwapPriced`, `CvammPricing.loadComponents()`) included. The backend is hosted at `https://inflexion-backend.onrender.com` (REST API at `/`, engine at `/engine`), wired to the subgraph, an RPC, and the telemetry sinks; `/health` reports `subgraph:true, live:true`. Graceful degradation remains a design property: **if** a backing (subgraph URL, RPC, telemetry) is absent, surfaces return a typed `pending` body (`'rich-events-absent'` / `'no-history-source'`) rather than erroring. See [SDK degradation](/sdk/degradation). On the free hosting tier the backend sleeps after ~15 min idle, so the first request after a lull incurs a cold start.
+</Note>
 
 <Warning>
-  **Limit:** `packages/subgraph/` is **not yet deployed**, so history and precise MM fill attribution are unavailable from the indexer.
+  **Limit:** the indexed dataset is **young** — real flow is minimal so far.
 
-  **Why:** three additions — the `QuoteFilled` and `SwapPriced` events plus `CvammPricing.loadComponents()` — are coded on `main` but await a **single redeploy**, and the on-chain moat dataset begins at that redeploy. The known blocker is bytecode size: after adding the events, `InflexionCore` is **+213 B over the EIP-170 limit** (24,789 vs 24,576 B), so a size pass precedes the redeploy.
+  **Why:** the live surfaces (regimes, forward-vol distributions, dispersion) need MM competition (≥ 3 MMs) and volume before their *dynamics* are statistically meaningful; the *structures and queries* themselves are live now.
 
-  **Mitigation:** the SDK and API **degrade to a typed `pending` state** (`'rich-events-absent'` / `'no-history-source'`) rather than throwing — live on-chain reads keep working, and history returns a typed sentinel callers can branch on. See [SDK degradation](/sdk/degradation).
+  **Mitigation:** none required — this is expected maturation, not a defect. The schema, mappings, and API contracts are stable; the numbers densify as competition and volume arrive.
 </Warning>
 
 <Maturity />

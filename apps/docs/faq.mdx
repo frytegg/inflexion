@@ -1,6 +1,6 @@
 ---
 title: "Frequently asked questions"
-description: "Nine common questions — insurance, centralization, oracle lies, depositor loss, bad debt, the cap, per-market quotes, the Phi-sum, and what is live vs pending — each answered with precise, qualified framing."
+description: "Nine common questions — insurance, centralization, oracle lies, depositor loss, bad debt, the cap, per-market quotes, the Phi-sum, and what is live — each answered with precise, qualified framing."
 ---
 
 import ClaimA from '/snippets/claim-a-disclosure.mdx'
@@ -255,9 +255,9 @@ Verification — it cannot drift from the settle-path math:
 
 </Accordion>
 
-<Accordion title="What is live vs pending?" icon="signal">
+<Accordion title="What is live?" icon="signal">
 
-**The contracts and the live RPC surfaces are real today; the subgraph (history/aggregates) is pending — and that gap degrades to a typed pending state, never an error or a fake number.**
+**The contracts, the live RPC surfaces, and the subgraph (history/aggregates) are all real today — served via the hosted API. If a backing were absent, the surface would degrade to a typed pending state, never an error or a fake number.**
 
 The protocol is live on **Arbitrum Sepolia (chainId 421614)**, fresh full redeploy **2026-06-05**, deploy block `274081134`. A real create→settle lifecycle ran on **both** rails:
 
@@ -274,16 +274,16 @@ This demonstrates [floor/ceiling routing](/protocol/routing) and the trust model
     - The two moat events `SwapPriced` / `QuoteFilled` and `CvammPricing.loadComponents` — **emitted on-chain since the deploy block**.
     - Off-chain telemetry sinks (`DEMAND_LOG` / `COMPETITION_LOG`) — **capturing now**, because they are unreconstructable retroactively ([I7](/security/invariants)).
   </Tab>
-  <Tab title="PENDING the subgraph">
-    - Per-market history / volume, NAV history, the time-series moat signals (Signals 2–5).
-    - Precise per-quote MM fill attribution — on-chain `SwapCreated` carries no `quoteId`/`nonce`; the now-live `QuoteFilled` event closes this once indexed.
+  <Tab title="LIVE via the subgraph (history + aggregates)">
+    - Per-market history / volume, NAV history, the time-series moat signals (Signals 2–5) — indexed from the redeploy block and served live via the hosted API.
+    - Precise per-quote MM fill attribution — on-chain `SwapCreated` carries no `quoteId`/`nonce`; the now-indexed `QuoteFilled` event closes this.
     - Per-MM win-rate / share.
   </Tab>
 </Tabs>
 
-<Warning>
-**Limit → Why → Mitigation, on every pending surface.** *Limit:* the subgraph is built and CI-green offline but **not yet deployed** (`SUBGRAPH_URL` unset), so every history/aggregate surface is unavailable. *Why:* it is a build gap, not a contract gap — the contracts already emit every event the dataset needs; the on-chain moat dataset **begins at the redeploy block `274081134`** (the subgraph `startBlock`). *Mitigation:* every such surface returns a typed `ApiPending` envelope naming the **exact future route + GraphQL query** it will be served from, so wiring the API later is a one-line body swap. History **degrades to a typed pending state, never an error**. See [state and limits](/moat/state-and-limits) and [status caveats](/reference/status-caveats).
-</Warning>
+<Note>
+**History and aggregates are live.** The subgraph is **deployed and indexing** on The Graph Studio (slug `inflexion-arb-sepolia`), so every history/aggregate surface is served live via the hosted API — the contracts already emit every event the dataset needs, and the on-chain moat dataset **begins at the redeploy block `274081134`** (the subgraph `startBlock`). Graceful degradation remains a design property: if `SUBGRAPH_URL` were unset, each such surface would return a typed `ApiPending` envelope naming the exact route + GraphQL query it is served from, so history would degrade to a typed pending state, never an error. See [state and limits](/moat/state-and-limits) and [status caveats](/reference/status-caveats).
+</Note>
 
 <Maturity />
 

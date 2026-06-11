@@ -446,12 +446,12 @@ getBook(
 ```
 
 Every ACTIVE swap underwritten by `mm` plus aggregate exposure. The live deploy
-has no on-chain `quoteId/nonce → swap` index and the SDK assumes no subgraph, so
-the swap-id set is discovered by **scanning** `swaps(id)` over `[fromSwapId,
+has no on-chain `quoteId/nonce → swap` index and `MmClient` takes no subgraph
+dependency, so the swap-id set is discovered by **scanning** `swaps(id)` over `[fromSwapId,
 nextSwapId)` (bounded; narrow with `fromSwapId`, or inject a known `swapIds` set).
 Each swap's path is inferred via `mm == convexityVault` (Path A) else Path B. With
 `withGreeks: true`, per-position δ/γ are finite-differenced off the on-chain ILMath.
-Works **today**, no subgraph — a direct on-chain scan.
+A direct on-chain scan — independent of the subgraph.
 
 `BookResult`:
 
@@ -720,8 +720,9 @@ interface NonceStatus {
   in the indexer, not the hot path.
 - **Path forward:** the **precise** path is the now-live `QuoteFilled` event
   (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy.
-  It becomes queryable once the subgraph indexes it — history
-  degrades to a typed pending state, never an error.
+  It is queryable now — the subgraph indexes it and serves it live via the
+  [hosted API](https://inflexion-backend.onrender.com). If `SUBGRAPH_URL` were
+  unset the history surface would degrade to a typed pending state, never an error.
 </Warning>
 
 ### `watchFills`
@@ -737,7 +738,8 @@ watchFills(
 Polls `SwapCreated` logs filtered by the indexed `mm` topic and fires `onFill` per
 new matching log. The event carries `mm` but **not**
 `quoteId/nonce`, so the match to a specific quote is coarse (`attribution:
-'coarse'`). Works **now**; the precise path is the `QuoteFilled` event once indexed.
+'coarse'`). Works **now**; the precise path is the `QuoteFilled` event, indexed by
+the subgraph and served live via the [hosted API](https://inflexion-backend.onrender.com).
 Degrades silently on a failed poll (reports via `onError`).
 
 `FillLog`:

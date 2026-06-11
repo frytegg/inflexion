@@ -123,11 +123,10 @@ A few security-relevant deployment facts worth knowing — each stated with its 
 **Mitigation / path forward:** the gate (`_requireSequencerHealthy`, uptime + 1h grace, fails-closed on a future `updatedAt`) **must be set before any mainnet deploy** — flagged in the on-chain address registry via `_sequencerNote`.
 </Warning>
 
-<Warning>
-**The subgraph deploy is pending.** The on-chain moat dataset begins at the 2026-06-05 redeploy block (`_deployBlock` is the subgraph `startBlock`).
-**Why:** the dataset is anchored to a single fresh redeploy so history is clean and non-overlapping.
-**Mitigation:** until the subgraph lands, history degrades to a **typed `pending` state — never an error** (registry `_note`). See [the data moat's state & limits](/moat/state-and-limits).
-</Warning>
+<Info>
+**The subgraph is deployed and indexing.** The on-chain moat dataset begins at the 2026-06-05 redeploy block (`_deployBlock` is the subgraph `startBlock`), so history is clean and non-overlapping. History and aggregate surfaces are served live from the subgraph via the hosted API.
+**Graceful degradation remains a design property:** if a backing (subgraph URL / RPC / telemetry) is ever absent, the affected surface returns a **typed `pending` state — never an error** (registry `_note`). See [the data moat's state & limits](/moat/state-and-limits).
+</Info>
 
 <Maturity />
 

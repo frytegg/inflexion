@@ -5,27 +5,27 @@ description: "The live/pending matrix across UI, SDK, API, subgraph, and contrac
 
 This page is the accounting of what runs on-chain **today** versus what is roadmap. The standard for "live" here is strict: a thing is live only if it executes against the fresh **Arbitrum Sepolia** redeploy (`chainId 421614`, deploy block `274081134`, dated **2026-06-05**) with no time-warp and no mock. Everything else is either a *typed pending state* (the system already degrades gracefully to it) or a clearly-labelled roadmap item.
 
-The guiding principle, repeated on every surface: **"pending" is never "error".** Anything that cannot resolve — a reverting oracle, an absent rich event, the not-yet-deployed subgraph — returns a typed envelope and renders a calm degraded state with the reason and the route that will serve it later. A naked limitation is a defect; every limit below carries its **why** and its **mitigation**.
+The guiding principle, repeated on every surface: **"pending" is never "error".** Anything that cannot resolve — a reverting oracle, an absent rich event, or a backing that is unset (if `SUBGRAPH_URL` were missing, a surface would return a typed envelope rather than fail) — renders a calm degraded state with the reason and the route that serves it. A naked limitation is a defect; every limit below carries its **why** and its **mitigation**.
 
 <Info>
-**The one-line summary.** The full create→settle lifecycle is **live on-chain for both rails** (proven 2026-06-05). Every *live-price* surface — premium preview, payoff, buy/settle, vault deposit/withdraw, market pricing, the current clearing-load surface, σ_ref, the book — runs **now** over RPC. The single real blocker for the **history / aggregate / time-series** surfaces is that the **subgraph is built but not yet deployed**; until it is, those surfaces degrade to a typed `pending` state that names the exact future route. PARTIAL mode, MM-side hedging tooling, and an Orbit (app-chain) deploy are roadmap.
+**The one-line summary.** The full create→settle lifecycle is **live on-chain for both rails** (proven 2026-06-05). Every *live-price* surface — premium preview, payoff, buy/settle, vault deposit/withdraw, market pricing, the current clearing-load surface, σ_ref, the book — runs **now** over RPC. The **history / aggregate / time-series** surfaces are **now live too**: the subgraph is **deployed and indexing** on The Graph Studio (query URL `https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`), served through the hosted REST API + engine backend at `https://inflexion-backend.onrender.com`. The dataset is still **young** — its *dynamics* (regimes, forward-vol, dispersion) mature with MM competition + volume — but the structures and queries are live. PARTIAL mode, MM-side hedging tooling, and an Orbit (app-chain) deploy are roadmap.
 </Info>
 
 ## The live / pending matrix
 
-The matrix below is the cross-section across the five layers. "Live" = executes against the 2026-06-05 deploy today. "Telemetry-live" = an off-chain JSONL sink capturing from the first interaction. "Subgraph-pending" = coded and CI-green, awaiting the single subgraph deploy. "Roadmap" = designed, not yet built.
+The matrix below is the cross-section across the five layers. "Live" = executes against the 2026-06-05 deploy today (on-chain over RPC, or — for history/aggregate surfaces — served from the deployed subgraph through the hosted API). "Telemetry-live" = an off-chain JSONL sink capturing from the first interaction. "Roadmap" = designed, not yet built.
 
-| Layer | Live now | Pending the subgraph | Roadmap |
+| Layer | Live now | Maturing (young dataset) | Roadmap |
 | --- | --- | --- | --- |
-| **Contracts** | Full lifecycle: `createSwapPathA` / `createSwap` / `createSwapRouted` + `settle`; all 10 invariants enforced; `SwapPriced` / `QuoteFilled` / `SwapCreated` / `SwapSettled` / `SwapRouted` events **emitting on-chain** since block `274081134` | — (events are live; only the *indexer* is pending) | PARTIAL collateral mode (`UnsupportedModel` revert today); sequencer-uptime feed wiring for mainnet |
-| **UI (`apps/web`)** | `/protect` (Path A buy+settle), `/earn` (deposit/withdraw), `/underwrite` (collateral + EIP-712 sign), `/markets` (fully live multicall), `/data` Signal 1, `/dashboard` (on-chain scan) | per-market history/volume, NAV history, time-series moat signals (2–5), precise MM fill attribution | hedge-helper UX, PARTIAL leverage dial |
-| **SDK (`@inflexion/sdk`)** | `LpClient`, `DepositorClient`, `MmClient`, `DataClient.getCurrentLoadSurface`; live pricing reads on-chain FairPremium | `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNetGamma` → typed `ApiPending` | — |
-| **Engine (`packages/engine`)** | Path-B quote relay (WS intake, ranking, signed-payload API); `DEMAND_LOG` / `COMPETITION_LOG` telemetry **capturing now** | — (telemetry is the *latent/dynamic* half; live now) | multi-MM competition dynamics (needs ≥3 MMs) |
-| **API (`packages/api`)** | live RPC reads routed through the SDK; telemetry-backed routes | every subgraph-backed `GET /data/*` route returns a typed `pending` body | — |
-| **Subgraph (`packages/subgraph`)** | — | **built, CI-green offline, NOT yet deployed** (`SUBGRAPH_URL` unset) — the single real blocker | per-market dimension backfill (a bounded follow-up) |
+| **Contracts** | Full lifecycle: `createSwapPathA` / `createSwap` / `createSwapRouted` + `settle`; all 10 invariants enforced; `SwapPriced` / `QuoteFilled` / `SwapCreated` / `SwapSettled` / `SwapRouted` events **emitting on-chain** since block `274081134` | — | PARTIAL collateral mode (`UnsupportedModel` revert today); sequencer-uptime feed wiring for mainnet |
+| **UI (`apps/web`)** | `/protect` (Path A buy+settle), `/earn` (deposit/withdraw), `/underwrite` (collateral + EIP-712 sign), `/markets` (fully live multicall), `/data` Signal 1, `/dashboard` (on-chain scan) | time-series moat signals (2–5) deepen as flow accrues | hedge-helper UX, PARTIAL leverage dial; web dApp on a public domain |
+| **SDK (`@inflexion/sdk`)** | `LpClient`, `DepositorClient`, `MmClient`, `DataClient.getCurrentLoadSurface`; live pricing reads on-chain FairPremium; `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNetGamma` served live via the hosted API | aggregates thicken with volume + MM competition | — |
+| **Engine (`packages/engine`)** | Path-B quote relay (WS intake, ranking, signed-payload API); `DEMAND_LOG` / `COMPETITION_LOG` telemetry **capturing now**; **hosted at `https://inflexion-backend.onrender.com/engine`** | multi-MM competition dynamics (needs ≥3 MMs) | — |
+| **API (`packages/api`)** | live RPC reads routed through the SDK; telemetry-backed routes; **all subgraph-backed `GET /data/*` + `/markets` routes serving live data, hosted at `https://inflexion-backend.onrender.com`** | — | — |
+| **Subgraph (`packages/subgraph`)** | **deployed and indexing** on The Graph Studio (slug `inflexion-arb-sepolia`, query URL `https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`), indexed from block `274081134` forward — including the per-market dimension | regime/dispersion dynamics mature with flow | — |
 
 <Note>
-Read this matrix top-down by layer or left-to-right by maturity. The headline both ways: **the protocol is complete and proven on-chain; the data product's *history/aggregate* half waits on one subgraph deploy, while its *current/live* and *telemetry* halves are already serving real data.**
+Read this matrix top-down by layer or left-to-right by maturity. The headline both ways: **the protocol is complete and proven on-chain, and the data product's *history/aggregate*, *current/live*, and *telemetry* halves are all serving real data now — over RPC for live prices, and via the deployed subgraph behind the hosted API for history/aggregates. What still matures is the *dataset itself*: its dynamics thicken with MM competition + volume.**
 </Note>
 
 ## The live create→settle lifecycle — both rails
@@ -70,23 +70,23 @@ The math at settlement is **identical regardless of which rail opened the swap**
 
 ## What is live *right now* — by user surface
 
-Everything in this section runs over live RPC against the 2026-06-05 deploy. No subgraph, no engine, no mocks are required for any of it (Path B previews additionally want the engine — see below).
+Everything in this section runs over live RPC against the 2026-06-05 deploy. No mocks are required for any of it; history/aggregate panels are served live from the deployed subgraph via the hosted API at `https://inflexion-backend.onrender.com` (Path B previews additionally want the engine — see below).
 
 <CardGroup cols={2}>
   <Card title="/protect — LP buys protection" icon="umbrella" href="/app/protect">
     Live: premium preview, payoff-with-cap chart, **Path A buy** (`buyProtection` → `createSwapRouted`), and **settle** at expiry. Active protections are discovered by an **on-chain scan** (walks up to 200 swap ids), no subgraph needed.
   </Card>
   <Card title="/earn — depositor underwrites" icon="building-columns" href="/app/earn">
-    Live: vault overview, tranche split, deposit (autoApprove → ConvexityVault), the two-step cooldown-gated withdraw. Only **NAV history** is subgraph-pending.
+    Live: vault overview, tranche split, deposit (autoApprove → ConvexityVault), the two-step cooldown-gated withdraw. **NAV history** is served live from the subgraph via the API.
   </Card>
   <Card title="/underwrite — MM Path B" icon="signature" href="/app/underwrite">
     Live: UnderwriterVault collateral, the **per-market EIP-712 quote builder + browser signing**, pool-load-to-beat reference, cancel-nonces. **Publishing** the signed quote needs the engine; without it the page shows the exact wire envelope.
   </Card>
   <Card title="/markets — market browser" icon="table-cells" href="/app/markets">
-    **Fully live** via RPC multicall — the 9 markets with clearing load, fair premium, σ_ref, regime, and the live block number. Only per-market volume/win-rate is subgraph-pending.
+    **Fully live** via RPC multicall — the 9 markets with clearing load, fair premium, σ_ref, regime, and the live block number. Per-market volume/win-rate is served live from the subgraph via the API (the per-market dimension is indexed).
   </Card>
   <Card title="/data — the moat showcase" icon="chart-line" href="/app/data">
-    **Signal 1 (clearing-load surface) is LIVE** via `getCurrentLoadSurface` + `getSurfaceSigmaRef`. Signals 2–5 and NAV history are subgraph/telemetry-pending and render typed `PendingNote`s naming their future route.
+    **Signal 1 (clearing-load surface) is LIVE** via `getCurrentLoadSurface` + `getSurfaceSigmaRef`. Signals 2–5 and NAV history are **served live** from the deployed subgraph + telemetry sinks via the hosted API; their *dynamics* still thicken as the young dataset accrues flow + MM competition.
   </Card>
   <Card title="/dashboard — all three roles" icon="grid-2" href="/app/dashboard">
     Live: aggregates LP protections, depositor deposits, and the MM book via a **bounded on-chain scan** of the last 400 swaps. `getClaimableFees` under-states (checkpointed `tokensOwed` only); flagged inline.
@@ -105,7 +105,7 @@ All three approval flows are live; they target three **different** spenders, whi
 
 ## The on-chain moat events — live since the redeploy
 
-The data moat's on-chain primitives are **emitting on-chain now**; only the indexer that aggregates them is pending. The 2026-06-05 redeploy landed both moat events and the on-chain load decomposition:
+The data moat's on-chain primitives are **emitting on-chain now**, and the indexer that aggregates them is **deployed and indexing** them. The 2026-06-05 redeploy landed both moat events and the on-chain load decomposition:
 
 ```solidity filename="InflexionCore.sol (live events)"
 // the per-fill clearing-price record — emitted on ALL THREE create paths
@@ -149,23 +149,23 @@ These are **unreconstructable retroactively**, which is exactly why they are set
 Every pending state below is framed with its cause and its path forward. None is an error; each is a typed, honest degradation.
 
 <AccordionGroup>
-  <Accordion title="The subgraph is built but not yet deployed (the single real blocker)" icon="diagram-project">
-    <Warning>
-    **Limit → Why → Mitigation.** All history / aggregate / time-series surfaces — per-market volume, NAV history, the historical clearing-load surface, the time-series moat signals (2, 3, 5), and precise MM fill attribution — are **not yet queryable**.
+  <Accordion title="The subgraph is deployed and indexing (history / aggregate surfaces are live)" icon="diagram-project">
+    <Check>
+    **Resolved — now live.** All history / aggregate / time-series surfaces — per-market volume, NAV history, the historical clearing-load surface, the time-series moat signals (2, 3, 5), and precise MM fill attribution — are **queryable now**.
 
-    **Why:** the subgraph is **built and CI-green offline** (`graph codegen` + `tsc` + `vitest`), but `SUBGRAPH_URL` is unset, so it is not yet deployed and indexing. This is a **build gap, not a contract gap** — the contracts already emit every event the moat needs. Note: the EIP-170 contract-size constraint that previously gated the redeploy was **already resolved on 2026-06-05** — `InflexionCore` is `23,934 B`, under the 24,576 B limit.
+    **What changed:** the subgraph is **deployed and indexing** on The Graph Studio (slug `inflexion-arb-sepolia`, query URL `https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`), indexed from block `274081134` forward — including the lifecycle swaps and the per-market dimension. The hosted REST API at `https://inflexion-backend.onrender.com` is wired to it; `/health` reports `subgraph: true`. (The EIP-170 contract-size constraint that previously gated the redeploy was resolved on 2026-06-05 — `InflexionCore` is `23,934 B`, under the 24,576 B limit.)
 
-    **Mitigation:** the SDK and API **degrade gracefully** — history methods return a typed `ApiPending` envelope naming the **exact future route + GraphQL query** they will be served from, so wiring the API later is a one-line body swap. The dataset begins at block `274081134` the moment the indexer comes up; nothing is lost. See [the moat's state & limits](/moat/state-and-limits) and [degradation](/sdk/degradation).
-    </Warning>
+    **Degradation is still a design property:** if `SUBGRAPH_URL` were ever unset, the SDK and API would degrade gracefully — history methods return a typed `ApiPending` envelope naming the exact route + GraphQL query — never an error. On the free hosting tier the backend sleeps after ~15 min idle, so the first call after a cold start can be slow. See [the moat's state & limits](/moat/state-and-limits) and [degradation](/sdk/degradation).
+    </Check>
   </Accordion>
 
-  <Accordion title="MM fill attribution is coarse on-chain (today)" icon="fingerprint">
+  <Accordion title="MM fill attribution — precise on-chain (legacy event was coarse)" icon="fingerprint">
     <Warning>
-    **Limit → Why → Mitigation.** The `/underwrite` and `/dashboard` fills feeds show **coarse** attribution — a fill cannot yet be joined to its specific signed quote.
+    **Limit → Why → Mitigation.** The legacy `SwapCreated` event alone gives **coarse** attribution — a fill could not be joined to its specific signed quote.
 
     **Why:** the legacy `SwapCreated` event carries `mm` but not `quoteId`/`nonce`, and `isNonceUsed` is true on both fill *and* cancel, so it cannot distinguish them.
 
-    **Mitigation:** the redeploy added `QuoteFilled(swapId, mm, quoteId, nonce, loadBps)` — the precise per-quote datum — which is **emitting on-chain now**. Precise attribution becomes queryable the moment the subgraph indexes it; until then the badge honestly reads "coarse".
+    **Mitigation:** the redeploy added `QuoteFilled(swapId, mm, quoteId, nonce, loadBps)` — the precise per-quote datum — which is **emitting on-chain now** and **indexed by the deployed subgraph**, so precise attribution is queryable via the hosted API. The young dataset means thin per-quote history today; it fills in with flow.
     </Warning>
   </Accordion>
 
@@ -205,18 +205,18 @@ Every pending state below is framed with its cause and its path forward. None is
 
     **Why:** `getClaimableFees` reads the checkpointed `tokensOwed` only — it does not simulate fee growth since the last checkpoint, so it under-states.
 
-    **Mitigation:** flagged inline as a pending note; exact uncollected fees become available once the subgraph indexes the full fee history. The LP's economics are unaffected — fees still accrue on-chain to the LP and are claimable via `claimFees` regardless of the display.
+    **Mitigation:** flagged inline as a pending note; exact uncollected fees are reconstructable from the deployed subgraph's fee history via the hosted API. The LP's economics are unaffected — fees still accrue on-chain to the LP and are claimable via `claimFees` regardless of the display.
     </Warning>
   </Accordion>
 
-  <Accordion title="The per-market subgraph dimension (when deployed)" icon="layer-group">
-    <Warning>
-    **Limit → Why → Mitigation.** When the subgraph is deployed, the **per-market** counters (`Market` lifetime counters, `MarketStateSnapshot`) will initially be zero-init.
+  <Accordion title="The per-market subgraph dimension — resolved (indexed)" icon="layer-group">
+    <Check>
+    **Resolved — now indexed.** The **per-market** counters (`Market` lifetime counters, `MarketStateSnapshot`) are indexed by the deployed subgraph; the hosted API's `/markets` route returns per-market aggregates live.
 
-    **Why:** `SwapCreated` / `SwapPriced` / `QuoteFilled` carry no `marketId`, and the handler does not yet derive it.
+    **What changed:** the handler derives `marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(duration)))` in `handleSwapCreated`, closing the per-market gap that the geometry-keyed aggregates did not cover.
 
-    **Mitigation:** the **geometry-keyed** aggregates (`BucketAggregate` for Signals 1/2/3, `GeometryDemandBucket` for Signal 4) ARE fully populated, so the **geometry-bucketed moat signals are unaffected**. Closing the per-market gap is a bounded follow-up: derive `marketId = keccak256(abi.encodePacked(token0, token1, fee, uint32(duration)))` in `handleSwapCreated`.
-    </Warning>
+    **Still true:** the **geometry-keyed** aggregates (`BucketAggregate` for Signals 1/2/3, `GeometryDemandBucket` for Signal 4) are fully populated alongside the per-market dimension. Counters are thin while the dataset is young and thicken with flow.
+    </Check>
   </Accordion>
 </AccordionGroup>
 
@@ -256,7 +256,7 @@ Two guarantees, and they are **never merged**: the LP no-bad-debt claim (Claim A
 
 ## What's not there yet — in one paragraph
 
-The protocol is **complete and proven on-chain**: a real, no-time-warp create→settle ran for both rails on 2026-06-05, all ten invariants are enforced, and every moat event is emitting on-chain since block `274081134`. The **single real pending item** is that the subgraph — though built and CI-green — is **not yet deployed**, so every history/aggregate/time-series surface degrades to a typed `pending` state that names its future route; the live-price and telemetry halves serve real data today. **PARTIAL** mode, first-class **MM hedging** UX, the **multi-MM** dynamics, **mainnet** migration, and an exploratory **Orbit** deploy are roadmap. Nothing on this page is faked, and nothing pending is presented as an error.
+The protocol is **complete and proven on-chain**: a real, no-time-warp create→settle ran for both rails on 2026-06-05, all ten invariants are enforced, and every moat event is emitting on-chain since block `274081134`. The data product is **live across all three halves**: live-price surfaces over RPC, telemetry sinks capturing now, and history/aggregate surfaces served from the **deployed, indexing subgraph** (`https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`) through the **hosted REST API + engine** at `https://inflexion-backend.onrender.com`. What genuinely remains is roadmap or maturity: the **web dApp is not yet on a public domain**, the **dataset is young** (its dynamics mature with ≥3 competing MMs + volume), and **PARTIAL** mode, first-class **MM hedging** UX, the optional **pool hedge**, **mainnet** migration, and an exploratory **Orbit** deploy are roadmap. Nothing on this page is faked, and nothing pending is presented as an error.
 
 ---
 
@@ -270,7 +270,7 @@ The protocol is **complete and proven on-chain**: a real, no-time-warp create→
     Every pending state, its why, and its path forward — the canonical caveat index.
   </Card>
   <Card title="The moat's state & limits" icon="database" href="/moat/state-and-limits">
-    What's live, what's telemetry, what's subgraph-pending across the five signals.
+    What's live on-chain, what's telemetry, and what's served from the subgraph across the five signals.
   </Card>
   <Card title="The lifecycle" icon="arrows-spin" href="/protocol/lifecycle">
     Create → active → settle, step by step, for both rails.

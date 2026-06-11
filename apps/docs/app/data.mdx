@@ -66,18 +66,18 @@ and `/data` never shows it.**
 
 ## The honest split: 1 live, 4 structural-now / dynamic-with-volume
 
-The `/data` page is explicit about which signal is live today and which are
-structures-now. Signal 1's **current** load surface is served **live via RPC**;
-Signals 2-5 carry a typed `pending` state because their *history / aggregate* surfaces
-need the subgraph, with their *dynamic / latent* telemetry halves capturing now.
+The `/data` page is explicit about which signal is live today and which mature with
+volume. Signal 1's **current** load surface is served **live via RPC**; Signals 2-5's
+*history / aggregate* surfaces are served **live from the subgraph via the API**, with
+their *dynamic / latent* telemetry halves capturing now.
 
 | # | Signal | What renders on `/data` | Live today? |
 | --- | --- | --- | --- |
 | **1** | Clearing-load surface | a fee × duration **heat-matrix** (live RPC, 30s refetch, with the block number) | **LIVE** |
-| **2** | Pool-vs-MM spread + win-rate | a framed `PendingNote` naming the future route | structural-now; dynamic with ≥3 MMs |
-| **3** | Convexity term structure | a framed `PendingNote` naming the future route | structural-now; slope-as-signal with volume |
-| **4** | Demand skew by geometry | a framed `PendingNote` (latent half is off-chain by design) | realized-now; latent-half telemetry capturing |
-| **5** | Net gamma / supply depth | a framed `PendingNote` naming the future route | most launch-robust; sharpens with the open book |
+| **2** | Pool-vs-MM spread + win-rate | live history/aggregate via the API; competitive distribution matures with MMs | structural-now; dynamic with ≥3 MMs |
+| **3** | Convexity term structure | live history/aggregate via the API | structural-now; slope-as-signal with volume |
+| **4** | Demand skew by geometry | live realized demand via the API (latent half is off-chain by design) | realized-now; latent-half telemetry capturing |
+| **5** | Net gamma / supply depth | live aggregate via the API | most launch-robust; sharpens with the open book |
 
 ## Signal 1 — Clearing-load surface (LIVE)
 
@@ -142,11 +142,10 @@ level.**
 
 ## Signals 2-5 — structural-now, dynamic-with-volume
 
-The remaining four signals render on `/data` as **framed pending states** today: the
-on-chain *structures* exist from launch, but the *history / aggregate / dynamic*
-layers need the subgraph (built, CI-green, not yet deployed) and — for the dynamics —
-multiple competing MMs and accumulating flow. Each carries its explicit
-non-circularity verdict.
+The remaining four signals render on `/data` from **live data** today: the on-chain
+*structures* exist from launch, and the *history / aggregate / dynamic* layers are
+served live from the subgraph via the API. The *dynamics* still mature with multiple
+competing MMs and accumulating flow. Each carries its explicit non-circularity verdict.
 
 <AccordionGroup>
   <Accordion title="Signal 2 — Pool-vs-MM spread + MM win-rate (NON-CIRCULAR: YES, as a spread)">
@@ -196,7 +195,7 @@ non-circularity verdict.
 ### Pool NAV history — the depositor-risk surface
 
 Below the five signals, `/data` also renders **Pool NAV history**, the depositor-risk
-surface. It is subgraph/API-backed → a framed pending today. Because it is a
+surface. It is subgraph/API-backed → served live via the API. Because it is a
 depositor-facing surface, it carries the capital-NOT-guaranteed claim.
 
 <ClaimB />
@@ -204,33 +203,36 @@ depositor-facing surface, it carries the capital-NOT-guaranteed claim.
 ## The pending-not-error pattern, framed
 
 This is the single most important UX property of `/data`: **"pending" is never
-"error," and it is never a fabricated number.** Each pending signal renders via
-a `PendingHistory` → `PendingNote` that prints `env.detail` and **the exact future API
-route + query** it will be served from, read straight off the typed `ApiPending`
-envelope. The envelope embeds the future GraphQL/REST query verbatim, so wiring the
-API at the subgraph deploy is a **one-line body swap**.
+"error," and it is never a fabricated number.** It is a design property: if a backing
+(subgraph URL / RPC / telemetry) is absent, a signal degrades to a typed `pending`
+state rather than throwing. In that case it renders via a `PendingHistory` →
+`PendingNote` that prints `env.detail` and **the exact API route + query** it is served
+from, read straight off the typed `ApiPending` envelope. The envelope embeds the
+GraphQL/REST query verbatim, so a degraded surface recovers with a **one-line body
+swap** the moment its backing returns.
 
-<Warning>
-**The subgraph is built but not yet deployed — so Signals 2-5's history/aggregate
-layers degrade to a typed `pending` state. This is a deliberate trust signal, not a
-bug.**
+<Note>
+**The subgraph is deployed and indexing — Signals 2-5's history/aggregate layers are
+served live from it via the API.**
 
-- **Limit:** until `SUBGRAPH_URL` is set, every history / aggregate moat surface on
-  `/data` returns a typed `pending` body naming its future route — never an error,
-  never a faked value.
-- **Why:** this is a **build gap, not a contract gap.** The contracts already emit
-  every event the moat needs — `SwapPriced`, `QuoteFilled`, and the on-chain
-  `CvammPricing.loadComponents` breakdown have been live on-chain since the
-  **2026-06-05 redeploy** (subgraph `startBlock` `274081134`). The subgraph passes its
-  full offline test suite (`graph codegen` + `tsc` + `vitest`) but is not yet pointed
-  at a hosted endpoint.
-- **Mitigation / path-forward:** Signal 1's *current* surface is served **live now** via
-  the SDK multicall, and the off-chain telemetry halves (`DEMAND_LOG`,
-  `COMPETITION_LOG`) are **capturing now** from the first interaction. The pending body
-  carries the exact query, so the swap is mechanical when the subgraph deploys —
-  history degrades to a typed pending state, it never errors (see
+- **Live now:** every history / aggregate moat surface on `/data` is served live from
+  the subgraph through the hosted API. The subgraph (slug `inflexion-arb-sepolia`) is
+  deployed and indexing on The Graph Studio, and the API +
+  Path-B engine are hosted as one combined backend at
+  `https://inflexion-backend.onrender.com` (REST API at `/`, engine at `/engine`).
+- **Why it works:** the contracts emit every event the moat needs — `SwapPriced`,
+  `QuoteFilled`, and the on-chain `CvammPricing.loadComponents` breakdown have been
+  live on-chain since the **2026-06-05 redeploy** (subgraph `startBlock` `274081134`),
+  which the subgraph has indexed from that block forward.
+- **Conditional degradation, by design:** if `SUBGRAPH_URL` is unset, a history /
+  aggregate surface degrades to a typed `pending` body naming its route — never an
+  error, never a faked value. Signal 1's *current* surface is served **live** via the
+  SDK multicall, and the off-chain telemetry halves (`DEMAND_LOG`, `COMPETITION_LOG`)
+  are **capturing now** from the first interaction (see
   [SDK degradation](/sdk/degradation), [the status caveats](/reference/status-caveats)).
-</Warning>
+- **Note:** on the free hosting tier the backend sleeps after ~15 min idle, so the
+  first request after a quiet period may incur a brief cold start.
+</Note>
 
 <Maturity />
 
@@ -259,7 +261,7 @@ kept as **separate claims** and never merged:
   </Card>
   <Card title="Public REST API" icon="server" href="/integrate/api-endpoints">
     The cached, wallet-free facade — `GET /pool/load-surface` (live), `GET
-    /data/*` (history, typed-pending until the subgraph deploys).
+    /data/*` (history, served live from the subgraph).
   </Card>
   <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
     The internal indexer the API reads — `BucketAggregate`, `GeometryDemandBucket`,

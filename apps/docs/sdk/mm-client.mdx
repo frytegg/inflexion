@@ -494,11 +494,12 @@ on-chain scan.
   detail }` — never a precise filled-vs-cancelled distinction.
 - **Why:** the on-chain settlement core stays minimal; the precise attribution
   belongs in the indexer, not the hot path.
-- **Path forward:** the **precise** path is the now-live `QuoteFilled` event
+- **Path forward:** the **precise** path is the `QuoteFilled` event
   (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy.
-  It becomes queryable once the subgraph indexes it — until then `watchFills` polls
-  `SwapCreated` logs by `mm` (works now, coarse). History degrades to a typed
-  `pending` state, never an error.
+  It is now queryable — the subgraph is deployed and indexing it, served live via
+  the [hosted API](/integrate/api-endpoints). The on-chain `watchFills` still polls
+  `SwapCreated` logs by `mm` (works now, coarse) as the no-backing fallback. If
+  `SUBGRAPH_URL` is unset, history degrades to a typed `pending` state, never an error.
 </Warning>
 
 ```ts
@@ -660,7 +661,7 @@ const handle = mm.quoteStream({
   onError: (err) => console.warn('requote skipped this tick:', err),
 })
 
-// 3. Monitor capacity + fills (coarse on-chain until the subgraph indexes QuoteFilled).
+// 3. Monitor capacity + fills (coarse on-chain; precise QuoteFilled is live via the subgraph API).
 const fills = mm.watchFills(MM_ADDRESS, async (fill) => {
   const cap = await mm.capacityRemaining(MY_QUOTE_ID, 1_000_000_000_000n)
   if (cap.available && cap.exhausted) handle.stop() // quote fully consumed; stop requoting

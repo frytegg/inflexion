@@ -15,6 +15,24 @@
 
 ---
 
+## ▶ Latest status — 2026-06-11 (read this first)
+
+**Live + hosted now:**
+
+- **Subgraph:** deployed on The Graph Studio (`inflexion-arb-sepolia` v0.0.3), indexing from block `274081134` — every history / aggregate surface is **LIVE** (the demo market already shows indexed swaps/settled/fills). _(graph-cli `0.71.2` caused Studio deploy 504s; fixed by bumping to `0.98.1`.)_
+- **Backend (REST API + Path-B engine):** hosted as ONE combined service on **Render** — `https://inflexion-backend.onrender.com` (REST API at `/`, engine at `/engine`). `SUBGRAPH_URL` + RPC + telemetry all wired; `/health` = `subgraph:true, live:true, telemetry:true`. All five data-moat signals live.
+- **Docs:** full Mintlify guide built, productionized (no spec/code citations or pitch framing), and flipped to the live reality (`apps/docs`).
+- **Frontend:** the functional pages built on-chain (`apps/web`); local env wired to the hosted backend.
+- **Env:** consolidated to a single root `.env.example`.
+
+**▶ NEXT:** (a) **host the web dApp** (Vercel / Netlify / Cloudflare Pages) with `NEXT_PUBLIC_API_URL` + `NEXT_PUBLIC_ENGINE_URL=…/engine` pointed at the hosted backend; (b) frontend **design pass** (apply the 01-Terminal identity); (c) **end-to-end smoke** on the live stack; (d) **demo-day prep (deadline 14 June)**. Stretch/roadmap: PARTIAL, the pool hedge, npm-publish the SDK.
+
+PRs: **#32** (docs + subgraph + env) **merged**; **#33** (combined backend + Render) **closed** (commits fast-forwarded onto `main`). Backend deploy guide: `DEPLOY_HOME_PC.md`.
+
+> The detailed `P4` checkboxes below predate this and were tracked via the **Current state** block; treat this banner as the status source of truth.
+
+---
+
 ## Calendar
 
 |               |                                                      |

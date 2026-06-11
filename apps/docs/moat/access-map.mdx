@@ -8,8 +8,9 @@ import Maturity from '/snippets/maturity-disclaimer.mdx'
 This page answers one operational question: **how does a consumer actually reach each
 of the [five behavioral signals](/moat/five-signals)?** It maps every signal across all
 three access layers — the [SDK](/sdk/data-client), the [REST API](/integrate/api-overview),
-and the [subgraph](/integrate/subgraph) — and tells you exactly which half is **live
-right now** versus which half degrades to a typed `pending` state.
+and the [subgraph](/integrate/subgraph) — and tells you exactly which surfaces are **live
+right now** versus how any layer degrades to a typed `pending` state when a backing is
+absent.
 
 If you want the *what* and the *why-non-circular* of the signals, read
 [/moat/five-signals](/moat/five-signals) and [/moat/circular-vs-behavioral](/moat/circular-vs-behavioral).
@@ -56,28 +57,28 @@ SDK↔API contract named in `DATA_API_ROUTES`.
 
 | Signal | SDK method (`DataClient`) | API route | Subgraph entity | Live now? |
 | --- | --- | --- | --- | --- |
-| **1 — Clearing load** over a transparent `σ_ref` | `getCurrentLoadSurface` (LIVE, current) · `getLoadSurfaceHistory` (history) | `GET /pool/load-surface` (current, live RPC) · `GET /data/load-surface` (history) · `GET /data/convexity-surface` (Signals 1 & 2 structural) | `MarketStateSnapshot`, `BucketAggregate` | **current = live RPC NOW**; history = subgraph-pending |
-| **2 — Pool-vs-MM spread** + win-rate | `getQuoteCompetition` | `GET /data/quote-competition` | `Swap.spreadWad`, `MarketMaker` win counts · + `COMPETITION_LOG` telemetry | **dynamic half = telemetry LIVE NOW**; structural = subgraph-pending |
-| **3 — Term structure** of convexity | (via `getLoadSurfaceHistory` / API) | `GET /data/term-structure?width&distance` | `BucketAggregate[]` across durations | subgraph-pending |
-| **4 — Demand skew** by geometry | `getDemandRequests` | `GET /data/demand-requests` | `GeometryDemandBucket` (realized) · + `DEMAND_LOG` telemetry (latent) | **latent half = telemetry LIVE NOW**; realized = subgraph-pending |
-| **5 — Net gamma supply** (protocol-wide) | `getNetGamma` | `GET /data/net-gamma`, `GET /data/supply-depth` | `NetGammaSnapshot`, `ProtocolState` | subgraph-pending (off-chain Greeks compute) |
+| **1 — Clearing load** over a transparent `σ_ref` | `getCurrentLoadSurface` (LIVE, current) · `getLoadSurfaceHistory` (history) | `GET /pool/load-surface` (current, live RPC) · `GET /data/load-surface` (history) · `GET /data/convexity-surface` (Signals 1 & 2 structural) | `MarketStateSnapshot`, `BucketAggregate` | **current = live RPC NOW**; history = subgraph LIVE |
+| **2 — Pool-vs-MM spread** + win-rate | `getQuoteCompetition` | `GET /data/quote-competition` | `Swap.spreadWad`, `MarketMaker` win counts · + `COMPETITION_LOG` telemetry | **dynamic half = telemetry LIVE NOW**; structural = subgraph LIVE |
+| **3 — Term structure** of convexity | (via `getLoadSurfaceHistory` / API) | `GET /data/term-structure?width&distance` | `BucketAggregate[]` across durations | subgraph LIVE |
+| **4 — Demand skew** by geometry | `getDemandRequests` | `GET /data/demand-requests` | `GeometryDemandBucket` (realized) · + `DEMAND_LOG` telemetry (latent) | **latent half = telemetry LIVE NOW**; realized = subgraph LIVE |
+| **5 — Net gamma supply** (protocol-wide) | `getNetGamma` | `GET /data/net-gamma`, `GET /data/supply-depth` | `NetGammaSnapshot`, `ProtocolState` | subgraph LIVE (off-chain Greeks compute) |
 
 <Info>
 **Read the "Live now?" column carefully — it is not binary per signal.** Three of the
-five signals are *split* across a live half and a pending half. Signal 1's *current*
-surface is live RPC while its *history* waits on the subgraph; Signals 2 and 4 each
-have an **off-chain telemetry half that is live now** (the dynamic / latent half that
-can *never* be on-chain) and a structural half that waits on the subgraph. The split is
+five signals are *split* across two live halves with distinct sources. Signal 1's
+*current* surface is live RPC while its *history* is served from the subgraph; Signals 2
+and 4 each have an **off-chain telemetry half** (the dynamic / latent half that can
+*never* be on-chain) alongside a structural half served from the subgraph. The split is
 the point — it is what makes the dataset *captured, not retroactive* (see [the I7
 exclusion](#why-two-halves-can-never-be-on-chain) below).
 </Info>
 
 ## The one live SDK exception — `getCurrentLoadSurface`
 
-Every other `DataClient` history method is API-backed (and therefore degrades while the
-subgraph is pending). **`getCurrentLoadSurface` is the single exception**: it hits live
-RPC directly to compute the current pool load surface — the *price-to-beat*. It is the
-**live half of Signal 1**.
+Every other `DataClient` history method is API-backed (served from the subgraph via the
+hosted API). **`getCurrentLoadSurface` is the single exception**: it hits live RPC
+directly to compute the current pool load surface — the *price-to-beat*, with no subgraph
+in the path. It is the **live-RPC half of Signal 1**.
 
 <Steps>
 <Step title="One multicall per market, over public getters">
@@ -142,7 +143,7 @@ is [circular by itself](/moat/circular-vs-behavioral) (inverting it recovers our
 load stack). Its job in Signal 1 and Signal 2 is to be the **transparent yardstick**
 the behavioral MM load is *measured against* — the subtraction `mmLoad − poolLoad` is
 exactly what removes the circular component. The *historical evolution* of this same
-surface is `getLoadSurfaceHistory` (API-backed, subgraph-pending).
+surface is `getLoadSurfaceHistory` (API-backed, served live from the subgraph).
 </Note>
 
 ## The two telemetry halves that are live now
@@ -188,7 +189,7 @@ interest on-chain would both cost gas and *break* I7. The consequence: this data
 **Mitigation / path forward.** The off-chain telemetry sinks capture both halves from
 the **first interaction**, append-only and best-effort, exactly because they cannot be
 recovered later. Engine `GET /health` reports sink
-status `{ telemetry: { demand: true, competition: true } }`. Post-redeploy the API reads these JSONL logs and
+status `{ telemetry: { demand: true, competition: true } }`. The hosted API reads these JSONL logs and
 serves `GET /data/demand-requests` (latent) and `GET /data/quote-competition` (dynamic),
 each carrying the [maturity disclaimer](#graceful-degradation-everywhere).
 </Warning>
@@ -211,9 +212,10 @@ type ApiResponse<T> =
 ```
 
 - **Live RPC + telemetry routes** return real data NOW.
-- **Subgraph-backed routes** return a typed `pending` body **with the exact future
-  GraphQL query embedded**, until `SUBGRAPH_URL` is set at the redeploy. So the UI can
-  show *"coming from `<route>`"* and the route is wired later with zero re-derivation.
+- **Subgraph-backed routes** return real data NOW, served from the deployed subgraph via
+  the hosted API. If `SUBGRAPH_URL` were unset, they would degrade to a typed `pending`
+  body **with the exact GraphQL query embedded**, so the UI can show *"coming from
+  `<route>`"* and the route wires up with zero re-derivation.
 </Tab>
 <Tab title="SDK layer">
 The SDK mirrors the API contract with typed envelopes that never throw on read:
@@ -228,35 +230,29 @@ The SDK mirrors the API contract with typed envelopes that never throw on read:
   history**.
 </Tab>
 <Tab title="Subgraph layer">
-The subgraph is built and passes its offline checks but `SUBGRAPH_URL` is **not yet
-set**, so every history/aggregate surface degrades to the typed `pending` state above.
-This is a *build gap, not a contract gap* — the contracts already emit every event the
-moat needs.
+The subgraph is **deployed and indexing** on The Graph Studio, so every history/aggregate
+surface serves real data through the hosted API. If `SUBGRAPH_URL` were unset, those
+surfaces would degrade to the typed `pending` state above — by design, never an error —
+because the contracts already emit every event the moat needs.
 </Tab>
 </Tabs>
 
-<Warning>
-**Limit.** While the subgraph is undeployed, every *history/aggregate* surface — Signal
-1's history, Signal 3 entirely, the structural halves of Signals 2 and 4, and Signal 5
-— returns a typed `pending` state rather than data.
+<Note>
+**Live.** Every *history/aggregate* surface — Signal 1's history, Signal 3 entirely, the
+structural halves of Signals 2 and 4, and Signal 5 — now serves real data, indexed by the
+deployed subgraph and served through the hosted API.
 
-**Why.** This is the single real blocker for the HISTORY/AGGREGATE moat surfaces, and it
-is a *build gap, not a contract gap*: the on-chain moat events (`SwapPriced`,
-`QuoteFilled`) and `CvammPricing.loadComponents` shipped in the
-[2026-06-05 redeploy](/reference/deployments) and emit every field the indexer needs.
-The redeploy block `274081134` is the subgraph `startBlock` — the dataset's genesis.
-
-**Mitigation / path forward.** Each pending body carries the exact future GraphQL query,
-so deploying the subgraph is a one-line wiring change, not a re-derivation. Meanwhile the
-**live RPC** (current load surface, σ_ref) and **telemetry** (latent demand, quote
-competition) surfaces serve real data today. One bounded follow-up remains: the
-**per-MARKET** dimension is declared but not yet populated (events carry no `marketId`
-yet), so `Market` counters stay zero-init — but the **GEOMETRY-keyed** aggregates
-(`BucketAggregate`, `GeometryDemandBucket`) are fully populated, so the
-**geometry-bucketed moat signals are unaffected**. See
-[/moat/state-and-limits](/moat/state-and-limits) and
-[/reference/status-caveats](/reference/status-caveats).
-</Warning>
+**How.** The on-chain moat events (`SwapPriced`, `QuoteFilled`) and
+`CvammPricing.loadComponents` shipped in the [2026-06-05 redeploy](/reference/deployments)
+and emit every field the indexer needs. The redeploy block `274081134` is the subgraph
+`startBlock` — the dataset's genesis — and the indexer has caught up from there, including
+the lifecycle swaps. The **live RPC** (current load surface, σ_ref) and **telemetry**
+(latent demand, quote competition) surfaces serve real data alongside it. Both the
+**per-MARKET** dimension (the API `/markets` route returns per-market aggregates) and the
+**GEOMETRY-keyed** aggregates (`BucketAggregate`, `GeometryDemandBucket`) are populated, so
+every moat signal is reachable today. See [/moat/state-and-limits](/moat/state-and-limits)
+and [/reference/status-caveats](/reference/status-caveats).
+</Note>
 
 <Maturity />
 
@@ -271,17 +267,18 @@ A one-glance read of what serves real data today versus what degrades to a typed
 | `getSurfaceSigmaRef` (σ_ref + regime) | SDK live RPC | **LIVE** |
 | Signal 4 latent demand (`DEMAND_LOG`) | Engine telemetry / `GET /data/demand-requests` | **LIVE NOW** (off-chain by I7) |
 | Signal 2 dynamic competition (`COMPETITION_LOG`) | Engine telemetry / `GET /data/quote-competition` | **LIVE NOW** (off-chain by I7) |
-| Signal 1 history (`getLoadSurfaceHistory`) | Subgraph via API | typed `pending` |
-| Signal 3 term structure | Subgraph via API | typed `pending` |
-| Signal 2 / 4 structural (realized) halves | Subgraph via API | typed `pending` |
-| Signal 5 net gamma (`getNetGamma`) | Off-chain Greeks compute via API | typed `pending` |
+| Signal 1 history (`getLoadSurfaceHistory`) | Subgraph via API | **LIVE** |
+| Signal 3 term structure | Subgraph via API | **LIVE** |
+| Signal 2 / 4 structural (realized) halves | Subgraph via API | **LIVE** |
+| Signal 5 net gamma (`getNetGamma`) | Off-chain Greeks compute via API | **LIVE** |
 
 <Note>
 **The pattern, restated.** Anything that needs the *price right now* or *who quoted what
 right now* is live (SDK live RPC + engine telemetry). Anything that needs *history or an
-aggregate distribution* degrades to a typed `pending` state until the subgraph deploys —
-with the future query embedded, never an error. The dataset's *structures* are reachable
-today; its *dynamics* mature with the subgraph deploy, more MMs, and flow.
+aggregate distribution* is served live from the subgraph via the hosted API — and would
+degrade to a typed `pending` state, with the query embedded and never an error, only if a
+backing were absent. The dataset's *structures* are all reachable today; its *dynamics*
+(regimes, forward-vol distributions, dispersion) mature with more MMs and flow.
 </Note>
 
 ## Where to go next

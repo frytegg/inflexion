@@ -161,23 +161,25 @@ What that means concretely:
 | --- | --- | --- |
 | **On-chain moat events** | `SwapPriced` + `QuoteFilled` + the `CvammPricing.loadComponents` breakdown | **LIVE on-chain since the 2026-06-05 redeploy** — the dataset begins at the redeploy `startBlock` |
 | **Off-chain telemetry** | `DEMAND_LOG` (Signal 4 latent half) + `COMPETITION_LOG` (Signal 2 dynamic half) | **CAPTURING NOW** — from the first interaction logged (it is unreconstructable retroactively, so capturing it now is the entire point) |
-| **History / aggregate surfaces** | the subgraph that indexes the on-chain events into bucketed aggregates | **subgraph-pending** — see the limit below |
+| **History / aggregate surfaces** | the subgraph that indexes the on-chain events into bucketed aggregates | **LIVE** — the subgraph is deployed and indexing on The Graph Studio; history/aggregate surfaces are served live via the hosted API |
 
-<Warning>
-**The subgraph is built but not yet deployed — so history and aggregate surfaces
-degrade to a typed `pending` state.**
+<Info>
+**The subgraph is deployed and indexing — history and aggregate surfaces are LIVE,
+served via the hosted API.**
 
-- **Limit:** until `SUBGRAPH_URL` is set, every *history* / *aggregate* moat surface
-  returns a typed `pending` body — never an error.
-- **Why:** this is a **build gap, not a contract gap**. The contracts already emit
-  every event the moat needs; the subgraph passes its offline build and test suite but
-  is not yet pointed at a hosted endpoint.
-- **Mitigation / path-forward:** the *current* (non-historical) load surface is served
-  **live now** via the SDK multicall, and the off-chain telemetry halves are capturing
-  now. The pending body even embeds the exact future GraphQL query, so wiring the API
-  at the subgraph deploy is a one-line body swap (see
-  [degradation](/sdk/degradation)).
-</Warning>
+The subgraph is deployed on The Graph Studio and has indexed the on-chain history from
+the redeploy `startBlock`, so every *history* / *aggregate* moat surface is served live
+through the hosted REST API ([inflexion-backend.onrender.com](https://inflexion-backend.onrender.com)),
+wired to the subgraph + an RPC + the telemetry sinks. The *current* (non-historical)
+load surface remains available directly via the SDK multicall, and the off-chain
+telemetry halves are capturing now.
+
+Graceful degradation stays a design property: **if** `SUBGRAPH_URL` were unset, every
+history / aggregate surface would return a typed `pending` body — never an error (the
+body even embeds the exact GraphQL query, so re-wiring is a one-line swap; see
+[degradation](/sdk/degradation)). On the free hosting tier the backend sleeps after
+~15 min idle, so the first request after a cold start may be slow.
+</Info>
 
 So the leading-indicator and forward-vol *dynamics* (the dispersion of Signal 1, the
 competitive distribution of Signal 2) need **≥3 competing MMs** and ~30–50

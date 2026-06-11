@@ -18,11 +18,11 @@ The SDK wraps the [live Arbitrum Sepolia deployment](/reference/deployments) (ch
 
 ## The two design properties
 
-These run through the whole package. If you remember nothing else about the SDK, remember these two — they are what make it safe to use from a wallet-less server, a degraded-RPC browser tab, or a UI that loads before the subgraph is indexed.
+These run through the whole package. If you remember nothing else about the SDK, remember these two — they are what make it safe to use from a wallet-less server, a degraded-RPC browser tab, or a UI that loads against a backing that is momentarily unreachable.
 
 <CardGroup cols={2}>
   <Card title="Reads are graceful" icon="shield-check">
-    Anything that needs a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a **typed degraded envelope** — never throws.
+    Anything that needs a reverting oracle, an absent rich event, or an unreachable history source returns a **typed degraded envelope** — never throws.
   </Card>
   <Card title="Writes degrade, never crash at construction" icon="pen-to-square">
     With no `walletClient`, the SDK still constructs. Writes either throw a **clear error on call** or return a **deferred result** carrying the unsigned tx — the only place a missing signer surfaces.
@@ -53,7 +53,7 @@ if (!g.priceable) {
 The `reason` is drawn from a closed union, `DegradeReason ∈ { oracle-degraded, no-rpc, rich-events-absent, no-history-source, vol-uninitialized, market-unknown, position-unknown }`. This is the discipline that lets the UI render a typed "pending" or "oracle degraded" state instead of catching an exception — a degraded read is a **value**, not a thrown error.
 
 <Note>
-The SDK **never fabricates history**. When a history surface has no source yet, `ApiPending` even names the **future** API route and the exact query that _would_ be sent — so the UI can show "coming from `<route>`" and the API can be wired in later with zero re-derivation. See [degradation](/sdk/degradation) for the full cheat-sheet.
+The SDK **never fabricates history**. History surfaces are served live from the subgraph via the [hosted API](https://inflexion-backend.onrender.com). Should a history source be momentarily unreachable, `ApiPending` even names the API route and the exact query that _would_ be sent — so the UI can show "coming from `<route>`" and degrade with zero re-derivation. See [degradation](/sdk/degradation) for the full cheat-sheet.
 </Note>
 
 ### 2 — Writes throw or defer without a wallet
@@ -219,24 +219,20 @@ In the browser pattern, `walletClient.account` is used directly — wagmi's `use
 
 ---
 
-## What is live today vs. subgraph-pending
+## What is live today
 
-The SDK is fully usable against the live deployment **without** the subgraph. The distinction is between live RPC surfaces and history/aggregate surfaces that degrade to a typed `pending` state:
+The SDK is fully usable against the live deployment. Direct RPC surfaces are served from the chain; history and aggregate surfaces are served live from the subgraph via the [hosted API](https://inflexion-backend.onrender.com):
 
-| Live today (no subgraph) | Subgraph-pending (typed `pending`, render the state) |
+| Live from RPC (direct) | Live from the subgraph (via the hosted API) |
 | --- | --- |
 | premium preview, current load surface, σ_ref | all DataClient history (load-surface, quote-competition, demand, NAV, net-gamma) |
-| market pricing, vault state, protection status | precise `QuoteFilled` fill attribution (coarse today) |
-| position geometry, `getBook` (on-chain scan) | full fee accounting (under-states without subgraph) |
+| market pricing, vault state, protection status | precise `QuoteFilled` fill attribution |
+| position geometry, `getBook` (on-chain scan) | full fee accounting |
 | `watchFills` (coarse log poll) | NAV history |
 
-<Warning>
-**The subgraph deploy is pending — and that is a typed state, never an error.**
-
-- **Limit.** History and aggregate surfaces (`getLoadSurfaceHistory`, `getQuoteCompetition`, `getNavHistory`, …) have no live data source yet.
-- **Why.** The subgraph is not yet deployed for the 2026-06-05 redeploy, so there is no indexed event history to query.
-- **Mitigation.** These methods return `ApiPending`, which **names the future route and the exact query** that would be sent. The UI renders "coming from `<route>`"; the API is wired in later with zero re-derivation. The SDK never fabricates history. See [degradation](/sdk/degradation).
-</Warning>
+<Note>
+**Graceful degradation is a design property, not the current state.** All history and aggregate surfaces (`getLoadSurfaceHistory`, `getQuoteCompetition`, `getNavHistory`, …) are served live from the subgraph via the hosted API. If a backing (the `SUBGRAPH_URL`, the RPC, or a telemetry sink) is ever unset or unreachable, these methods return `ApiPending`, which **names the route and the exact query** that would be sent — the UI renders "coming from `<route>`" and the SDK never fabricates history. See [degradation](/sdk/degradation). On the free hosting tier the backend sleeps after ~15 min idle, so the first call after a quiet period may incur a cold start.
+</Note>
 
 <Maturity />
 

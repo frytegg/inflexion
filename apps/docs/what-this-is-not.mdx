@@ -119,10 +119,10 @@ These come up in conversation and each deserves its honest framing.
 
 ## What is NOT yet mature (stated honestly)
 
-Two things are real and live; one is on the redeploy path. None is left naked.
+The structures are live; the *dynamics* are what mature with MM competition and volume. None is left naked.
 
 <Warning>
-**The on-chain moat dataset is not live yet.** *Limit:* the subgraph deploy is pending, so historical moat queries return a typed `pending` state. *Why:* the on-chain moat events (`SwapPriced` / `QuoteFilled`) and `CvammPricing.loadComponents` are coded but not yet in deployed bytecode, and the dataset begins at the single redeploy. *Mitigation:* the **structures ship day-one** and the **off-chain telemetry halves begin at the first interaction logged**; history degrades to a typed pending state, **never an error**. See [the data moat](/concepts/data-moat) and [status & caveats](/reference/status-caveats).
+**The on-chain moat dataset is live but young.** *Limit:* every history / aggregate / time-series surface is **live now** — the subgraph is deployed and indexing on The Graph Studio (from the redeploy block), served via the hosted API — but real flow is minimal, so the *dynamics* (regimes, forward-vol distributions, dispersion) are still thin. *Why:* the regime and dispersion signals only sharpen with MM competition ($\ge 3$ MMs) and volume; the off-chain telemetry halves are captured live and never touch the chain by design (invariant [I7](/security/invariants)). *Mitigation:* the **structures/queries ship day-one** and are queryable now; the **maturity comes with flow**. If a backing (`SUBGRAPH_URL` / RPC / telemetry) were ever absent, history degrades to a typed pending state, **never an error**. See [the data moat](/concepts/data-moat) and [status & caveats](/reference/status-caveats).
 </Warning>
 
 <Maturity />

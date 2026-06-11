@@ -189,7 +189,7 @@ the baseline is what de-circularizes the signal.
 </Card>
 </CardGroup>
 
-## State of the dataset (as of 2026-06-09)
+## State of the dataset (as of 2026-06-11)
 
 <Tabs>
 <Tab title="Live now">
@@ -198,24 +198,42 @@ the baseline is what de-circularizes the signal.
   **2026-06-05**. The redeploy
   block `274081134` is the subgraph `startBlock` — **the on-chain moat dataset begins
   here**.
+- **The subgraph is DEPLOYED and INDEXING.** It has indexed on-chain history from the
+  redeploy block `274081134` (including the lifecycle swaps), so every
+  history/aggregate/time-series surface is **served live from the subgraph via the
+  hosted API**. The per-market dimension is indexed, so per-market aggregates
+  (`/markets`) are live.
+- **The API + Path-B engine are HOSTED.** One combined backend at
+  `https://inflexion-backend.onrender.com` (REST API at `/`, engine at `/engine`),
+  wired to the subgraph, an RPC, and the telemetry sinks. `/health` reports
+  `subgraph:true`, `live:true`, `telemetry:{demand:true,competition:true}`.
 - **Off-chain telemetry is CAPTURING NOW.** `DEMAND_LOG` and `COMPETITION_LOG` write
   append-only from the first interaction; the SDK `previewPremium` ping fires now. Live deployment addresses: <AddressTable />.
 </Tab>
-<Tab title="Pending (with the why)">
+<Tab title="Caveats (with the why)">
 <Warning>
-**Limit.** The subgraph is built but **not yet deployed** — `SUBGRAPH_URL` is unset,
-so every history/aggregate surface degrades to a typed `pending` state naming its
-future route.
+**Limit.** The dataset is **young** — real flow is minimal, so the *dynamic* signals
+(the pool-vs-MM spread read as forward vol; bucketed load *dispersion* across MMs) are
+single-point, not distributions.
 
-**Why.** This is a *build gap, not a contract gap*. The contracts already emit every
-event the moat needs; the subgraph passes its offline checks (codegen, type-check, and unit tests) and awaits one deploy.
+**Why.** A spread needs two sides and a distribution needs many draws. The
+*structures and queries* are live now, but the *dynamics* (regimes, forward-vol
+distributions, dispersion) mature only with MM competition (`≥3` MMs) and volume.
 
-**Mitigation.** History/aggregate routes return a typed `pending` body with the exact
-future GraphQL query embedded — **never an error** — so wiring the API later is a
-one-line body swap. The live RPC and telemetry surfaces serve real data today. See
+**Mitigation.** Every primitive is captured from day one and the structures are served
+live, so the dynamics are *reconstructable as flow arrives, never retroactively lost*.
+The structures sharpen into dynamics with `≥3` competing MMs and `~30–50` fills per
+bucket — weeks-to-months at launch flow, not a redesign. See
 [/reference/status-caveats](/reference/status-caveats) and
 [/moat/state-and-limits](/moat/state-and-limits).
 </Warning>
+
+<Note>
+**Graceful degradation is a design property.** If a backing (`SUBGRAPH_URL`, RPC, or a
+telemetry sink) were absent, history/aggregate surfaces would return a typed `pending`
+body naming the route — **never an error**. On the free hosting tier the backend
+sleeps after `~15 min` idle, so the first request after idle incurs a cold start.
+</Note>
 </Tab>
 </Tabs>
 

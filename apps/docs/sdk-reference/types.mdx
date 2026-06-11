@@ -33,7 +33,7 @@ Everything fallible the SDK returns is one of exactly five shapes. Three are **r
 | `Degraded<T>` | `available` | `{ available: true } & T` | `{ available: false; reason: string }` |
 | `Priceable<T>` | `priceable` | `{ priceable: true } & T` | `NotPriceable` |
 | `NotPriceable` | `priceable: false` | — | `{ priceable: false; reason: DegradeReason; detail? }` |
-| `ApiPending` | `available: false` | — (never succeeds yet) | `{ available: false; reason: 'no-history-source'; endpoint; query; detail? }` |
+| `ApiPending` | `available: false` | — (degraded fallback) | `{ available: false; reason: 'no-history-source'; endpoint; query; detail? }` |
 | `NonceStatus` | `precision` | always returns | precision degrades `'coarse' → 'precise'` |
 | `WriteResult` | `status` | `{ status: 'sent'; txHash; tx }` | `{ status: 'deferred-no-wallet' \| 'error'; tx; detail? }` |
 
@@ -85,22 +85,22 @@ Envelopes nest. `getProtectionStatus` returns `ProtectionStatus | { available: f
 type ApiPending = {
   available: false
   reason: 'no-history-source'
-  endpoint: string  // the FUTURE API route this would call
-  query: unknown    // the exact query that WOULD be sent
+  endpoint: string  // the API route this maps to
+  query: unknown    // the exact query that would be sent
   detail?: string
 }
 ```
 
-The most deliberate envelope in the SDK. Every DataClient **history** method returns it until the subgraph is deployed. Rather than fabricate a number, it returns the **future route and the exact query** that would be sent — so the UI renders "coming from `<route>`" today and the API is wired in later with **zero re-derivation**.
+The most deliberate envelope in the SDK. Every DataClient **history** method returns it whenever its backing source is absent — for example if `SUBGRAPH_URL` is unset. Rather than fabricate a number, it returns the **route and the exact query** that would be sent — so the UI renders "coming from `<route>`" and the API is wired in with **zero re-derivation**. The subgraph is now deployed and indexing, so these history surfaces are served live through the [hosted API](https://inflexion-backend.onrender.com); the envelope remains the typed degraded fallback when a backing is missing.
 
 <ResponseField name="available" type="false" required>
-  Always `false`. These surfaces have no live source yet.
+  Always `false`. Returned when a surface's backing source is absent (e.g. `SUBGRAPH_URL` unset).
 </ResponseField>
 <ResponseField name="reason" type="'no-history-source'" required>
-  Fixed literal — the [`DegradeReason`](#3-degradereason) for the subgraph-not-deployed case.
+  Fixed literal — the [`DegradeReason`](#3-degradereason) for the no-history-source case.
 </ResponseField>
 <ResponseField name="endpoint" type="string" required>
-  The future API route this call _will_ hit (e.g. `'/data/load-surface'`). Render it as the pending source.
+  The API route this call hits (e.g. `'/data/load-surface'`). Render it as the source.
 </ResponseField>
 <ResponseField name="query" type="unknown" required>
   The exact query object that _would_ be sent — the caller's args, normalised. The API can be wired with no re-derivation.
@@ -131,7 +131,7 @@ Not a pass/fail envelope — it **always** returns — but it carries a **precis
   Whether the nonce bit is set on-chain via `Core.isNonceUsed(mm, nonce)`.
 </ResponseField>
 <ResponseField name="precision" type="'coarse' | 'precise'" required>
-  `'coarse'` today: the bit is set on **both** a fill and a cancel, and `SwapCreated`/`SwapRouted` carry no `quoteId`/`nonce`, so filled cannot be distinguished from cancelled on-chain alone. `'precise'` once the subgraph indexes the now-live `QuoteFilled` event.
+  `'coarse'` from the on-chain bitmap alone: the bit is set on **both** a fill and a cancel, and `SwapCreated`/`SwapRouted` carry no `quoteId`/`nonce`, so filled cannot be distinguished from cancelled on-chain alone. `'precise'` from the now-deployed subgraph, which indexes the now-live `QuoteFilled` event.
 </ResponseField>
 <ResponseField name="detail" type="string" required>
   Human-readable elaboration (e.g. `'nonce bit set (fill OR cancel)'`).
@@ -142,7 +142,7 @@ Not a pass/fail envelope — it **always** returns — but it carries a **precis
 
 - **Limit.** `mm.isQuoteFilled(mm, nonce)` returns `precision: 'coarse'`.
 - **Why.** The bitmap nonce is set on both fill and cancel; `SwapCreated`/`SwapRouted` carry no `quoteId`/`nonce`.
-- **Mitigation.** The precise path is the now-live `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy, queryable as `precision: 'precise'` once the [subgraph](/integrate/subgraph) indexes. Meanwhile `capacityRemaining` reads the exact on-chain `consumedNotional` ([invariant I7](/security/invariants)) for the number that actually matters.
+- **Mitigation.** The precise path is the now-live `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy and indexed by the now-deployed [subgraph](/integrate/subgraph), queryable as `precision: 'precise'`. `capacityRemaining` also reads the exact on-chain `consumedNotional` ([invariant I7](/security/invariants)) for the number that actually matters.
 </Warning>
 
 ### 1.5 `WriteResult`
@@ -200,7 +200,7 @@ type DegradeReason =
   | 'oracle-degraded'    // OracleManager.getPrice reverted (stale / sequencer down)
   | 'no-rpc'             // no read client could be built
   | 'rich-events-absent' // an indexed event the surface needs isn't on-chain yet
-  | 'no-history-source'  // subgraph/API not deployed (ApiPending uses this)
+  | 'no-history-source'  // no history backing available, e.g. SUBGRAPH_URL unset (ApiPending uses this)
   | 'vol-uninitialized'  // VolOracle.sigmaRef reverts — σ_ref not seeded for the token
   | 'market-unknown'     // Core.markets returns token0 == address(0)
   | 'position-unknown'   // NPM.positions has no such tokenId
@@ -210,8 +210,8 @@ type DegradeReason =
 | --- | --- | --- |
 | `oracle-degraded` | `OracleManager.getPrice` reverts | retry next block; the [settlement-liveness fork](/security/forks) guarantees `settle` still succeeds |
 | `no-rpc` | no read client (no `rpcUrl`/transport/`publicClient`, no env) | provide an RPC — see [getting started](/sdk/getting-started) |
-| `rich-events-absent` | a needed indexed event isn't emitted on-chain yet | use the coarse on-chain path; precise lands with the [subgraph](/integrate/subgraph) |
-| `no-history-source` | the subgraph/API is not deployed | render the `ApiPending` "coming from `<route>`" state |
+| `rich-events-absent` | a needed indexed event isn't emitted on-chain yet | use the coarse on-chain path; precise is served by the now-deployed [subgraph](/integrate/subgraph) |
+| `no-history-source` | no history backing is configured (e.g. `SUBGRAPH_URL` unset) | render the `ApiPending` "coming from `<route>`" state |
 | `vol-uninitialized` | `VolOracle.sigmaRef` reverts (token never seeded) | `lp.poke(token)` / requote after the EWMA seeds |
 | `market-unknown` | `Core.markets(marketId).token0 == 0` | check the [markets grid](/reference/markets-grid) |
 | `position-unknown` | `NPM.positions(tokenId)` has no entry | confirm the tokenId and owner |
@@ -293,7 +293,7 @@ Returned by `lp.getClaimableFees` as `ClaimableFees | { available: false }`. Rea
 
 - **Limit.** The on-chain figure is only the last-checkpointed `tokensOwed`, not live accrual.
 - **Why.** Precise fee accounting needs indexed pool events.
-- **Mitigation.** The precise figure lands with the [subgraph](/integrate/subgraph); until then treat the value as a conservative lower bound.
+- **Mitigation.** The precise figure is served by the now-deployed [subgraph](/integrate/subgraph); the on-chain value remains a conservative lower bound.
 </Warning>
 
 ---
@@ -318,7 +318,7 @@ Returned inside `Degraded<VaultState>` from `depositor.getVaultState`. Every suc
 <ParamField path="lockedByMarket" type="Record<Hex, bigint>">Colour map keyed by **caller-supplied** marketIds. Free collateral is pool-wide fungible, so this is HHI/concentration colour, **not** a per-market budget.</ParamField>
 <ParamField path="sigmaRefWad" type="bigint">σ_ref EWMA (WAD).</ParamField>
 <ParamField path="regime" type="Regime">The current volatility regime band.</ParamField>
-<ParamField path="instYieldWad" type="bigint">Instantaneous yield (WAD). **Subgraph-only ⇒ omitted live**.</ParamField>
+<ParamField path="instYieldWad" type="bigint">Instantaneous yield (WAD). **Subgraph-only ⇒ omitted from the on-chain read**; served by the now-deployed subgraph via the API.</ParamField>
 <ParamField path="capitalNotGuaranteed" type="true" required>Carries [Claim B](/concepts/tranches) on every depositor state read.</ParamField>
 
 <ClaimB />
@@ -463,7 +463,7 @@ if (state.available) {
   ui.showDegraded(state.reason)                       // 'no-rpc' | 'vol-uninitialized'
 }
 
-// ApiPending: never succeeds yet — render the future route
+// ApiPending: served live via the API; render the route when a backing is absent
 const hist = await sdk.data.getNavHistory({})
 if (!hist.available) ui.showPending(`coming from ${hist.endpoint}`) // '/pool/nav-history'
 
@@ -495,7 +495,7 @@ if (res.status === 'sent')              console.log('tx:', res.txHash)
     Every LpClient method that produces `LpGeometry`, `PreviewResult`, `ProtectionStatus`.
   </Card>
   <Card title="Data reference" icon="chart-line" href="/sdk-reference/data">
-    The one live surface and the five `ApiPending` behavioral signals.
+    The live data surfaces and the five behavioral signals, with the `ApiPending` fallback.
   </Card>
   <Card title="Quote helpers" icon="signature" href="/sdk-reference/quote-helpers">
     `signQuote`, `quoteDigest`, `verifyQuote`, and the `SignedQuote ⇄ QuoteWire` codec.

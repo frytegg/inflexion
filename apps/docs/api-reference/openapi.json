@@ -3,7 +3,7 @@
   "info": {
     "title": "Inflexion REST API",
     "version": "0.0.0",
-    "description": "Public REST API contract for Inflexion (docs-site snapshot for the Mintlify API Reference). It is a point-in-time copy; the canonical machine-readable spec is served at GET /openapi.json. Read-only, cached, public facade over the Inflexion subgraph (history / aggregates), a few live RPC reads (current pool-load surface, pool state, pricing preview), and the engine telemetry sinks (Signals 2 & 4 dynamic halves). No wallet, no RPC key for consumers. Every surface degrades gracefully: subgraph-backed routes return a typed `pending` body (with the future GraphQL query embedded) until the subgraph is deployed; live + telemetry routes return real data now."
+    "description": "Public REST API contract for Inflexion (docs-site snapshot for the Mintlify API Reference). It is a point-in-time copy; the canonical machine-readable spec is served at GET /openapi.json. Read-only, cached, public facade over the Inflexion subgraph (history / aggregates), a few live RPC reads (current pool-load surface, pool state, pricing preview), and the engine telemetry sinks (Signals 2 & 4 dynamic halves). No wallet, no RPC key for consumers. The subgraph is deployed and indexing, so history / aggregate surfaces serve live data now. Every surface still degrades gracefully: if a backing (subgraph URL / RPC / telemetry sink) is absent, the affected route returns a typed `pending` body (with the future GraphQL query embedded) rather than an error."
   },
   "servers": [{ "url": "/", "description": "this service" }],
   "tags": [
@@ -63,7 +63,7 @@
         "tags": ["markets"],
         "operationId": "getMarkets",
         "summary": "Market directory",
-        "description": "Market directory (subgraph). Pending until the subgraph is deployed.",
+        "description": "Market directory (subgraph; served live now).",
         "responses": {
           "200": {
             "description": "OK",

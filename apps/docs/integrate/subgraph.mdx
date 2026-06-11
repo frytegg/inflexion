@@ -179,24 +179,22 @@ the single on-chain address registry.
 There is deliberately **no `test` script**, so `pnpm -r test` does not invoke
 matchstick (which would need a toolchain download).
 
-### The pending state
+### The deployed state
 
-<Warning>
-**The Studio deploy is pending until the Studio slug is created.**
+<Check>
+**The Studio deploy is live and indexing.** The slug `inflexion-arb-sepolia` is
+deployed on The Graph Studio, query URL
+`https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`.
+It has indexed on-chain history from the redeploy block 274081134 (including the
+lifecycle swaps), so the subgraph's *history* and *aggregate* surfaces are **served
+live** — through the hosted [REST API](/integrate/api-overview), which is wired to
+the subgraph. The *current* (non-historical) load surface is also available live via
+the [SDK multicall](/sdk/data-client).
 
-- **Limit:** until the deploy lands, the subgraph's *history* and *aggregate*
-  surfaces are not yet served from a hosted endpoint. The target slug is
-  `inflexion-arb-sepolia`.
-- **Why:** this is a **build gap, not a contract gap.** The contracts already emit
-  every event the moat needs since the 2026-06-05 redeploy; the schema and manifest
-  are finalised, the redeploy `startBlock` is known, and the mappings are CI-green
-  offline. What is missing is the hosted slug, nothing structural.
-- **Mitigation / path-forward:** until the slug exists, the API serves these
-  surfaces from a **typed `pending` state — never an error** — and the *current*
-  (non-historical) load surface is already served live via the
-  [SDK multicall](/sdk/data-client). The indexer is ready to go the moment the slug
-  is created; see [degradation](/sdk/degradation).
-</Warning>
+**Graceful degradation remains a design property:** if `SUBGRAPH_URL` is unset, the
+API serves these surfaces from a **typed `pending` state — never an error** (see
+[degradation](/sdk/degradation)).
+</Check>
 
 <Maturity />
 
@@ -542,10 +540,10 @@ on**.
 ## GraphQL query examples
 
 <Info>
-**Endpoint (once the Studio slug is live):**
-`https://api.studio.thegraph.com/query/<id>/inflexion-arb-sepolia/<version>`.
-Pending until the slug `inflexion-arb-sepolia` is created; until
-then the API serves these surfaces from a typed `pending` state — never an error.
+**Endpoint (live):**
+`https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`.
+The slug `inflexion-arb-sepolia` is deployed and indexing. If `SUBGRAPH_URL` is
+unset, the API serves these surfaces from a typed `pending` state — never an error.
 Prefer the [REST API](/integrate/api-endpoints) in production; query the subgraph
 directly only for exploration.
 </Info>
@@ -743,9 +741,9 @@ query MMLeaderboard {
     Why the indexed flow is a defensible dataset, and the five non-circular signals.
   </Card>
   <Card title="The data client" icon="chart-line" href="/sdk/data-client">
-    Reading the load surface live via SDK multicall while the subgraph is pending.
+    Reading the current load surface live via SDK multicall.
   </Card>
   <Card title="Degradation" icon="circle-info" href="/sdk/degradation">
-    How the typed `pending` state surfaces while the Studio slug is not yet live.
+    How the typed `pending` state surfaces if `SUBGRAPH_URL` is unset.
   </Card>
 </CardGroup>

@@ -130,28 +130,28 @@ A separate but related rule the MM collateral hint surfaces: **locked collateral
 
 ## Pending is not error
 
-The whole app runs against a deployment whose **subgraph is not yet indexed**. Rich on-chain events (`SwapPriced`, `QuoteFilled`, the lifecycle events) have been emitted since deploy block `274081134`, but the indexer is still pending deployment. Anything historical, aggregate, or time-series therefore has no data source today.
+The app's resilience model is best understood through how it handles a **missing data source**. Rich on-chain events (`SwapPriced`, `QuoteFilled`, the lifecycle events) have been emitted since deploy block `274081134`, and the subgraph now indexes them — so historical, aggregate, and time-series surfaces are served **live from the subgraph via the hosted API**. But the same surfaces degrade gracefully if a backing (the subgraph URL, an RPC, or a telemetry sink) is ever absent.
 
 What the app does with that is the point. It does **not** throw, freeze, or fabricate a number. Every such surface degrades into a **typed, honest, self-describing state**.
 
 <Steps>
   <Step title="Reads return a typed envelope, never a throw">
-    Any read needing a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders a calm *pending* / *degraded* state — never an error. See [the degradation cheat-sheet](/sdk/degradation).
+    Any read whose backing is absent — a reverting oracle, an absent rich event, or (if `SUBGRAPH_URL` is unset) the subgraph — returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders a calm *pending* / *degraded* state — never an error. See [the degradation cheat-sheet](/sdk/degradation).
   </Step>
-  <Step title="The pending note names its future route">
-    A `PendingNote` prints the reason and, where applicable, the **exact future API route + query** the surface will be served from once the subgraph deploys — straight off the typed `ApiPending` envelope. It is a promise with an address, not a placeholder.
+  <Step title="The pending note names its route">
+    When a surface does degrade, a `PendingNote` prints the reason and, where applicable, the **exact API route + query** the surface is served from — straight off the typed `ApiPending` envelope. It is a promise with an address, not a placeholder.
   </Step>
   <Step title="Live-but-degraded oracle states are honest too">
     If the **live** oracle reverts (stale feed / sequencer down), a position renders *"not priceable now"* — the protection still exists and becomes quotable when the oracle recovers — and **Buy is disabled** rather than producing a wrong number. The IL-to-date on an active protection degrades the same way: *"The protection is intact — payout is still computed at settlement from the price-at-expiry"*.
   </Step>
 </Steps>
 
-### What is live vs pending today
+### What each surface is backed by
 
 The honest split, identical wherever a surface appears:
 
 <Tabs>
-  <Tab title="Live now (RPC)">
+  <Tab title="Live from RPC">
     - Premium preview and the payoff-with-cap chart
     - Buy and settle on **Path A** (the cvAMM pool)
     - Vault deposit / withdraw (depositor)
@@ -159,23 +159,23 @@ The honest split, identical wherever a surface appears:
     - σ_ref (the reference vol) and the regime badge
     - The book (on-chain swap scan) and **coarse** fills
   </Tab>
-  <Tab title="Pending the subgraph">
+  <Tab title="Live from the subgraph (via the API)">
     - Per-market history and volume; MM win-rate / share
     - NAV history
     - The time-series [data-moat signals](/concepts/data-moat) (Signals 2–5)
     - **Precise** MM fill attribution (the `QuoteFilled` join)
-    - Full fee accounting — `getClaimableFees` **under-states** today
+    - Full fee accounting
 
-    None of these is an error — each degrades to a typed `pending` state.
+    The dataset is still **young**, so these surfaces are sparse until MM competition (≥ 3 MMs) and volume mature the dynamics — but the structures and queries are live now. If a backing is ever absent, each degrades to a typed `pending` state rather than erroring.
   </Tab>
 </Tabs>
 
 <Warning>
-  **Limit:** MM fill attribution is **coarse** on-chain — a recent-fills feed can show *that* an MM filled, but not *which signed quote* did it.
+  **Limit:** a **direct** on-chain scan of fills is **coarse** — it can show *that* an MM filled, but not *which signed quote* did it.
 
-  **Why:** `isNonceUsed(mm, nonce)` is set on **both** fill and cancel, and `SwapCreated` carries no `quoteId` / `nonce`, so a nonce cannot be joined to a specific quote. The feed badges itself *"coarse"* to say so.
+  **Why:** `isNonceUsed(mm, nonce)` is set on **both** fill and cancel, and `SwapCreated` carries no `quoteId` / `nonce`, so a nonce cannot be joined to a specific quote from a raw swap scan alone.
 
-  **Mitigation:** the **precise** path already exists — the `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`) has been emitted since the 2026-06-05 deploy; precise per-quote attribution lights up the moment the subgraph indexes it. The on-chain data is already there; only the indexer is pending.
+  **Mitigation:** the **precise** path is live — the `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`), emitted since the 2026-06-05 deploy, is now indexed by the subgraph, so precise per-quote attribution is served from the [hosted API](https://inflexion-backend.onrender.com). A raw on-chain scan stays coarse; the API surface is precise.
 </Warning>
 
 <Info>

@@ -64,15 +64,13 @@ Path B (the MM rail) and history surfaces lean on optional backends. If they're 
 | **Public REST API** (history) | `NEXT_PUBLIC_API_URL` | DataClient history surfaces return `{ available: false }` pending |
 | **RPC** | `NEXT_PUBLIC_RPC_URL` | no RPC; all reads fail at the transport layer |
 
-<Warning>
-  **The subgraph is not yet indexed — and that is a typed, honest state, not a bug.**
+<Info>
+  **The subgraph is deployed and indexing — history and aggregate surfaces are live.**
 
-  **Limit:** anything historical or aggregate (per-market volume, NAV history, the time-series [data-moat signals](/concepts/data-moat), precise MM fill attribution) is unavailable today.
+  The subgraph is deployed on The Graph Studio (slug `inflexion-arb-sepolia`), indexing on-chain history from the redeploy block `274081134` — including the lifecycle swaps. Everything historical or aggregate (per-market volume, NAV history, the time-series [data-moat signals](/concepts/data-moat), precise MM fill attribution) is served live from the subgraph via the [hosted REST API](https://inflexion-backend.onrender.com).
 
-  **Why:** the rich on-chain events (`SwapPriced`, `QuoteFilled`) have been emitted since deploy block `274081134`, but the indexer is still pending deployment.
-
-  **Mitigation:** every such surface degrades to a typed `pending` state that names the exact future API route it will be served from — never a fake number, never a thrown error. **Live today over RPC:** premium preview, payoff, buy/settle (Path A), vault deposit/withdraw, market pricing, the current clearing-load surface, σ_ref, the book, and coarse fills. See [status & caveats](/reference/status-caveats) for the full ledger.
-</Warning>
+  **Live over RPC:** premium preview, payoff, buy/settle (Path A), vault deposit/withdraw, market pricing, the current clearing-load surface, σ_ref, the book, and coarse fills. **Live over the API + subgraph:** per-market history, NAV history, and the time-series data-moat signals. If a backing (subgraph URL, RPC, or telemetry) is unset, the corresponding surface degrades to a typed `pending` state that names the exact API route it will be served from — never a fake number, never a thrown error. See [status & caveats](/reference/status-caveats) for the full ledger.
+</Info>
 
 ## Door 1 — Protect an LP position
 
@@ -189,7 +187,7 @@ Build LP, depositor, MM, or data surfaces on top of the protocol. Start at [the 
     Typed clients: [`lp`](/sdk/lp-client), [`depositor`](/sdk/depositor-client), [`mm`](/sdk/mm-client), [`data`](/sdk/data-client), plus [Greeks/hedge](/sdk/greeks-hedge) and the [cvAMM TS port](/sdk/cvamm-port). Addresses and units in [addresses & units](/sdk/addresses-units).
   </Card>
   <Card title="REST API" icon="server" href="/integrate/api-overview">
-    The public history plane. [Endpoints](/integrate/api-endpoints) serve per-market history, NAV, and the data-moat signals — typed `pending` until the subgraph indexes.
+    The public history plane, hosted at `inflexion-backend.onrender.com`. [Endpoints](/integrate/api-endpoints) serve per-market history, NAV, and the data-moat signals live from the subgraph.
   </Card>
   <Card title="Subgraph" icon="diagram-project" href="/integrate/subgraph">
     The Graph indexes `SwapPriced` / `QuoteFilled` and the lifecycle events. See [marketId parity](/integrate/marketid-parity) so your off-chain ids match the chain exactly.
@@ -216,7 +214,7 @@ const surface = await sdk.data.getCurrentLoadSurface({ markets });
 ```
 
 <Note>
-  **Reads degrade, never crash.** Any read needing a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders an honest *pending* state — never an error. For the full behavior see [SDK degradation](/sdk/degradation) and [guardrails](/sdk/guardrails).
+  **Reads degrade, never crash.** Any read needing a reverting oracle, an absent rich event, or an unconfigured backing returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders an honest *pending* state — never an error. For the full behavior see [SDK degradation](/sdk/degradation) and [guardrails](/sdk/guardrails).
 </Note>
 
 <Maturity />

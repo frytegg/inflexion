@@ -1,6 +1,6 @@
 ---
 title: "DataClient reference"
-description: "The data-moat SDK surface: one live load-surface read plus the typed ApiPending history methods that name their future API route and never fabricate data."
+description: "The data-moat SDK surface: one live load-surface read plus the history methods that name their API route — served live from the subgraph via the hosted API — and never fabricate data."
 ---
 
 import Maturity from '/snippets/maturity-disclaimer.mdx'
@@ -15,12 +15,12 @@ The surface splits cleanly into two classes, and the split is the whole design:
     `getCurrentLoadSurface` (+ the `getSurfaceSigmaRef` annotation) reads live RPC: the same multicall MM `getMarketPricing` does, fanned across a set of markets. The current "price-to-beat" snapshot, uncached.
   </Card>
   <Card title="Five history methods" icon="clock-rotate-left">
-    `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNavHistory`, `getNetGamma` — every history/aggregate surface. Each returns a typed `ApiPending` naming the future API route until the subgraph + API ship.
+    `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNavHistory`, `getNetGamma` — every history/aggregate surface. Each names its API route and is served live from the subgraph via the hosted API; if no source is configured it degrades to a typed `ApiPending` rather than throwing.
   </Card>
 </CardGroup>
 
 <Note>
-**The SDK never fabricates history.** Anything that needs the not-yet-deployed subgraph or the off-chain telemetry API returns a typed degraded envelope (`{ available:false, reason:'no-history-source', endpoint, query, detail }`) — never a throw, never a guessed number. The on-chain moat events (`SwapPriced`, `QuoteFilled`) are LIVE since the 2026-06-05 redeploy; what is pending is only the subgraph that indexes them.
+**The SDK never fabricates history.** The history/aggregate surfaces are served live from the [deployed subgraph](https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest) via the [hosted API](https://inflexion-backend.onrender.com) (REST at `/`, engine at `/engine`). If a backing source is not configured the method returns a typed degraded envelope (`{ available:false, reason:'no-history-source', endpoint, query, detail }`) — never a throw, never a guessed number. The on-chain moat events (`SwapPriced`, `QuoteFilled`) are LIVE since the 2026-06-05 redeploy and the subgraph has indexed them from block 274081134.
 </Note>
 
 ---
@@ -33,11 +33,11 @@ Construct it from the SDK factory (`sdk.data`) or directly via `makeDataClient(p
 | --- | --- | --- | --- | --- |
 | `getCurrentLoadSurface` | `{ markets: { marketId, geometry? }[] }` | `LoadSurface` | **LIVE** | RPC multicall: Core `loadParams`/`markets`, ConvexityVault `inventory`, FVO `fairPremium`; load via TS port |
 | `getSurfaceSigmaRef` | `token` | `Degraded<{ sigmaRefWad, regime }>` | **LIVE** | VolOracle `sigmaRef` + Core `loadParams` |
-| `getLoadSurfaceHistory` | `{ marketId, from?, to?, bucket? }` | `ApiPending` | pending | subgraph `/data/load-surface` |
-| `getQuoteCompetition` | `{ marketId?, from?, to? }` | `ApiPending` | pending | subgraph + engine `COMPETITION_LOG` → `/data/quote-competition` |
-| `getDemandRequests` | `{ marketId?, from?, to? }` | `ApiPending` | pending **by design** | engine `DEMAND_LOG` (off-chain only) → `/data/demand-requests` |
-| `getNavHistory` | `{ from?, to?, bucket? }` | `ApiPending` | pending | subgraph `/pool/nav-history` (carries claim B) |
-| `getNetGamma` | `{ marketId? }` | `ApiPending` | pending | off-chain compute → `/data/net-gamma` |
+| `getLoadSurfaceHistory` | `{ marketId, from?, to?, bucket? }` | `ApiBacked` | **LIVE** | subgraph `/data/load-surface` |
+| `getQuoteCompetition` | `{ marketId?, from?, to? }` | `ApiBacked` | **LIVE** | subgraph + engine `COMPETITION_LOG` → `/data/quote-competition` |
+| `getDemandRequests` | `{ marketId?, from?, to? }` | `ApiBacked` | **LIVE** (off-chain by design) | engine `DEMAND_LOG` (off-chain only) → `/data/demand-requests` |
+| `getNavHistory` | `{ from?, to?, bucket? }` | `ApiBacked` | **LIVE** | subgraph `/pool/nav-history` (carries claim B) |
+| `getNetGamma` | `{ marketId? }` | `ApiBacked` | **LIVE** | off-chain compute → `/data/net-gamma` |
 
 Each history method maps 1:1 onto one of the [five behavioral signals](/moat/five-signals). The route strings are not free text — they are the SDK ↔ API contract, exported verbatim as `DATA_API_ROUTES` so the integration layer wires exactly the same paths the SDK already names.
 
@@ -45,7 +45,7 @@ Each history method maps 1:1 onto one of the [five behavioral signals](/moat/fiv
 
 ## The live half — `getCurrentLoadSurface`
 
-This is the only `DataClient` method that hits live RPC instead of the (not-yet-built) API. It is the **live half of [Signal 1](/moat/five-signals)** — the current clearing-load "price-to-beat" — while its historical evolution is `getLoadSurfaceHistory`.
+This is the only `DataClient` method that hits live RPC directly instead of the hosted API. It is the **live half of [Signal 1](/moat/five-signals)** — the current clearing-load "price-to-beat" — while its historical evolution is `getLoadSurfaceHistory`.
 
 ### Read set
 
@@ -162,33 +162,33 @@ if (sig.available) console.log(sig.sigmaRefWad, sig.regime)
 
 ---
 
-## The pending half — the `ApiPending` envelope
+## The degradation contract — the `ApiPending` envelope
 
-Every history/aggregate method returns the **same** typed envelope:
+The history/aggregate methods are served live from the subgraph via the hosted API. The full type is `ApiBacked<T> = ({ available:true } & T) | ApiPending` — the rich `T` from the API, else, **if no backing source is configured**, the same typed pending envelope:
 
 ```ts
 interface ApiPending {
-  available: false                       // the API/subgraph is not wired yet
+  available: false                       // no history source is configured
   reason: 'no-history-source'            // typed — the source is absent
-  endpoint: DataApiRoute                 // the FUTURE public API route this forwards to
-  query: Record<string, string>         // the exact query that WOULD be sent, echoed back
-  detail: string                         // human-readable build-gap / maturity note
+  endpoint: DataApiRoute                 // the public API route this forwards to
+  query: Record<string, string>         // the exact query sent, echoed back
+  detail: string                         // human-readable degradation / maturity note
 }
 ```
 
-This is the load-bearing design move: the envelope names the **future route** and the **exact query** that would be sent, so a UI can render "coming from `<route>`" today, and wiring the API later is a one-line body swap — replace the `pending(...)` call with a `fetch(endpoint?<query>)`, with zero re-derivation. The full type is `ApiBacked<T> = ({ available:true } & T) | ApiPending` — the rich `T` once the API ships, else the pending envelope.
+This is the load-bearing design move: the envelope names the **route** and the **exact query** sent, so a UI can render "coming from `<route>`" regardless of backing state, and the degraded path is a typed body — not a throw — so graceful degradation is a design property: if a backing (subgraph URL / RPC / telemetry) is absent, the surface returns this pending body instead of erroring.
 
-The `detail` string always carries the build-gap disclaimer verbatim, with any method-specific prefix folded in front:
+When degraded, the `detail` string carries the disclaimer verbatim, with any method-specific prefix folded in front:
 
 ```text
-the subgraph + public API are not wired yet (build gap);
-this surface will be served by '<endpoint>'. Returning a typed degraded
+no history source is configured (if SUBGRAPH_URL is unset);
+this surface is served by '<endpoint>'. Returning a typed degraded
 result — the SDK never fabricates history.
 ```
 
 ### `DATA_API_ROUTES` — the route contract
 
-The five routes are exported as a `const` so callers can read them and the API wires the same strings:
+The five routes are exported as a `const` so callers can read them and the hosted API serves the same strings:
 
 | Constant | Route | Signal / purpose |
 | --- | --- | --- |
@@ -198,9 +198,9 @@ The five routes are exported as a `const` so callers can read them and the API w
 | `navHistory` | `/pool/nav-history` | DEP-8: per-tranche NAV day-by-day (subgraph `PoolDaySnapshot[]`) |
 | `netGamma` | `/data/net-gamma` | Signal 5: protocol-wide net-gamma supply (off-chain Greeks over the open set) |
 
-### The `ApiPending` envelope, per method
+### The route + query, per method
 
-Each method assembles its `endpoint` + `query` deterministically from its args (optional args are omitted from `query` when absent; bucketed methods default the bucket). The table below is exact to source.
+Each method assembles its `endpoint` + `query` deterministically from its args (optional args are omitted from `query` when absent; bucketed methods default the bucket). Live, the API returns the rich body for that route; the snippets below show the typed degraded fallback the SDK returns when no source is configured, which is exact to source.
 
 <AccordionGroup>
 
@@ -215,11 +215,11 @@ const r = await sdk.data.getLoadSurfaceHistory({ marketId, from: 1_717_000_000 }
   reason: 'no-history-source',
   endpoint: '/data/load-surface',
   query: { marketId: '0x67c4…d69', from: '1717000000', bucket: '1d' }, // bucket defaults to '1d'
-  detail: 'the subgraph + public API are not wired yet (build gap …) served by \'/data/load-surface\' …',
+  detail: 'no history source configured (if SUBGRAPH_URL is unset) served by \'/data/load-surface\' …',
 }
 ```
 
-`bucket` defaults to `'1d'`; `from`/`to` are stringified when present, omitted when absent. Source for the historical evolution of `getCurrentLoadSurface` — the subgraph indexes `MarketStateSnapshot` and joins the now-live `SwapPriced`/`QuoteFilled` per-fill load events. For the CURRENT surface, use `getCurrentLoadSurface` (live). See [Signal 1](/moat/five-signals).
+`bucket` defaults to `'1d'`; `from`/`to` are stringified when present, omitted when absent. Source for the historical evolution of `getCurrentLoadSurface` — the subgraph indexes `MarketStateSnapshot` and joins the now-live `SwapPriced`/`QuoteFilled` per-fill load events, served live via `/data/load-surface`. For the CURRENT surface, use `getCurrentLoadSurface` (live RPC). See [Signal 1](/moat/five-signals).
 </Accordion>
 
 <Accordion title="getQuoteCompetition — Signal 2 (spread + win-rate)">
@@ -237,14 +237,14 @@ const r = await sdk.data.getQuoteCompetition({ marketId })
 }
 ```
 
-Needs the now-live `SwapPriced` (mechanical pool baseline = the price-to-beat) joined with `QuoteFilled.loadBps` (the behavioral MM load) per swap once the subgraph indexes them, **plus** the off-chain engine `COMPETITION_LOG` telemetry for the dynamic half. The spread `poolLoad − mmLoad` is non-circular **as a spread** — the subtraction removes the circular component (see [circular vs behavioral](/moat/circular-vs-behavioral)). The dynamic half is **already capturing now** in engine telemetry; the structural half is subgraph-pending.
+Joins the now-live `SwapPriced` (mechanical pool baseline = the price-to-beat) with `QuoteFilled.loadBps` (the behavioral MM load) per swap from the subgraph, **plus** the off-chain engine `COMPETITION_LOG` telemetry for the dynamic half. The spread `poolLoad − mmLoad` is non-circular **as a spread** — the subtraction removes the circular component (see [circular vs behavioral](/moat/circular-vs-behavioral)). Both halves are live: the dynamic half is captured in engine telemetry, the structural half is indexed by the subgraph.
 
 <Warning>
 **Limit → Why → Mitigation.** At one MM the spread conflates "MM expects vol to fall" with "MM has cheaper hedges" — two un-separable drivers (the *limit*). *Why:* a competitive distribution requires multiple independent load views, which only exist with multiple MMs. *Mitigation:* the spread is visible **per fill** from day one, and the off-chain `COMPETITION_LOG` captures every losing/withdrawn quote from the first interaction — so the forward-vol read sharpens with ≥3 competing MMs without losing the early data. See [state and limits](/moat/state-and-limits).
 </Warning>
 </Accordion>
 
-<Accordion title="getDemandRequests — Signal 4 latent half (pending BY DESIGN)">
+<Accordion title="getDemandRequests — Signal 4 latent half (off-chain BY DESIGN)">
 **Args:** `{ marketId?: Hex; from?: number; to?: number }` (all optional)
 
 ```ts
@@ -260,7 +260,7 @@ const r = await sdk.data.getDemandRequests({})
 ```
 
 <Warning>
-**Limit → Why → Mitigation.** This surface is `ApiPending` **by design and permanently** — there is no live RPC fallback (the *limit*). *Why:* the latent half of demand (geometries an LP priced but did **not** buy) NEVER reaches the chain — invariant [I7](/security/invariants) guarantees an unchosen quote touches no nonce and no capacity, and putting unfilled interest on-chain would both cost gas and break I7. *Mitigation:* it is captured from the **first interaction** in the off-chain engine `DEMAND_LOG` (every `GET /quote` and every `previewPremium` ping), coarse-bucketed and PII-free, because it is unreconstructable retroactively. The realized half **is** on-chain (subgraph `GeometryDemandBucket`); the latent half is only ever telemetry. See [telemetry](/moat/telemetry).
+**Limit → Why → Mitigation.** The latent half of this surface is **off-chain by design and permanently** — there is no live RPC fallback (the *limit*). *Why:* the latent half of demand (geometries an LP priced but did **not** buy) NEVER reaches the chain — invariant [I7](/security/invariants) guarantees an unchosen quote touches no nonce and no capacity, and putting unfilled interest on-chain would both cost gas and break I7. *Mitigation:* it is captured from the **first interaction** in the off-chain engine `DEMAND_LOG` (every `GET /quote` and every `previewPremium` ping), coarse-bucketed and PII-free, because it is unreconstructable retroactively — and it is served live via the hosted engine telemetry at `/data/demand-requests`. The realized half **is** on-chain (subgraph `GeometryDemandBucket`); the latent half is only ever telemetry. See [telemetry](/moat/telemetry).
 </Warning>
 </Accordion>
 
@@ -277,7 +277,7 @@ const r = await sdk.data.getNavHistory({ from: 1_717_000_000 })
   query: { from: '1717000000', bucket: '1d' }, // bucket defaults to '1d'
   detail: 'depositor NAV history (claim B: depositor capital is NOT guaranteed — '
         + 'junior is first-loss, senior is systemic-tail exposed). '
-        + 'the subgraph + public API are not wired yet …',
+        + 'served by \'/pool/nav-history\' (if SUBGRAPH_URL is unset, a typed degraded body) …',
 }
 ```
 
@@ -332,21 +332,26 @@ The "invert `fairRate` for an implied-vol surface" idea is **deliberately DROPPE
 
 ---
 
-## Live vs pending — the one-glance summary
+## Live vs live — the one-glance summary
 
 <Tabs>
-  <Tab title="Live today (no subgraph needed)">
+  <Tab title="Live via RPC (no API needed)">
     - `getCurrentLoadSurface` — current pool load surface across markets (live RPC multicall).
     - `getSurfaceSigmaRef` — the σ_ref + regime a surface is priced against.
     - The on-chain moat **events** (`SwapPriced`, `QuoteFilled`) are emitting now (since 2026-06-05).
     - The off-chain telemetry sinks (`DEMAND_LOG`, `COMPETITION_LOG`) are capturing now — the dynamic/latent halves of Signals 2 & 4.
   </Tab>
-  <Tab title="Subgraph-pending (typed ApiPending)">
+  <Tab title="Live via the hosted API + subgraph">
     - `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNavHistory`, `getNetGamma`.
-    - Each returns `{ available:false, reason:'no-history-source', endpoint, query, detail }` — render the state, not an error.
+    - Served live from the [deployed subgraph](https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest) via the [hosted API](https://inflexion-backend.onrender.com) (REST at `/`, engine at `/engine`). `/health` reports `subgraph:true, live:true, telemetry:{demand:true,competition:true}`.
+    - If no backing source is configured each degrades to `{ available:false, reason:'no-history-source', endpoint, query, detail }` — render the state, not an error.
+
+    <Note>
+    The subgraph is deployed and indexing on The Graph Studio (slug `inflexion-arb-sepolia`), backfilled from the redeploy block 274081134 — so the structures and queries are live now. On the free hosting tier the backend sleeps after ~15 min idle, so the first request after a quiet period incurs a cold start. See [status & caveats](/reference/status-caveats).
+    </Note>
 
     <Warning>
-    **Limit → Why → Mitigation.** The history surfaces are not queryable yet (the *limit*). *Why:* the subgraph is built but `SUBGRAPH_URL` is unset — a single build gap, not a contract gap; the contracts already emit every event the moat needs. *Mitigation:* the surfaces degrade to a typed `ApiPending` naming the exact future route and query, so the UI shows "coming from `<route>`" and the API is wired later with zero re-derivation — and the data itself is being captured **now** on-chain and in telemetry. See [status & caveats](/reference/status-caveats).
+    **Limit → Why → Mitigation.** The *dynamics* are still maturing (the *limit*): regimes, forward-vol distributions, and dispersion need depth to be statistically meaningful. *Why:* the dataset is young — real flow is minimal until MM competition (≥3 MMs) and volume build up. *Mitigation:* the structures and queries are live today and the data is captured from the first interaction — on-chain and in telemetry — so the distributions sharpen with competition without losing the early record. See [status & caveats](/reference/status-caveats).
     </Warning>
   </Tab>
 </Tabs>

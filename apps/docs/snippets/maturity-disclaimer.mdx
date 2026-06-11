@@ -5,5 +5,5 @@ What Inflexion offers today is the **architecture and the first public view** in
 
 - **Structures are present day-one.** All five non-circular behavioral signals are defined and queryable from launch.
 - **Dynamics mature with volume.** The richer signal — the pool-vs-MM spread read as a forward-vol indicator — only sharpens once multiple market makers compete and real flow accumulates.
-- **The dataset begins at the single redeploy**, and the off-chain telemetry halves begin at the first interaction logged. Until the subgraph is deployed, history degrades to a typed `pending` state — never an error.
+- **The dataset begins at the single redeploy**, and the off-chain telemetry halves begin at the first interaction logged. History is served live from the subgraph via the API; if a backing (subgraph URL / RPC / telemetry) is absent, surfaces degrade to a typed `pending` state — never an error.
 </Note>

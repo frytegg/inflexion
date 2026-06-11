@@ -105,11 +105,11 @@ This is the flow that produces the state each layer serves. It is the canonical 
     `settle()` pays the LP $\min(\text{realized\_IL}, \text{MaxIL})$ trustlessly from the chosen underwriter's collateral. The 2026-06-05 lifecycle demonstrated both rails: Path A (cvAMM, swap #1, premium \$9.70 = 0.58% of MaxIL, payout \$148.64) and Path B (MM beat the pool, swap #2, MM load 1000 bps, payout \$245.66 from MM collateral).
   </Step>
   <Step title="The API exposes the microstructure">
-    Live surfaces are served now via RPC (through the SDK); the off-chain telemetry halves are served now from the JSONL sinks; everything else returns a **typed pending body with the exact future GraphQL query embedded** until the subgraph deploys. At the redeploy, the on-chain `SwapPriced` / `QuoteFilled` events join the structural moat halves to the dynamic halves already captured. See [the five signals](/moat/five-signals).
+    Live surfaces are served now via RPC (through the SDK); the off-chain telemetry halves are served now from the JSONL sinks; history and aggregate surfaces are served live from the subgraph via the API. The subgraph has indexed the on-chain `SwapPriced` / `QuoteFilled` events from the redeploy block, joining the structural moat halves to the dynamic halves already captured. See [the five signals](/moat/five-signals).
   </Step>
 </Steps>
 
-The two on-chain events that the subgraph indexes for the moat both shipped in the 2026-06-05 redeploy and are **live on-chain now** — only the indexer is pending:
+The two on-chain events that the subgraph indexes for the moat both shipped in the 2026-06-05 redeploy and are **live on-chain now**, and the subgraph indexes them live:
 
 ```solidity
 // the mechanical baseline, all three create paths
@@ -158,29 +158,28 @@ Both services treat absence as a first-class, typed state — not an error path.
 // Available
 { "available": true, /* ...payload */ }
 
-// Pending (typed degraded) — present on subgraph routes today
+// Pending (typed degraded) — returned only if a backing is absent (e.g. SUBGRAPH_URL unset)
 { "available": false,
   "reason": "subgraph-not-deployed",
-  "detail": "no subgraph url configured (not deployed yet)",
+  "detail": "no subgraph url configured",
   "query":  "query Markets($first: Int = 100) { markets(...) { id token0 token1 fee ... } }" }
 ```
 
 - **`PendingReason` is a closed enum**: `subgraph-not-deployed`, `subgraph-unreachable`, `rich-events-pre-redeploy`, `telemetry-sink-absent`, `rpc-unavailable`. Each one names precisely what unblocks the surface.
-- **Subgraph-backed routes embed the exact future query** so the surface is self-documenting and the redeploy is a flip, not a rewrite. A consumer can read precisely what data will appear.
+- **Subgraph-backed routes embed the exact query** so the surface is self-documenting; if a backing is ever absent, the pending body still names precisely what data the route serves. A consumer can read exactly what data appears.
 - **A last-resort 500 guard** wraps every handler: a stray bug returns `500 { available:false, reason:'internal' }` rather than crashing the process.
 
-<Warning>
-**Limit — the subgraph is not yet deployed, so every history/aggregate (`[SG]`) surface returns a typed `pending` body today.**
+<Note>
+**Live — the subgraph is deployed and indexing, so every history/aggregate (`[SG]`) surface serves real data now via the API.**
 
-- **Why.** The subgraph is built and CI-green offline, but `SUBGRAPH_URL` is unset for the 2026-06-05 redeploy. This is a build gap, **not a contract gap** — the contracts already emit every event the moat needs (`SwapPriced` / `QuoteFilled` are live on-chain).
-- **Mitigation.** Each `[SG]` route returns `{ available:false, reason:'subgraph-not-deployed', query:… }` with the exact GraphQL it _will_ run embedded — wired-and-ready. The live RPC surfaces (current load surface, vault state, pricing preview) and the telemetry halves (`DEMAND_LOG`, `COMPETITION_LOG`) return **real data now**. The redeploy block `274081134` is the subgraph `startBlock` — the on-chain moat dataset begins there. See [status & caveats](/reference/status-caveats) and the [moat state](/moat/state-and-limits).
-</Warning>
+The subgraph is deployed on The Graph Studio (slug `inflexion-arb-sepolia`) and has indexed the on-chain moat events (`SwapPriced` / `QuoteFilled`, both live on-chain) from the redeploy block `274081134` — the subgraph `startBlock`, where the on-chain moat dataset begins. The hosted API composes it alongside the live RPC surfaces (current load surface, vault state, pricing preview) and the telemetry halves (`DEMAND_LOG`, `COMPETITION_LOG`). Each `[SG]` route runs its embedded GraphQL against the subgraph; if `SUBGRAPH_URL` were ever unset, the same route degrades to a typed `{ available:false, reason:'subgraph-not-deployed', query:… }` body rather than erroring. See [status & caveats](/reference/status-caveats) and the [moat state](/moat/state-and-limits).
+</Note>
 
 ---
 
 ## Which layer serves which surface (live status)
 
-A quick map of what is reachable today, by layer. Backing key: **[RPC]** live via the SDK, **[SG]** subgraph (pending today), **[TEL]** engine telemetry sink.
+A quick map of what is reachable today, by layer. Backing key: **[RPC]** live via the SDK, **[SG]** subgraph (deployed and indexing), **[TEL]** engine telemetry sink.
 
 | Surface | Layer | Backing | Live now? |
 | --- | --- | --- | --- |
@@ -190,9 +189,9 @@ A quick map of what is reachable today, by layer. Backing key: **[RPC]** live vi
 | Cheapest live MM quote | Engine `GET /quote` | (engine store) | **Yes** |
 | Latent demand (Signal 4 latent half) | API `/data/demand-requests` | [TEL] | **Yes** (latent half) |
 | Quote competition (Signal 2 dynamic half) | API `/data/quote-competition` | [TEL] | **Yes** |
-| Load-surface history, term structure, NAV history | API `/data/*`, `/pool/nav-history` | [SG] | Pending (typed) |
-| Swaps, MM fills, σ_ref history | API `/swaps`, `/mm/:addr/fills`, `/sigma/:token/history` | [SG] | Pending (typed) |
-| Net gamma / supply depth (Signal 5) | API `/data/net-gamma`, `/data/supply-depth` | [SG] | Pending (typed) |
+| Load-surface history, term structure, NAV history | API `/data/*`, `/pool/nav-history` | [SG] | **Yes** |
+| Swaps, MM fills, σ_ref history | API `/swaps`, `/mm/:addr/fills`, `/sigma/:token/history` | [SG] | **Yes** |
+| Net gamma / supply depth (Signal 5) | API `/data/net-gamma`, `/data/supply-depth` | [SG] | **Yes** |
 
 <Maturity />
 

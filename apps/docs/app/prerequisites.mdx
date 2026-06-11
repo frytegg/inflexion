@@ -28,8 +28,8 @@ If you only read one thing, read [Pending is not error](#pending-is-not-error). 
   <Card title="(To protect) an in-range v3 NFT" icon="shield-halved">
     A Uniswap v3 position on the seeded dWETH/dUSDC pool (fee 500) that is currently **in range** ($P_a \le P_0 \le P_b$). Out-of-range is rejected at creation.
   </Card>
-  <Card title="(Optional) the backends" icon="plug">
-    The Path-B engine and the REST API unlock the MM rail and history. Without them the app degrades honestly — it never crashes.
+  <Card title="The backends" icon="plug">
+    The Path-B engine and the REST API power the MM rail and history — both hosted at `inflexion-backend.onrender.com`. If a backing is absent the app degrades honestly — it never crashes.
   </Card>
 </CardGroup>
 
@@ -108,17 +108,17 @@ To have something to hedge, you need a **Uniswap v3 NFT on the seeded dWETH/dUSD
   **MaxIL travels with the position, not with the protection price.** MaxIL is pure geometry, frozen at creation, and L-independent in the fair-rate sense — which is exactly what makes positions **fungible** to an underwriter. That is why an MM quote is [per-market, never per-NFT](/protocol/path-b-mm). You'll see MaxIL on every position row before you ever pick a market.
 </Note>
 
-## Step 4 — the optional backends
+## Step 4 — the backends
 
-The protocol's core flows run on **RPC alone**. Two optional services extend it; if either is absent, the app degrades to exactly what RPC can serve — it does not error.
+The protocol's core flows run on **RPC alone**. Two further services extend it — both **hosted as one combined backend at `https://inflexion-backend.onrender.com`** (REST API at `/`, engine at `/engine`). If a backing is absent the app degrades to exactly what RPC can serve — it does not error.
 
 | Service | Env var | What it adds | If unset |
 | --- | --- | --- | --- |
 | **Path-B engine** (MM quote relay) | `NEXT_PUBLIC_ENGINE_URL` | The MM rail — firm signed quotes that can beat the pool | Path B unavailable → `/protect` previews **Path A only**, `premiumB` undefined; `/underwrite` signs but **cannot publish** |
-| **Public REST API** (history) | `NEXT_PUBLIC_API_URL` | Historical and aggregate surfaces | DataClient history surfaces return `{ available: false }` and render a typed pending state |
+| **Public REST API** (history) | `NEXT_PUBLIC_API_URL` | Historical and aggregate surfaces, served live from the subgraph | DataClient history surfaces return `{ available: false }` and render a typed pending state |
 | **RPC** | `NEXT_PUBLIC_RPC_URL` | Everything — the transport for all reads/writes | No RPC; all reads fail at the transport layer |
 
-RPC is **not** optional — it is the floor the whole app stands on. The engine and the API are the extensions.
+RPC is **not** optional — it is the floor the whole app stands on. The engine and the API are the extensions. On the free hosting tier the combined backend sleeps after ~15 min idle, so the first request after a lull may cold-start.
 
 <Warning>
   **Limit:** without `NEXT_PUBLIC_ENGINE_URL`, the Path-B market-maker rail is dark — LPs see no competing MM quote and MMs can sign but not publish.
@@ -130,7 +130,7 @@ RPC is **not** optional — it is the floor the whole app stands on. The engine 
 
 ## What is live today
 
-Here is the split between what runs **right now over RPC** and what waits on the subgraph indexer.
+Here is the split between what runs **right now over RPC** and what is served live from the subgraph via the hosted API.
 
 <Tabs>
   <Tab title="Live now (RPC)">
@@ -141,13 +141,13 @@ Here is the split between what runs **right now over RPC** and what waits on the
     - σ_ref (the reference vol) and the regime badge
     - The book (on-chain swap scan) and **coarse** fills
   </Tab>
-  <Tab title="Pending the subgraph">
+  <Tab title="Live via the subgraph">
     - Per-market history and volume
     - NAV history
     - The time-series [data-moat signals](/concepts/data-moat) (Signals 2–5)
     - Precise MM fill attribution (the `QuoteFilled` join)
 
-    These are not errors — they degrade to a typed `pending` state.
+    The subgraph is deployed and indexing, so these structures are live now — served through the hosted API. The dataset itself is still young, so the *dynamics* mature with MM competition and volume.
   </Tab>
 </Tabs>
 
@@ -155,16 +155,16 @@ Here is the split between what runs **right now over RPC** and what waits on the
 
 This is the most important thing to internalize before you use the app — and the design principle the whole UI is built around.
 
-**The subgraph is not yet indexed.** The rich on-chain events (`SwapPriced`, `QuoteFilled`, and the lifecycle events) have been emitted on-chain since deploy block `274081134`, but the indexer is still pending deployment. Anything historical, aggregate, or time-series therefore has no data source yet.
+**The subgraph is deployed and indexing.** The rich on-chain events (`SwapPriced`, `QuoteFilled`, and the lifecycle events) have been emitted on-chain since deploy block `274081134`, and the indexer has backfilled them — so historical, aggregate, and time-series surfaces are now served live through the hosted API. The graceful-degradation property remains a *design property*: if a backing (subgraph URL, RPC, or a telemetry sink) is absent, the affected surface returns a typed pending body rather than throwing.
 
 What it does **not** do is throw, freeze, or fake a number. Every such surface degrades into a typed, honest state:
 
 <Steps>
   <Step title="Reads return a typed envelope, never a throw">
-    Any read needing a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders a calm *pending* / *degraded* state — **never an error**.
+    Any read needing a reverting oracle, an absent rich event, or an unconfigured subgraph backing returns a typed `{ available: false }` / `{ priceable: false }` envelope and renders a calm *pending* / *degraded* state — **never an error**.
   </Step>
-  <Step title="The pending note names its future route">
-    A `PendingNote` prints the reason and, where applicable, the **exact future API route + query** the surface will be served from once the subgraph deploys. It is a promise, not a placeholder.
+  <Step title="The pending note names its route">
+    A `PendingNote` prints the reason and, where applicable, the **exact API route + query** the surface is served from. It is a promise, not a placeholder.
   </Step>
   <Step title="Writes degrade at click-time, not at construction">
     With no `walletClient`, LP/MM writes throw a clear error only **when you click** (not when the SDK is built); the `DepositorClient` returns `WriteResult { status: 'deferred-no-wallet' }` so an external signer can take the unsigned tx.

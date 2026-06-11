@@ -30,7 +30,7 @@ Used by Foundry deploy scripts, Stylus deploys, and verification.
 | `DEPLOYER_PRIVATE_KEY` | — (required to deploy) | Deploy/broadcast key. **Sepolia + local only; never a mainnet key.** |
 | `OPERATOR_PRIVATE_KEY` | — | Oracle operator (pokes the VolOracle, advances testnet state). **Never a mainnet key.** |
 | `ETHERSCAN_API_KEY` / `ARBISCAN_API_KEY` | — | Source verification on the explorer. |
-| `THEGRAPH_DEPLOY_KEY` | — | The Graph deploy key (used once the subgraph redeploy lands). |
+| `THEGRAPH_DEPLOY_KEY` | — | The Graph Studio deploy key (the subgraph is deployed and indexing on Studio). |
 | `ENGINE_PORT` | `8787` | Path-B relayer port (mirrors the engine's own `PORT`). |
 | `REDIS_URL` | `redis://localhost:6379` | Engine quote/state store. |
 | `VITE_API_URL` / `VITE_SUBGRAPH_URL` / `VITE_NETWORK` | (`sepolia`) | Legacy frontend keys, retained for compatibility. New frontend config uses the `NEXT_PUBLIC_*` keys below. |
@@ -89,16 +89,16 @@ The public REST surface over the subgraph.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `PORT` | `8088` | REST listen port. |
-| `SUBGRAPH_URL` | (absent ⇒ surfaces a typed "pending" state) | The deployed subgraph GraphQL endpoint. |
+| `PORT` | `8088` | REST listen port. On the hosted backend ([Render](https://inflexion-backend.onrender.com)) the host injects `PORT`. |
+| `SUBGRAPH_URL` | `https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest` | The deployed subgraph GraphQL endpoint — **set** on the hosted backend. If unset, history/aggregate surfaces return a typed "pending" state instead of erroring. |
 | `ARBITRUM_SEPOLIA_RPC` / `SEPOLIA_RPC` | — | RPC for live on-chain reads. |
 | `DEMAND_LOG` / `COMPETITION_LOG` | (optional) | Telemetry log paths surfaced through the API (same files the engine writes). |
 
-<Warning>
-**Limit:** `SUBGRAPH_URL` is commonly **unset** today — the [subgraph deploy is pending](/reference/status-caveats).
-**Why:** three additions (the `QuoteFilled` and `SwapPriced` events plus `CvammPricing.loadComponents()`) are coded but await a single redeploy, blocked on an EIP-170 size pass (`InflexionCore` is +213 B over the 24,576 B limit).
-**Mitigation:** with `SUBGRAPH_URL` absent the API returns a **typed pending state** (`'rich-events-absent'` / `'no-history-source'`) rather than erroring. Live reads via RPC still work; only history and precise fill attribution degrade.
-</Warning>
+<Info>
+`SUBGRAPH_URL` is **set** on the hosted backend, pointing at the deployed `inflexion-arb-sepolia` subgraph on The Graph Studio. History, aggregate, and time-series surfaces are served live from the subgraph via the API. The subgraph has indexed on-chain history from the redeploy block, so the `QuoteFilled` / `SwapPriced` events and `CvammPricing.loadComponents()` reads are all available.
+
+Graceful degradation is still a design property: if `SUBGRAPH_URL` were unset, the API would return a **typed pending state** (`'rich-events-absent'` / `'no-history-source'`) rather than erroring, and live reads via RPC would still work.
+</Info>
 
 ## Day-one: the DEMAND_LOG / COMPETITION_LOG rule
 
@@ -182,7 +182,7 @@ The public REST surface over the subgraph.
     dUSDC (6), dWETH (18), feeds (8), WAD (1e18).
   </Card>
   <Card title="Status & caveats" icon="triangle-exclamation" href="/reference/status-caveats">
-    The pending subgraph and the EIP-170 size blocker.
+    Live surfaces, dataset maturity, and remaining caveats.
   </Card>
   <Card title="The five signals" icon="chart-line" href="/moat/five-signals">
     What DEMAND_LOG and COMPETITION_LOG feed.

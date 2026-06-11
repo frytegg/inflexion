@@ -450,8 +450,8 @@ sums Greeks over it — **not a new event**. Two surfaces:
 indexer-populated — no mapping handler currently writes a row; the live active-set
 counters are maintained on `ProtocolState` instead, and `ProtocolState.nextNetGammaBucket`
 exists to drive a future bucket roll. The current snapshot
-(via `ProtocolState`) is available the moment the subgraph deploys; the Greeks series is
-back-filled by the API.
+(via `ProtocolState`) is live now from the deployed subgraph via the API; the Greeks
+series is back-filled by the API.
 </Info>
 
 <Warning>
@@ -488,11 +488,11 @@ needs frictionless public access → API.** Per-signal access:
 
 | Signal | SDK method (`DataClient`) | API route | Subgraph entity | Live now? |
 | - | --- | --- | --- | --- |
-| **1** | `getCurrentLoadSurface` (live), `getLoadSurfaceHistory` | `GET /pool/load-surface` (live RPC), `GET /data/load-surface` (history) | `BucketAggregate`, `MarketStateSnapshot` | **current = live RPC NOW**; history = subgraph-pending |
-| **2** | `getQuoteCompetition` | `GET /data/quote-competition` | `Swap.spreadWad`, `MarketMaker` win counts + `COMPETITION_LOG` | **dynamic half = telemetry LIVE NOW**; structural = subgraph-pending |
-| **3** | via `getLoadSurfaceHistory` / API | `GET /data/term-structure?width&distance` | `BucketAggregate[]` across durations | subgraph-pending |
-| **4** | `getDemandRequests` | `GET /data/demand-requests` | `GeometryDemandBucket` + `DEMAND_LOG` | **latent half = telemetry LIVE NOW**; realized = subgraph-pending |
-| **5** | `getNetGamma` | `GET /data/net-gamma`, `GET /data/supply-depth` | `NetGammaSnapshot`, `ProtocolState` | subgraph-pending (off-chain Greeks) |
+| **1** | `getCurrentLoadSurface` (live), `getLoadSurfaceHistory` | `GET /pool/load-surface` (live RPC), `GET /data/load-surface` (history) | `BucketAggregate`, `MarketStateSnapshot` | **current = live RPC NOW**; history = LIVE (subgraph via API) |
+| **2** | `getQuoteCompetition` | `GET /data/quote-competition` | `Swap.spreadWad`, `MarketMaker` win counts + `COMPETITION_LOG` | **dynamic half = telemetry LIVE NOW**; structural = LIVE (subgraph via API) |
+| **3** | via `getLoadSurfaceHistory` / API | `GET /data/term-structure?width&distance` | `BucketAggregate[]` across durations | LIVE (subgraph via API) |
+| **4** | `getDemandRequests` | `GET /data/demand-requests` | `GeometryDemandBucket` + `DEMAND_LOG` | **latent half = telemetry LIVE NOW**; realized = LIVE (subgraph via API) |
+| **5** | `getNetGamma` | `GET /data/net-gamma`, `GET /data/supply-depth` | `NetGammaSnapshot`, `ProtocolState` | LIVE (subgraph via API; off-chain Greeks API-back-filled) |
 
 For the full access map and the SDK methods see
 [the access map](/moat/access-map) and [the data client](/sdk/data-client).
@@ -509,27 +509,24 @@ What that means concretely:
 | --- | --- | --- |
 | **On-chain moat events** | `SwapPriced` + `QuoteFilled` + the `CvammPricing.loadComponents` breakdown | **LIVE on-chain since the 2026-06-05 redeploy** — the dataset begins at the redeploy `startBlock` `274081134` |
 | **Off-chain telemetry** | `DEMAND_LOG` (Signal 4 latent) + `COMPETITION_LOG` (Signal 2 dynamic) | **CAPTURING NOW** — from the first interaction logged (unreconstructable retroactively) |
-| **History / aggregate surfaces** | the subgraph that indexes the events into bucketed aggregates | **subgraph-pending** — see the limit below |
+| **History / aggregate surfaces** | the subgraph that indexes the events into bucketed aggregates | **LIVE** — deployed and indexing on The Graph Studio (slug `inflexion-arb-sepolia`) from the redeploy `startBlock` `274081134`, served via the hosted API |
 
-<Warning>
-**The subgraph is built but not yet deployed — so history and aggregate surfaces degrade
-to a typed `pending` state.**
+<Info>
+**The subgraph is deployed and indexing — so history and aggregate surfaces are live.**
 
-- **Limit:** until `SUBGRAPH_URL` is set, every *history* / *aggregate* moat surface
-  returns a typed `pending` body — never an error. There is also one declared-but-unfilled
-  dimension: the **per-MARKET** counters are zero-init because `SwapCreated`/`SwapPriced`/
-  `QuoteFilled` carry no `marketId` yet.
-- **Why:** this is a **build gap, not a contract gap**. The contracts already emit every
-  event the moat needs; the subgraph passes its offline build and test suite but is not yet pointed at a hosted endpoint, pending the
-  `inflexion-arb-sepolia` Studio slug.
-- **Mitigation / path-forward:** the **GEOMETRY-keyed** aggregates — `BucketAggregate`
-  (Signals 1/2/3) and `GeometryDemandBucket` (Signal 4) — ARE fully populated, so the
-  **geometry-bucketed moat signals are unaffected**. The current load surface is served
-  live now via the SDK; the telemetry halves capture now; the pending body even embeds
-  the exact future GraphQL query, so wiring the API at the subgraph deploy is a one-line
-  body swap. Closing the per-market gap is a bounded follow-up — derive `marketId` in
-  `handleSwapCreated`; see [degradation](/sdk/degradation).
-</Warning>
+The subgraph is deployed on The Graph Studio (slug `inflexion-arb-sepolia`) and has
+indexed on-chain history from the redeploy block `274081134` (including the lifecycle
+swaps). Every *history* / *aggregate* moat surface is served live via the hosted API at
+`https://inflexion-backend.onrender.com` — no longer a typed `pending` state. The
+**per-MARKET** dimension is indexed too: the API `/markets` route returns per-market
+aggregates, so the old per-market backfill gap is resolved. The **GEOMETRY-keyed**
+aggregates — `BucketAggregate` (Signals 1/2/3) and `GeometryDemandBucket` (Signal 4) —
+are fully populated, as is the current load surface (served via the SDK) and the
+telemetry halves. If `SUBGRAPH_URL` were ever unset, each surface degrades gracefully to
+a typed `pending` body — never an error — but that is a design property, not the current
+state. On the free hosting tier the backend sleeps after ~15 min idle, so the first
+request after a quiet period incurs a cold start.
+</Info>
 
 For the exhaustive state and the full set of honest limits, see
 [state and limits](/moat/state-and-limits).

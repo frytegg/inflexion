@@ -184,14 +184,29 @@ The 300s lifecycle market is a **separate, extra** market used only for this liv
 
 The math at settlement is **identical regardless of which rail opened the swap** — `payout = min(realized_IL, MaxIL)`, paid from the counterparty's own collateral, with the LP receiving `payout` and the counterparty keeping the residual `collateral − payout`. The lifecycle above demonstrates the trust model end to end: protocol funds are never at stake.
 
+## Hosted services
+
+The off-chain surfaces are **live**. History, aggregate, and time-series queries are served from the deployed subgraph via the hosted API — no longer pending.
+
+| Service | Endpoint |
+| --- | --- |
+| **Subgraph (The Graph Studio)** | `https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest` |
+| **REST API** (combined backend) | `https://inflexion-backend.onrender.com/` |
+| **Path-B engine** | `https://inflexion-backend.onrender.com/engine` |
+| **OpenAPI / Swagger** | `https://inflexion-backend.onrender.com/docs` |
+
+<Note>
+On the free hosting tier the combined backend sleeps after ~15 min idle, so the first request after a quiet period incurs a brief cold start.
+</Note>
+
 ## Subgraph status
 
 <Maturity />
 
-The subgraph deploy is **pending**, and the `_deployBlock` `274081134` is its `startBlock` — the on-chain moat dataset begins at exactly this redeploy.
+The subgraph is **deployed and indexing** on The Graph Studio (slug `inflexion-arb-sepolia`), and the `_deployBlock` `274081134` is its `startBlock` — the on-chain moat dataset begins at exactly this redeploy and has indexed the on-chain history from that block, including the lifecycle swaps. History and aggregate surfaces are served live from the subgraph via the hosted API.
 
 <Warning>
-**Limitation → Why → Mitigation.** History and precise MM fill attribution are not yet queryable via a subgraph. **Why:** the `QuoteFilled` / `SwapPriced` events and `CvammPricing.loadComponents()` are implemented but await the subgraph deploy; the contract size that previously blocked the redeploy was already resolved on 2026-06-05 (`InflexionCore` is 23,934 B, under EIP-170). **Mitigation:** the SDK **degrades gracefully** — history and fill attribution return a typed pending state (`'rich-events-absent'` / `'no-history-source'`) rather than throwing. See [degradation](/sdk/degradation) and [the data moat's state & limits](/moat/state-and-limits).
+**Limit → Why → Mitigation.** The dataset is **young** — real flow is minimal so far. **Why:** the structures and queries are live now, but the *dynamics* (regimes, forward-vol distributions, dispersion) only mature with MM competition (≥ 3 MMs) and volume. **Mitigation:** the SDK **degrades gracefully** by design — if a backing (`SUBGRAPH_URL` / RPC / a telemetry sink) is unset, the affected surface returns a typed pending state (`'rich-events-absent'` / `'no-history-source'`) rather than throwing. See [degradation](/sdk/degradation) and [the data moat's state & limits](/moat/state-and-limits).
 </Warning>
 
 ## Mainnet & migration references

@@ -1,6 +1,6 @@
 ---
 title: "Status & pending flags"
-description: "The single status list — subgraph pending, the resolved EIP-170 size pass, the null Sepolia sequencer feed, sigma_ref sitting at its floor, testnet-vs-mainnet addresses, and the heartbeat note. Every item is Limit -> Why -> Mitigation."
+description: "The single status list — the live subgraph + hosted API, the resolved EIP-170 size pass, the null Sepolia sequencer feed, sigma_ref sitting at its floor, testnet-vs-mainnet addresses, and the heartbeat note. Every item is Limit -> Why -> Mitigation."
 ---
 
 import AddressTable from '/snippets/address-table.mdx';
@@ -33,7 +33,7 @@ MaxIL)` — is live and unaffected.
 
 | # | Item | State | Class | Fund-loss risk |
 | --- | --- | --- | --- | --- |
-| 1 | [Subgraph deploy](#1-subgraph-deploy-pending) | **Pending** | Data surface | None — degrades to typed `pending` |
+| 1 | [Subgraph deploy](#1-subgraph-deploy-live) | **Live** | Data surface | None — history/aggregate surfaces served live via the API |
 | 2 | [EIP-170 size pass](#2-eip-170-size-pass-resolved) | **Resolved** | Was a deploy blocker | None — resolved in the 2026-06-05 redeploy |
 | 3 | [Sepolia sequencer feed](#3-sepolia-sequencer-uptime-feed-null) | **`null` on testnet** | Deliberate posture | None on testnet; pre-mainnet checklist item |
 | 4 | [σ_ref at floor](#4-σ-ref-sits-at-its-floor-at-the-fresh-deploy) | **At floor** | Cold-start, self-healing | None — I1 is oracle-independent |
@@ -42,41 +42,42 @@ MaxIL)` — is live and unaffected.
 
 ---
 
-## 1. Subgraph deploy (pending)
+## 1. Subgraph deploy (live)
 
-The Graph **Studio** deploy is pending until the Studio slug
-`inflexion-arb-sepolia` is created. Until
-it lands, the API's history and precise per-fill MM attribution surfaces are not
-yet backed by an indexer.
+The Graph **Studio** deploy is **live**: the slug `inflexion-arb-sepolia` is
+deployed and indexing, so the API's history and precise per-fill MM attribution
+surfaces are now backed by an indexer.
 
-<Warning>
-**Limit → Why → Mitigation.**
+<Note>
+**Live — resolved.** The subgraph is deployed and indexing on The Graph Studio
+(query URL
+`https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`),
+from the redeploy start block `274081134`. Historical series and precise MM fill
+attribution (the [subgraph](/integrate/subgraph)-backed half of the
+[data moat](/concepts/data-moat)) are now queryable, served live from the subgraph
+via the [hosted API](https://inflexion-backend.onrender.com). The per-market
+dimension is indexed, so per-market aggregates (`/markets`) are live too.
 
-**Limit.** Historical series and precise MM fill attribution (the
-[subgraph](/integrate/subgraph)-backed half of the
-[data moat](/concepts/data-moat)) are not yet queryable from a deployed indexer.
+The typed-pending fallback (`'rich-events-absent'` / `'no-history-source'`) remains
+a **design property**: if `SUBGRAPH_URL` is unset, the SDK and API degrade to a
+typed pending state, never an error. See [SDK degradation](/sdk/degradation) for
+the exact typed states.
+</Note>
 
-**Why.** The Studio slug `inflexion-arb-sepolia` has not been created yet, so
-there is no live GraphQL endpoint
-(`https://api.studio.thegraph.com/query/<id>/inflexion-arb-sepolia/<version>`).
-The schema, the manifest, and the start block are all finalized — only the deploy
-step remains.
-
-**Mitigation.** The SDK and API **degrade to a typed pending state, never an
-error**: history and attribution return `'rich-events-absent'` /
-`'no-history-source'` rather than throwing.
-The schema + manifest are finished and the redeploy start block is known
-(`274081134`), so the indexer is ready to go the moment the slug exists. See
-[SDK degradation](/sdk/degradation) for the exact typed states.
-</Warning>
+<Note>
+**The dataset is still young.** The *structures and queries* are live now, but real
+flow is minimal, so the *dynamics* — regimes, forward-vol distributions, dispersion
+— mature with MM competition (≥ 3 MMs) and volume. This is a data-maturity caveat,
+not a deployment gap.
+</Note>
 
 Two related facts that travel with the subgraph status:
 
 - **The moat dataset begins at the redeploy block.** Three additions —
-  `QuoteFilled`, `SwapPriced`, and `CvammPricing.loadComponents()` — are coded and
-  await a single redeploy; the on-chain moat dataset **begins at that
-  redeploy**. This is not lost history — it is the
-  genesis: the rich events are coded but did not fire before the FULL-FRESH
+  `QuoteFilled`, `SwapPriced`, and `CvammPricing.loadComponents()` — are live, and
+  the indexer scans from the redeploy block `274081134`; the on-chain moat dataset
+  **begins at that redeploy**. This is not lost history — it is the
+  genesis: the rich events did not fire before the FULL-FRESH
   redeploy of 2026-06-05, so indexing from the redeploy block wastes no scan over
   blocks that emit none of the moat data.
 - **One entity is schema-ready, not indexer-written.** `NetGammaSnapshot` is
@@ -91,9 +92,11 @@ Two related facts that travel with the subgraph status:
 
 <Tip>
 The subgraph is **internal infrastructure** — in production the API is the public
-surface and the subgraph is the indexer behind it. A pending subgraph means the
-*history* surface is pending; the **live on-chain reads** the SDK does directly
-(prices, MaxIL, vault state) are unaffected.
+surface and the subgraph is the indexer behind it. With the subgraph live, the
+*history* surface is served live via the API; the **live on-chain reads** the SDK
+does directly (prices, MaxIL, vault state) are unaffected either way. If
+`SUBGRAPH_URL` were unset, the history surface would degrade to a typed pending
+state rather than erroring.
 </Tip>
 
 ---
@@ -356,9 +359,9 @@ The crucial split: the no-bad-debt proof (I1) is *structural* — collateral
 `FairValueOracle` and `VolOracle` are load-bearing only for the
 [I10 price cap](/security/invariants) and depositor solvency, **not** for the
 FULL no-bad-debt invariant. So a σ_ref at floor (item 4), a null testnet
-sequencer feed (item 3), or a pending subgraph (item 1) **cannot** create LP bad
-debt in FULL — they can, at most, misprice the load (which costs depositors,
-junior first) or delay a data surface.
+sequencer feed (item 3), or the state of the subgraph data surface (item 1)
+**cannot** create LP bad debt in FULL — they can, at most, misprice the load
+(which costs depositors, junior first) or affect a data surface.
 
 ---
 
@@ -384,12 +387,12 @@ junior first) or delay a data surface.
     price band — both audit-resolved.
   </Card>
   <Card title="The subgraph" icon="diagram-project" href="/integrate/subgraph">
-    The pending indexer, the redeploy genesis block, and the typed pending state
-    the API falls back to.
+    The live indexer, the redeploy genesis block, and the typed pending state the
+    API falls back to if `SUBGRAPH_URL` is unset.
   </Card>
   <Card title="SDK degradation" icon="plug-circle-exclamation" href="/sdk/degradation">
-    The exact typed `pending` states the SDK returns while the subgraph is
-    undeployed — never an error.
+    The exact typed `pending` states the SDK returns if the subgraph URL is unset —
+    never an error.
   </Card>
   <Card title="What this is not" icon="circle-xmark" href="/what-this-is-not">
     The scope boundary — what Inflexion deliberately does not do, framed the same

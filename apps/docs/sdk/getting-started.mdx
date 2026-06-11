@@ -45,7 +45,7 @@ The whole config is optional. With **no args at all** the SDK still constructs �
 
 <CardGroup cols={2}>
   <Card title="Reads are graceful" icon="shield-check">
-    Anything that needs a reverting oracle, an absent rich event, or the not-yet-deployed subgraph returns a **typed degraded envelope** (`{ available: false, reason }` / `{ priceable: false, reason }` / `precision: 'coarse'`) — it **never throws**. See [degradation](/sdk/degradation).
+    Anything that needs a reverting oracle, an absent rich event, or an unreachable subgraph returns a **typed degraded envelope** (`{ available: false, reason }` / `{ priceable: false, reason }` / `precision: 'coarse'`) — it **never throws**. See [degradation](/sdk/degradation).
   </Card>
   <Card title="Writes degrade, never crash at construction" icon="pen">
     Construction never throws on a missing signer. With no `walletClient`, LP/MM writes throw a **clear error on call** (the one place a missing signer is a hard error); `DepositorClient` instead returns `WriteResult { status: 'deferred-no-wallet' }` carrying the unsigned tx for an external signer.
@@ -305,11 +305,11 @@ for (const row of surface.rows) {
 <Warning>
   **What needs which backend — read this once.**
 
-  **Limit:** Path-B previews need the engine; all history/aggregate surfaces need the subgraph (not yet indexed).
+  **Path-B previews** need the engine; **all history/aggregate surfaces** are served live from the subgraph via the hosted API. Both backends are hosted as one combined service at `https://inflexion-backend.onrender.com` (REST API at `/`, engine at `/engine`).
 
-  **Why:** the engine relays firm MM quotes off-chain (no last look); the rich on-chain events (`SwapPriced`, `QuoteFilled`) are emitted from deploy block `274081134`, but the indexer deploy is still pending.
+  The engine relays firm MM quotes off-chain (no last look); the rich on-chain events (`SwapPriced`, `QuoteFilled`) are indexed from deploy block `274081134` and queryable now via the subgraph.
 
-  **Mitigation:** if `engineBaseUrl` is unset, [`previewPremium`](/sdk/lp-client) silently routes Path A only — never an error. If the subgraph is absent, every [DataClient](/sdk/data-client) history method returns a typed `ApiPending` envelope naming the future route — never a fabricated number. **Live today over RPC alone:** premium preview, current load surface, σ_ref, market pricing, vault state, protection status, position geometry, the book, and coarse fills. See [status & caveats](/reference/status-caveats) and [degradation](/sdk/degradation).
+  **Graceful degradation still holds:** if `engineBaseUrl` is unset, [`previewPremium`](/sdk/lp-client) silently routes Path A only — never an error. If a subgraph URL is unset, every [DataClient](/sdk/data-client) history method returns a typed `ApiPending` envelope naming the route — never a fabricated number. **Live today over RPC alone (no subgraph needed):** premium preview, current load surface, σ_ref, market pricing, vault state, protection status, position geometry, the book, and coarse fills. See [status & caveats](/reference/status-caveats) and [degradation](/sdk/degradation).
 </Warning>
 
 <Maturity />

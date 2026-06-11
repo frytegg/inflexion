@@ -1,16 +1,16 @@
 ---
 title: "Degradation envelopes"
-description: "The typed envelopes that make SDK reads never throw and writes fail clearly — Degraded<T>, Priceable<T>, ApiPending, NonceStatus, WriteResult — plus the live-today vs subgraph-pending cheat-sheet and the approvals/spenders one-glance table."
+description: "The typed envelopes that make SDK reads never throw and writes fail clearly — Degraded<T>, Priceable<T>, ApiPending, NonceStatus, WriteResult — plus the live-today vs degradation cheat-sheet and the approvals/spenders one-glance table."
 ---
 
 import ClaimB from '/snippets/claim-b-disclosure.mdx'
 import Maturity from '/snippets/maturity-disclaimer.mdx'
 
 <Info>
-**Two contracts run through the whole SDK.** A **read** never throws — it returns a typed degraded envelope you must narrow before you can touch the data. A **write** never crashes at construction — without a signer it either throws a clear error _on call_ or returns a deferred result carrying the unsigned tx. This page is the complete catalogue of those envelopes, the live-today vs subgraph-pending cheat-sheet, and the approvals/spenders table — the three things a UI engineer needs to render Inflexion safely before the subgraph exists.
+**Two contracts run through the whole SDK.** A **read** never throws — it returns a typed degraded envelope you must narrow before you can touch the data. A **write** never crashes at construction — without a signer it either throws a clear error _on call_ or returns a deferred result carrying the unsigned tx. This page is the complete catalogue of those envelopes, the live-today vs degradation cheat-sheet, and the approvals/spenders table — the three things a UI engineer needs to render Inflexion safely, including when a backing (subgraph URL / RPC / telemetry) is absent.
 </Info>
 
-A degraded read is a **value, not a thrown error**. That single decision is what lets the app render a typed "oracle degraded" or "coming from `<route>`" state instead of wrapping every call in a `try/catch`. The type system enforces it: every fallible read returns a discriminated union, and the compiler will not let you read the payload until you check the discriminant.
+A degraded read is a **value, not a thrown error**. That single decision is what lets the app render a typed "oracle degraded" or "served from `<route>`" state instead of wrapping every call in a `try/catch`. The type system enforces it: every fallible read returns a discriminated union, and the compiler will not let you read the payload until you check the discriminant.
 
 ```ts
 // The compiler refuses .geometry until you check .priceable.
@@ -36,7 +36,7 @@ There are exactly five degradation shapes in the SDK. Three are read envelopes (
     Anything that needs the live price $P_0$. Success **or** `NotPriceable { priceable: false, reason, detail? }`.
   </Card>
   <Card title="ApiPending" icon="hourglass-half">
-    History/aggregate surfaces with no live source yet. Names the **future** route + the exact query.
+    History/aggregate surfaces when no backing is configured. Names the route + the exact query. Served live today via the hosted API.
   </Card>
   <Card title="NonceStatus" icon="crosshairs">
     Not pass/fail — a **precision** flag: `'coarse' | 'precise'`. MM fill attribution is coarse on-chain.
@@ -53,7 +53,7 @@ There are exactly five degradation shapes in the SDK. Three are read envelopes (
 | --- | --- | --- | --- |
 | `Degraded<T>` | `{ available: true } & T` | `{ available: false, reason: string }` | vault state, position, regime, surface σ_ref |
 | `Priceable<T>` | `{ priceable: true } & T` | `NotPriceable = { priceable: false, reason: DegradeReason, detail? }` | anything needing $P_0$ (geometry, preview, payoff, status) |
-| `ApiPending` | — (never succeeds yet) | `{ available: false, reason: 'no-history-source', endpoint, query, detail }` | all DataClient history methods |
+| `ApiPending` | — (served live via the API; this is the no-backing fallback) | `{ available: false, reason: 'no-history-source', endpoint, query, detail }` | all DataClient history methods |
 | `NonceStatus` | `{ spent, precision: 'coarse' \| 'precise', detail }` | — (always returns; precision degrades) | MM fill attribution (`isQuoteFilled`) |
 | `WriteResult` | `{ status: 'sent', txHash, tx }` | `{ status: 'deferred-no-wallet' \| 'error', tx, detail? }` | DepositorClient writes |
 
@@ -114,7 +114,7 @@ type DegradeReason =
   | 'oracle-degraded'    // OracleManager.getPrice reverted (stale / sequencer down)
   | 'no-rpc'             // no read client could be built
   | 'rich-events-absent' // an indexed event the surface needs isn't on-chain yet
-  | 'no-history-source'  // subgraph/API not deployed (ApiPending uses this)
+  | 'no-history-source'  // no subgraph/API backing configured (ApiPending uses this)
   | 'vol-uninitialized'  // VolOracle.sigmaRef reverts — σ_ref not seeded for the token
   | 'market-unknown'     // Core.markets returns token0 == address(0)
   | 'position-unknown'   // NPM.positions has no such tokenId
@@ -124,8 +124,8 @@ type DegradeReason =
 | --- | --- | --- |
 | `oracle-degraded` | `OracleManager.getPrice` reverts | retry next block; the protocol's [settlement liveness fork](/security/forks) guarantees `settle` still succeeds |
 | `no-rpc` | no read client (no `rpcUrl`/transport/`publicClient`, no env) | provide an RPC; see [getting started](/sdk/getting-started) |
-| `rich-events-absent` | a needed indexed event isn't emitted on-chain yet | use the coarse on-chain path; precise path lands with the [subgraph](/integrate/subgraph) |
-| `no-history-source` | the subgraph/API is not deployed | render the `ApiPending` "coming from `<route>`" state |
+| `rich-events-absent` | a needed indexed event isn't emitted on-chain yet | use the coarse on-chain path; precise path served live via the [subgraph](/integrate/subgraph) |
+| `no-history-source` | no subgraph/API backing is configured (if `SUBGRAPH_URL` is unset) | render the `ApiPending` "served from `<route>`" state |
 | `vol-uninitialized` | `VolOracle.sigmaRef` reverts (token never seeded) | `lp.poke(token)` / `mm` requote after the EWMA seeds |
 | `market-unknown` | `Core.markets(marketId).token0 == 0` | check the [markets grid](/reference/markets-grid) for valid ids |
 | `position-unknown` | `NPM.positions(tokenId)` has no entry | confirm the tokenId and owner |
@@ -138,40 +138,39 @@ type DegradeReason =
 type ApiPending = {
   available: false
   reason: 'no-history-source'
-  endpoint: string  // the FUTURE API route this would call
-  query: unknown    // the exact query that WOULD be sent
+  endpoint: string  // the API route this calls
+  query: unknown    // the exact query sent
   detail?: string
 }
 ```
 
-Every DataClient **history** method returns `ApiPending` until the subgraph is deployed. This is the most deliberate envelope in the SDK: rather than invent a number, it returns the **future route and the exact query** that would be sent — so the UI can render "coming from `<route>`" today and the API is wired in later with **zero re-derivation**. The SDK never fabricates history.
+History/aggregate surfaces are **served live** from the subgraph via the [hosted API](https://inflexion-backend.onrender.com) (`/`), backed by the deployed subgraph (slug `inflexion-arb-sepolia`) which has indexed on-chain history since the redeploy block. `ApiPending` is the **graceful-degradation fallback**: if no backing is configured (e.g. `SUBGRAPH_URL` is unset), each DataClient **history** method returns this typed envelope rather than inventing a number — it names the **route and the exact query** that would be sent, so the UI can render "served from `<route>`" with **zero re-derivation** when a backing is present. The SDK never fabricates history.
 
 ```ts
 const hist = await sdk.data.getLoadSurfaceHistory({ marketId: demo.marketId_fee500_7d })
-// {
+// Live (backing configured): { available: true, rows: [...] }
+// Fallback (no backing, e.g. SUBGRAPH_URL unset): {
 //   available: false,
 //   reason:   'no-history-source',
 //   endpoint: '/data/load-surface',
 //   query:    { marketId: '0x67c4…', from: undefined, to: undefined, bucket: undefined },
 // }
-ui.showPending(`coming from ${hist.endpoint}`)
+if (!hist.available) ui.showPending(`served from ${hist.endpoint}`)
 ```
 
-| DataClient method | Future endpoint | Backed by |
+| DataClient method | Endpoint | Backed by |
 | --- | --- | --- |
-| `getLoadSurfaceHistory` | `/data/load-surface` | subgraph |
-| `getQuoteCompetition` | `/data/quote-competition` | subgraph + engine `COMPETITION_LOG` |
-| `getDemandRequests` | `/data/demand-requests` | engine `DEMAND_LOG` (off-chain only, **pending by design**) |
-| `getNavHistory` | `/pool/nav-history` | subgraph (carries Claim B) |
+| `getLoadSurfaceHistory` | `/data/load-surface` | subgraph (live) |
+| `getQuoteCompetition` | `/data/quote-competition` | subgraph + engine `COMPETITION_LOG` (live) |
+| `getDemandRequests` | `/data/demand-requests` | engine `DEMAND_LOG` (off-chain only, latent demand never touches the chain — [invariant I7](/security/invariants)) |
+| `getNavHistory` | `/pool/nav-history` | subgraph (live; carries Claim B) |
 | `getNetGamma` | `/data/net-gamma` | off-chain compute |
 
-<Warning>
-**`getCurrentLoadSurface` is the one DataClient method that is live today — it is _not_ `ApiPending`.**
+<Note>
+**History/aggregate surfaces are live today — served from the subgraph via the [hosted API](https://inflexion-backend.onrender.com).**
 
-- **Limit.** All five [data-moat history signals](/concepts/data-moat) return `ApiPending`.
-- **Why.** The subgraph is not yet deployed for the 2026-06-05 redeploy, so there is no indexed event history to query; and `getDemandRequests` is off-chain telemetry by design (latent demand never touches the chain, by [invariant I7](/security/invariants)).
-- **Mitigation.** `getCurrentLoadSurface` and `getSurfaceSigmaRef` hit live RPC and return real data **now**; the history methods name their future route so they light up with zero re-derivation the moment the subgraph indexes.
-</Warning>
+The deployed subgraph (slug `inflexion-arb-sepolia`) has indexed on-chain history since the redeploy block, so all five [data-moat history signals](/concepts/data-moat) resolve to real data through the API. `getCurrentLoadSurface` and `getSurfaceSigmaRef` hit live RPC directly. `getDemandRequests` is the one inherently off-chain signal: it is served from engine telemetry, not the chain, because latent demand never touches the chain by [invariant I7](/security/invariants). If no backing is configured (e.g. `SUBGRAPH_URL` is unset), the history methods degrade to a typed `ApiPending` envelope naming their route — they never throw.
+</Note>
 
 ---
 
@@ -188,7 +187,7 @@ Not a pass/fail envelope — it **always** returns — but it carries a **precis
 
 - **Limit.** `mm.isQuoteFilled(mm, nonce)` returns `precision: 'coarse'`.
 - **Why.** The bitmap nonce `isNonceUsed(mm, nonce)` is set on **both** a fill and a cancel, and `SwapCreated` / `SwapRouted` carry no `quoteId`/`nonce` — so a spent bit cannot, on-chain alone, be told apart as filled-vs-cancelled.
-- **Mitigation.** The precise path is the now-live `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`) emitted since the 2026-06-05 deploy; it becomes queryable as `precision: 'precise'` once the subgraph indexes it. Until then, `watchFills` polls `SwapCreated` logs filtered by `mm` (works today, coarse), and `capacityRemaining` reads the exact on-chain `consumedNotional` ([invariant I7](/security/invariants)) for the number that actually matters — remaining capacity.
+- **Mitigation.** The precise path is the `QuoteFilled` event (`swapId, mm, quoteId, nonce, loadBps`) emitted since the 2026-06-05 deploy; it is now indexed by the live subgraph and queryable as `precision: 'precise'`. The coarse on-chain path remains available too — `watchFills` polls `SwapCreated` logs filtered by `mm`, and `capacityRemaining` reads the exact on-chain `consumedNotional` ([invariant I7](/security/invariants)) for the number that actually matters — remaining capacity.
 </Warning>
 
 ```ts
@@ -241,12 +240,12 @@ Most write methods have a `build*` sibling that returns raw `{ to, data, value }
 
 ---
 
-## Live-today vs subgraph-pending — the cheat-sheet
+## Live-RPC vs subgraph-backed — the cheat-sheet
 
-The SDK is fully usable against the [live deployment](/reference/deployments) **without** the subgraph. The line is between live-RPC surfaces (real data now) and history/aggregate surfaces that degrade to a typed pending state.
+The SDK is fully usable against the [live deployment](/reference/deployments), and the subgraph is deployed and indexing too. The line is between live-RPC surfaces (data straight from the chain) and history/aggregate surfaces served from the subgraph via the [hosted API](https://inflexion-backend.onrender.com) — which degrade to a typed pending state only if no backing is configured.
 
 <Tabs>
-  <Tab title="Live today (no subgraph)">
+  <Tab title="Live-RPC (direct, no subgraph needed)">
     | Surface | Method(s) | Envelope on failure |
     | --- | --- | --- |
     | Premium preview | `lp.previewPremium` | `Priceable` (`oracle-degraded`) |
@@ -260,26 +259,24 @@ The SDK is fully usable against the [live deployment](/reference/deployments) **
     | Book (on-chain scan) | `mm.getBook` | always returns |
     | Fills (coarse) | `mm.watchFills`, `isQuoteFilled` | `NonceStatus { precision:'coarse' }` |
   </Tab>
-  <Tab title="Subgraph-pending (typed pending)">
-    | Surface | Method(s) | Envelope until indexed |
+  <Tab title="Subgraph-backed (live via API)">
+    | Surface | Method(s) | Source (fallback if no backing) |
     | --- | --- | --- |
-    | Load-surface history | `data.getLoadSurfaceHistory` | `ApiPending` → `/data/load-surface` |
-    | Quote competition | `data.getQuoteCompetition` | `ApiPending` → `/data/quote-competition` |
-    | Demand requests | `data.getDemandRequests` | `ApiPending` → `/data/demand-requests` (off-chain by design) |
-    | NAV history | `data.getNavHistory` | `ApiPending` → `/pool/nav-history` (Claim B) |
-    | Net gamma | `data.getNetGamma` | `ApiPending` → `/data/net-gamma` |
-    | Precise fill attribution | `mm.isQuoteFilled` (precise) | `QuoteFilled` event — `precision:'precise'` once indexed |
-    | Full fee accounting | `lp.getClaimableFees` | under-states; precise needs subgraph |
+    | Load-surface history | `data.getLoadSurfaceHistory` | `/data/load-surface` (else `ApiPending`) |
+    | Quote competition | `data.getQuoteCompetition` | `/data/quote-competition` (else `ApiPending`) |
+    | Demand requests | `data.getDemandRequests` | `/data/demand-requests` — engine telemetry, off-chain by design |
+    | NAV history | `data.getNavHistory` | `/pool/nav-history` (Claim B; else `ApiPending`) |
+    | Net gamma | `data.getNetGamma` | `/data/net-gamma` (else `ApiPending`) |
+    | Precise fill attribution | `mm.isQuoteFilled` (precise) | `QuoteFilled` event — `precision:'precise'`, now indexed |
+    | Full fee accounting | `lp.getClaimableFees` | precise figure served from the subgraph |
   </Tab>
 </Tabs>
 
-<Warning>
-**The subgraph deploy is pending — and that is a typed state, never an error.**
+<Note>
+**The subgraph is deployed and indexing — history, NAV, precise fill attribution, and full fee accounting are live, served via the [hosted API](https://inflexion-backend.onrender.com).**
 
-- **Limit.** History, NAV, precise fill attribution, and full fee accounting have no live source yet.
-- **Why.** The subgraph is not deployed for the 2026-06-05 redeploy, so there is no indexed event history to query.
-- **Mitigation.** Every affected surface degrades to a typed envelope — `ApiPending` (history), `NonceStatus { precision: 'coarse' }` (fills), or an under-stating-but-honest read (`getClaimableFees`, which under-states because the precise figure needs the subgraph). The UI renders the pending state; nothing throws. The moment the subgraph indexes, the same calls light up with no consumer-side changes.
-</Warning>
+The subgraph (slug `inflexion-arb-sepolia`) has indexed on-chain history since the redeploy block, so these surfaces resolve to real data with no consumer-side changes. Graceful degradation remains a **design property**: if a backing is absent (e.g. `SUBGRAPH_URL` is unset), each affected surface degrades to a typed envelope — `ApiPending` (history), `NonceStatus { precision: 'coarse' }` (fills), or an under-stating-but-honest read (`getClaimableFees`) — and the UI renders the pending state; nothing throws.
+</Note>
 
 <Maturity />
 
@@ -321,13 +318,13 @@ Because the live load surface, NAV history, and vault-state reads on this page a
     The write-safety model in full — `build*` calldata, deferred results, and the never-merge claim discipline.
   </Card>
   <Card title="Data client" icon="chart-line" href="/sdk/data-client">
-    The one live surface and the five `ApiPending` behavioral signals of the data moat.
+    The live-RPC surface and the five behavioral signals of the data moat, served via the API.
   </Card>
   <Card title="Getting started" icon="rocket" href="/sdk/getting-started">
     Construction, the full config table, and the RPC/key resolution order that drives `no-rpc`.
   </Card>
   <Card title="Subgraph" icon="diagram-project" href="/integrate/subgraph">
-    What the pending subgraph indexes, and which envelopes flip from coarse/pending to precise.
+    What the live subgraph indexes, and which envelopes resolve from coarse/pending to precise.
   </Card>
   <Card title="Invariants" icon="lock" href="/security/invariants">
     I7 (capacity authority) and the settlement-liveness fork behind `oracle-degraded`.
