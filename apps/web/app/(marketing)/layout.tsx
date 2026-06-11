@@ -29,6 +29,7 @@ export default function MarketingLayout({ children }: { children: ReactNode }) {
         items={MENU_ITEMS}
         socialItems={SOCIALS}
         displaySocials
+        displayItemNumbering={false}
         colors={['#0B7D70', '#14B8A6']}
         accentColor="#14B8A6"
         menuButtonColor="#F3F5F7"
