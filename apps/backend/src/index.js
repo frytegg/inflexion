@@ -52,7 +52,16 @@ const apiHandler = createApp(
 
 const ENGINE_PREFIX = '/engine'
 const server = createServer((req, res) => {
-  const path = req.url ?? '/'
+  // Normalize a trailing slash on the path (keep root "/" + the query string) so a
+  // request to /health/ behaves like /health — clients (monitors, browsers) often add one.
+  const raw = req.url ?? '/'
+  const qIdx = raw.indexOf('?')
+  let pathOnly = qIdx === -1 ? raw : raw.slice(0, qIdx)
+  const query = qIdx === -1 ? '' : raw.slice(qIdx)
+  if (pathOnly.length > 1) pathOnly = pathOnly.replace(/\/+$/, '') || '/'
+  req.url = pathOnly + query
+
+  const path = req.url
   if (path === ENGINE_PREFIX || path.startsWith(ENGINE_PREFIX + '/')) {
     // Strip the /engine prefix so the relayer sees its own routes (/quote, /health…).
     req.url = path.slice(ENGINE_PREFIX.length) || '/'
