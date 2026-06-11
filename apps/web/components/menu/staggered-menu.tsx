@@ -399,16 +399,20 @@ export const StaggeredMenu = ({
         })()}
       </div>
       <header className="staggered-menu-header" aria-label="Main navigation header">
-        <div className="sm-logo" aria-label="Logo">
+        <div className="sm-logo" aria-label="Inflexion">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={logoUrl}
-            alt="Inflexion"
+            alt=""
+            aria-hidden="true"
             className="sm-logo-img"
             draggable={false}
             width={110}
             height={24}
           />
+          <span className="select-none font-display text-h3 font-bold tracking-tight text-fg">
+            Inflexion<span className="text-accent">.</span>
+          </span>
         </div>
         <button
           ref={toggleBtnRef}
