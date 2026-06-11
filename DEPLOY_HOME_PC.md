@@ -1,66 +1,72 @@
-# Home-PC deploy prompt — Inflexion backend (Oracle Cloud free VM)
+# Deploy guide — Inflexion backend (Render free tier)
 
-Open Claude Code on the home PC inside the `inflexion` repo and paste the block below
-(or just say: _"Follow DEPLOY_HOME_PC.md."_). It drives the deploy **one step at a time,
-waiting for your confirmation between steps**.
+Oracle Cloud's free A1/E2 capacity is often unavailable by region (e.g. Paris), so the
+**primary path is Render** — free, no credit card, **automatic HTTPS**, and no VM / SSH /
+firewall. It builds straight from `apps/backend/Dockerfile` using the committed `render.yaml`.
+You can do this from **any** machine with a browser.
+
+Paste the block below into Claude Code (or just follow it yourself). It goes **one step at a
+time, waiting for your confirmation between steps**.
 
 ---
 
-You are guiding me through deploying the **Inflexion combined backend** (REST API + Path-B
-engine) to an **Oracle Cloud Always-Free VM**, using **Docker Compose + Caddy** (automatic
-HTTPS). All deploy artifacts already exist on `main`: `docker-compose.yml`, `apps/backend/`,
-`apps/backend/Caddyfile`, and `scripts/oracle-vm-setup.sh`.
+You are guiding me through deploying the **Inflexion combined backend** (REST API at `/` +
+Path-B engine at `/engine`) to **Render** (free Docker web service). The repo on `main`
+already has `render.yaml` and `apps/backend/Dockerfile`.
 
-**Interaction rules (important):**
+**Interaction rules:** walk me through ONE step at a time; after each, STOP and wait for me to
+confirm it's done (and paste any output/errors); don't advance until the previous step
+succeeded; if something errors, help me fix it first.
 
-- Walk me through **ONE step at a time**.
-- After each step, **STOP and wait** for me to confirm it's done and paste any output/errors.
-- **Do not** give the next step until I confirm the previous one succeeded.
-- If a step errors, diagnose from my pasted output and help me fix it before continuing.
-- Keep each step short and copy-pasteable.
+**Goal:** a live HTTPS backend at `https://<app>.onrender.com` (API at `/`, engine at
+`/engine`); then report that URL so I can paste it back to my other Claude session to wire the
+dApp + docs.
 
-**Goal:** a live HTTPS backend at `https://<BACKEND_DOMAIN>` serving the API at `/` and the
-engine at `/engine`; then report the final `BACKEND_DOMAIN` so I can paste it back into my
-other Claude session to wire the dApp + docs.
+**Facts you can rely on:** `SUBGRAPH_URL` and the telemetry paths are already in `render.yaml`;
+the only secret I must supply is my **Arbitrum Sepolia RPC URL**.
 
-**Facts you can rely on (don't re-derive):**
+**Steps (one at a time, wait for my confirmation between each):**
 
-- Subgraph is already live: `SUBGRAPH_URL=https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest`
-- I will give you my own **Arbitrum Sepolia RPC URL** when asked.
-- **No domain needed:** use `BACKEND_DOMAIN=<VM_PUBLIC_IP>.sslip.io` — sslip.io resolves that
-  to the IP, so Caddy still gets a real Let's Encrypt cert.
+1. **Confirm `main` is current.** `git pull` — verify `render.yaml` and `apps/backend/` exist.
 
-**The steps (one at a time, wait for my confirmation between each):**
+2. **Create the Blueprint.** Go to <https://dashboard.render.com> → **New → Blueprint**.
+   Connect the GitHub repo `frytegg/inflexion` (authorize Render the first time). Render reads
+   `render.yaml` and proposes the **`inflexion-backend`** Docker web service. Apply it.
 
-1. **Create the VM.** Tell me exactly how, in the Oracle Cloud console: Ubuntu 22.04, shape
-   **VM.Standard.A1.Flex** (ARM Always-Free, e.g. 2 OCPU / 12 GB; if A1 capacity is
-   unavailable, fall back to **VM.Standard.E2.1.Micro**), upload my SSH public key. Ask me
-   for the **public IP** before continuing.
+3. **Set the RPC secret.** In the service's **Environment**, set `ARBITRUM_SEPOLIA_RPC` to my
+   Arbitrum Sepolia RPC URL. (`SUBGRAPH_URL`, `DEMAND_LOG`, `COMPETITION_LOG` come from
+   `render.yaml`; `PORT` is injected by Render automatically.)
 
-2. **Open ports in the OCI console.** Guide me to the VM's VCN → subnet → **Security List**,
-   and adding **Ingress** rules for **TCP 80** and **TCP 443** from `0.0.0.0/0`. Wait until I
-   confirm both rules exist. (This is separate from the VM firewall, which the script handles.)
+4. **Deploy + watch the build.** First build is ~3–5 min (it builds the monorepo). Watch the
+   logs until you see `[inflexion-backend] listening on :…`.
 
-3. **SSH in.** Give me the `ssh ubuntu@<IP>` command. Wait until I'm in.
+5. **Verify.** Open `https://<app>.onrender.com/health` and
+   `https://<app>.onrender.com/engine/health` — both should return `ok` JSON. The very first
+   hit after idle takes ~30–60s (free-tier cold start); that's expected.
 
-4. **Get the code.** `git clone https://github.com/frytegg/inflexion.git && cd inflexion`
-   (or `git pull` if it already exists). Wait for confirmation.
+6. **Done.** Print the final `https://<app>.onrender.com` URL and remind me to send it back to
+   my other Claude session to wire `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_ENGINE_URL` and flip
+   the docs `/status` + roadmap to live.
 
-5. **Run the setup script (first pass).** `bash scripts/oracle-vm-setup.sh` — it opens the VM
-   firewall, installs Docker, and scaffolds `.env`, then stops. Wait for it to pause.
+**Notes / gotchas:**
 
-6. **Fill `.env`.** Have me `nano .env` and set `ARBITRUM_SEPOLIA_RPC=<my RPC>` and
-   `BACKEND_DOMAIN=<VM_PUBLIC_IP>.sslip.io` (`SUBGRAPH_URL` is already defaulted). Wait until I save.
+- Free instances **sleep after ~15 min idle** → ~30–60s cold start on the next request. The
+  dApp reads chain data directly via RPC, so the core demo is unaffected; for judging, add a
+  free uptime pinger (e.g. UptimeRobot) hitting `/health` every 10 min to keep it warm.
+- No persistent disk on free → telemetry resets on restart (fine; the subgraph powers the
+  historical signals).
+- If the Render build runs out of memory, retry — the build runs on Render's build infra, not
+  the free instance.
 
-7. **Launch.** Re-run `bash scripts/oracle-vm-setup.sh` (it runs `docker compose up -d --build`).
-   Then `sudo docker compose logs -f caddy` until the TLS certificate is issued. Wait for confirmation.
+---
 
-8. **Verify.** `curl https://<BACKEND_DOMAIN>/health` and `curl https://<BACKEND_DOMAIN>/engine/health`.
-   Confirm both return `ok` JSON.
+## Fallbacks (if you want no cold-starts)
 
-9. **Done.** Print the final `BACKEND_DOMAIN` and remind me to send it back to my other Claude
-   session to wire `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_ENGINE_URL` and flip the docs status + roadmap.
+All use the same `apps/backend/Dockerfile`:
 
-**Known gotchas:** ports must be open in **both** the OCI Security List **and** the VM iptables
-(the script does the iptables part); A1 capacity is sometimes unavailable (retry or use
-E2.1.Micro); the script uses `sudo docker` so you don't need to re-login after the Docker install.
+- **Koyeb** (free, **no sleep**): New → Docker → repo `frytegg/inflexion`, Dockerfile
+  `apps/backend/Dockerfile`, set the same env vars. Auto-HTTPS on `*.koyeb.app`.
+- **Fly.io** (~$2/mo, card): `fly launch --dockerfile apps/backend/Dockerfile` + set env; a
+  real volume for persistent telemetry.
+- **Oracle Cloud VM** (when A1 capacity returns): the `docker-compose.yml` + Caddy +
+  `scripts/oracle-vm-setup.sh` path — see `apps/backend/README.md`.

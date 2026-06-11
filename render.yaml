@@ -1,0 +1,27 @@
+# Render Blueprint — deploys the combined Inflexion backend (REST API at / + the
+# Path-B engine at /engine) as a single Docker web service.
+#
+# Free tier, no credit card, automatic HTTPS on *.onrender.com (no reverse proxy
+# needed). Free instances sleep after ~15 min idle (cold start on the next request);
+# the dApp degrades gracefully, and a keep-alive pinger on /health avoids it for demos.
+services:
+  - type: web
+    name: inflexion-backend
+    runtime: docker
+    dockerfilePath: apps/backend/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SUBGRAPH_URL
+        value: https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest
+      # No persistent disk on the free tier — telemetry lives in /tmp (shared within the
+      # container, resets on restart). The subgraph powers the historical signals.
+      - key: DEMAND_LOG
+        value: /tmp/demand.jsonl
+      - key: COMPETITION_LOG
+        value: /tmp/competition.jsonl
+      # Set this secret in the Render dashboard (your Arbitrum Sepolia RPC URL).
+      - key: ARBITRUM_SEPOLIA_RPC
+        sync: false
