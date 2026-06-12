@@ -22,9 +22,9 @@ export function Guarantee() {
             </p>
           </Card>
           <Card variant="dots" className="border-warn-500/40" dotClassName="bg-warn-400">
-            <div className="flex items-center gap-2 text-warn-400">
-              <span className="text-h3 leading-none">△</span>
-              <span className="text-label uppercase">Capital is not guaranteed</span>
+            <div className="flex items-center gap-2">
+              <span className="text-h3 leading-none text-warn-400">△</span>
+              <span className="text-label uppercase text-fg">Capital is not guaranteed</span>
             </div>
             <p className="mt-3 text-body text-fg-secondary">
               Depositors and market makers absorb crash losses up to{' '}
