@@ -6,7 +6,7 @@ export function Hero() {
   return (
     <section className="relative overflow-hidden">
       <FloatingLinesBg />
-      <div className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 py-24 text-center md:py-32">
+      <div className="relative z-10 mx-auto flex min-h-[88vh] max-w-3xl flex-col items-center justify-center px-6 py-24 text-center">
         <h1 className="font-title text-display-xl leading-[1.05] text-fg md:text-display-2xl">
           <TextAnimate as="span" by="word" animation="blurInUp" className="block">
             Hedge in-range
