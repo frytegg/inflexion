@@ -54,24 +54,8 @@ export function Hero() {
           .
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <ShimmerButton
-            onClick={() => router.push('/protect')}
-            background="#0E1525"
-            shimmerColor="#5EEAD4"
-            borderRadius="12px"
-            className="font-medium shadow-glow"
-          >
-            Protect a position
-          </ShimmerButton>
-          <ShimmerButton
-            onClick={() => router.push('/data')}
-            background="#0E1525"
-            shimmerColor="#A9C4FF"
-            borderRadius="12px"
-            className="font-medium"
-          >
-            See the data
-          </ShimmerButton>
+          <ShimmerButton onClick={() => router.push('/protect')}>Protect a position</ShimmerButton>
+          <ShimmerButton onClick={() => router.push('/data')}>See the data</ShimmerButton>
         </div>
       </div>
     </section>

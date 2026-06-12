@@ -1,6 +1,10 @@
-import Link from 'next/link'
+'use client'
+
+import { useRouter } from 'next/navigation'
+import { ShimmerButton } from '@/components/magicui/shimmer-button'
 
 export function DataTeaser() {
+  const router = useRouter()
   return (
     <section className="border-t border-line-subtle bg-base">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-16 md:flex-row md:items-center md:justify-between md:py-20">
@@ -15,12 +19,9 @@ export function DataTeaser() {
             gamma. Free, and it exists nowhere else.
           </p>
         </div>
-        <Link
-          href="/data"
-          className="shrink-0 rounded-lg border border-line-strong px-5 py-3 font-medium text-fg transition-colors duration-fast hover:border-accent-700 hover:text-accent-400"
-        >
+        <ShimmerButton onClick={() => router.push('/data')} className="shrink-0">
           Explore the data →
-        </Link>
+        </ShimmerButton>
       </div>
     </section>
   )
