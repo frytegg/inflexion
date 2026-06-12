@@ -267,6 +267,8 @@ export interface FloatingLinesProps {
   /** Layer opacity — keep low so the lines stay a subtle background and text reads. */
   opacity?: number
   className?: string
+  /** Called once after the first frame renders (i.e. WebGL is initialized + drawing). */
+  onReady?: () => void
 }
 
 export default function FloatingLines({
@@ -287,6 +289,7 @@ export default function FloatingLines({
   mixBlendMode = 'screen',
   opacity = 0.4,
   className,
+  onReady,
 }: FloatingLinesProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const targetMouseRef = useRef(new Vector2(-1000, -1000))
@@ -295,6 +298,8 @@ export default function FloatingLines({
   const currentInfluenceRef = useRef(0)
   const targetParallaxRef = useRef(new Vector2(0, 0))
   const currentParallaxRef = useRef(new Vector2(0, 0))
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
 
   const getLineCount = (waveType: WaveName): number => {
     if (typeof lineCount === 'number') return lineCount
@@ -454,6 +459,7 @@ export default function FloatingLines({
     }
 
     let raf = 0
+    let firstFrame = true
     const renderLoop = () => {
       if (!active) return
       uniforms.iTime.value = clock.getElapsedTime()
@@ -472,6 +478,10 @@ export default function FloatingLines({
       }
 
       renderer.render(scene, camera)
+      if (firstFrame) {
+        firstFrame = false
+        onReadyRef.current?.()
+      }
       raf = requestAnimationFrame(renderLoop)
     }
     renderLoop()
