@@ -1,15 +1,19 @@
 import Link from 'next/link'
 import { FloatingLinesBg } from '@/components/landing/floating-lines-bg'
+import { TextAnimate } from '@/components/magicui/text-animate'
 
 export function Hero() {
   return (
     <section className="relative overflow-hidden">
       <FloatingLinesBg />
       <div className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 py-24 text-center md:py-32">
-        <h1 className="font-display text-display-xl font-bold tracking-tight text-fg md:text-display-2xl">
-          Hedge in-range
-          <br />
-          impermanent loss.
+        <h1 className="font-title text-display-xl leading-[1.05] text-fg md:text-display-2xl">
+          <TextAnimate as="span" by="word" animation="blurInUp" className="block">
+            Hedge in-range
+          </TextAnimate>
+          <TextAnimate as="span" by="word" animation="blurInUp" delay={0.15} className="block">
+            impermanent loss.
+          </TextAnimate>
         </h1>
         <p className="mt-5 max-w-xl text-body-lg text-fg-secondary">
           Pay a fixed premium, transfer the in-range IL risk of your Uniswap v3 position. Paid your

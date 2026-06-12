@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { Space_Grotesk, IBM_Plex_Mono } from 'next/font/google'
+import { Space_Grotesk, IBM_Plex_Mono, Black_Ops_One } from 'next/font/google'
 import './globals.css'
 import '../components/menu/staggered-menu.css'
 import { Providers } from './providers'
@@ -18,6 +18,13 @@ const mono = IBM_Plex_Mono({
   variable: '--font-mono',
   display: 'swap',
 })
+// Title display face (Black Ops One) — used for the hero headline.
+const title = Black_Ops_One({
+  subsets: ['latin'],
+  weight: ['400'],
+  variable: '--font-title',
+  display: 'swap',
+})
 
 export const metadata: Metadata = {
   title: 'Inflexion — hedge Uniswap v3 impermanent loss',
@@ -27,7 +34,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${mono.variable}`} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${display.variable} ${mono.variable} ${title.variable}`}
+      suppressHydrationWarning
+    >
       <head>
         <link
           rel="stylesheet"
