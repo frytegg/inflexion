@@ -94,18 +94,18 @@ Focus ring: `rgba(20,184,166,0.45)`. Selection: teal @ 25% on navy.
 **Not Inter-everywhere.** A characterful display face + a real tabular mono for
 all numbers (financial data wants `tabular-nums`). Three roles; all self-hosted.
 
-| Role            | Proposed (free, self-hostable)            | Alternates                        | Use                                      |
-| --------------- | ----------------------------------------- | --------------------------------- | ---------------------------------------- |
-| **Display**     | **Space Grotesk** (Google) — **LOCKED**   | Clash Display · Unbounded · Syne  | hero & section headlines only            |
-| **Sans / UI**   | **General Sans** (Fontshare) — **LOCKED** | Switzer · Hanken Grotesk          | body, UI, labels                         |
-| **Mono / data** | **IBM Plex Mono** (Google) — **LOCKED**   | JetBrains Mono · Spline Sans Mono | **all numbers**, addresses, code, ticker |
+| Role            | Proposed (free, self-hostable)             | Alternates                        | Use                                      |
+| --------------- | ------------------------------------------ | --------------------------------- | ---------------------------------------- |
+| **Display**     | **Clash Display** (Fontshare) — **LOCKED** | Space Grotesk · Unbounded · Syne  | hero, menu & all section headlines       |
+| **Sans / UI**   | **General Sans** (Fontshare) — **LOCKED**  | Switzer · Hanken Grotesk          | body, UI, labels                         |
+| **Mono / data** | **IBM Plex Mono** (Google) — **LOCKED**    | JetBrains Mono · Spline Sans Mono | **all numbers**, addresses, code, ticker |
 
-> All three **locked** (2026-06-05). **Display = Space Grotesk** — its mathematical /
-> Space-Mono lineage fits the quant·terminal positioning, its numerals read precise
-> (not balloon-round), and it bridges naturally to IBM Plex Mono on the number side.
-> Constraints kept: display ≠ body; mono has true tabular figures; no Inter/Geist as
-> primaries. Space Grotesk + IBM Plex Mono via `next/font/google` (self-hosted);
-> General Sans via the Fontshare CDN.
+> Sans + Mono **locked** 2026-06-05; **Display = Clash Display** picked by visual
+> comparison 2026-06-12 (over Space Grotesk · Unbounded · Syne). Its sharp, confident
+> geometric forms give the headlines a distinct voice while staying precise — applied to
+> every heading (hero, menu, section h2/h3), not just the hero. Constraints kept: display
+> ≠ body; mono has true tabular figures; no Inter/Geist as primaries. IBM Plex Mono via
+> `next/font/google` (self-hosted); Clash Display + General Sans via the Fontshare CDN.
 
 ### Type scale (`rem`, 16px root)
 
@@ -317,7 +317,7 @@ export default config
 
 ## 10. Choices — RESOLVED (approved 2026-06-05)
 
-1. **Fonts** — **Mono = IBM Plex Mono** + **Sans = General Sans** are LOCKED. **Display = PENDING a visual pick** (`_design/font-compare.html`): Clash Display vs Space Grotesk vs Unbounded vs Syne — chosen by seeing, not by name.
+1. **Fonts** — **Mono = IBM Plex Mono** + **Sans = General Sans** LOCKED (2026-06-05). **Display = Clash Display** LOCKED (2026-06-12) — chosen by seeing over Space Grotesk · Unbounded · Syne; used for every heading (hero, menu, section h2/h3).
 2. **Loss red** — `#EF5350` kept (clinical, not warm coral — red marks the uncovered region as a mathematical reality, not an alarm).
 3. **Radius** — crisp **8px** kept (4px reads harsh at scale; 12px breaks the quant feel).
 4. **MM hue** — blue-violet `#8B7FF0` kept. **Accessibility rule:** on dense `/data` overlays where teal (pool) + violet (MM) sit together, never rely on hue alone — add a redundant non-color cue (line-style / marker / direct label) and verify against deuteranopia at build time.

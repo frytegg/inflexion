@@ -23,7 +23,7 @@ export function Hero() {
     <section className="relative overflow-hidden">
       <FloatingLinesBg onReady={() => setStarted(true)} />
       <div className="relative z-10 mx-auto flex min-h-dvh max-w-3xl flex-col items-center justify-center px-6 py-16 text-center">
-        <h1 className="font-title text-display-xl leading-[1.05] text-fg md:text-display-2xl">
+        <h1 className="font-display text-display-xl font-bold leading-[1.05] text-fg md:text-display-2xl">
           <TextAnimate
             as="span"
             by="word"

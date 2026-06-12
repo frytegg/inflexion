@@ -1,28 +1,16 @@
 import type { Metadata } from 'next'
-import { Space_Grotesk, IBM_Plex_Mono, Black_Ops_One } from 'next/font/google'
+import { IBM_Plex_Mono } from 'next/font/google'
 import './globals.css'
 import '../components/menu/staggered-menu.css'
 import { Providers } from './providers'
 
-// Display (Space Grotesk) + Mono (IBM Plex Mono) self-hosted via next/font.
-// Body (General Sans) loads from the Fontshare CDN (<link> below).
-const display = Space_Grotesk({
-  subsets: ['latin'],
-  weight: ['500', '700'],
-  variable: '--font-display',
-  display: 'swap',
-})
+// Mono (IBM Plex Mono) self-hosted via next/font. Display (Clash Display) + body
+// (General Sans) load from the Fontshare CDN (<link> below); their families are named
+// in globals.css :root as --font-display / --font-sans.
 const mono = IBM_Plex_Mono({
   subsets: ['latin'],
   weight: ['400', '500', '600'],
   variable: '--font-mono',
-  display: 'swap',
-})
-// Title display face (Black Ops One) — used for the hero headline.
-const title = Black_Ops_One({
-  subsets: ['latin'],
-  weight: ['400'],
-  variable: '--font-title',
   display: 'swap',
 })
 
@@ -34,15 +22,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html
-      lang="en"
-      className={`${display.variable} ${mono.variable} ${title.variable}`}
-      suppressHydrationWarning
-    >
+    <html lang="en" className={mono.variable} suppressHydrationWarning>
       <head>
         <link
           rel="stylesheet"
-          href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap"
+          href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&f[]=clash-display@400,500,600,700&display=swap"
         />
       </head>
       <body>

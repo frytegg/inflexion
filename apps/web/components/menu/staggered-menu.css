@@ -291,9 +291,9 @@
 .sm-panel-item {
   position: relative;
   color: #f3f5f7;
-  /* Black Ops One (--font-title) — matches the hero headline. Single weight (400). */
-  font-family: var(--font-title), ui-sans-serif, system-ui, sans-serif;
-  font-weight: 400;
+  /* Clash Display (--font-display) — matches the hero + section headings. */
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
   font-size: 2.5rem;
   cursor: pointer;
   line-height: 1.05;

@@ -11,6 +11,7 @@
   color-scheme: dark;
   --ring: 20 184 166; /* teal — focus rings via rgb(var(--ring) / .55) */
   --font-sans: 'General Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Clash Display', ui-sans-serif, system-ui, sans-serif;
 }
 
 @layer base {
