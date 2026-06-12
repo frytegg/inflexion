@@ -11,7 +11,7 @@ export function Guarantee() {
           Two things, never confused.
         </h2>
         <div className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-2">
-          <Card variant="dots">
+          <Card variant="dots" className="border-accent-700/60">
             <div className="flex items-center gap-2 text-accent-400">
               <span className="text-h3 leading-none">✓</span>
               <span className="text-label uppercase">LPs are always paid</span>
@@ -21,7 +21,7 @@ export function Guarantee() {
               <span className="num text-fg">MaxIL</span> — enforced in code (invariant I1).
             </p>
           </Card>
-          <Card variant="dots" dotClassName="bg-warn-400">
+          <Card variant="dots" className="border-warn-500/40" dotClassName="bg-warn-400">
             <div className="flex items-center gap-2 text-warn-400">
               <span className="text-h3 leading-none">⚠</span>
               <span className="text-label uppercase">Capital is not guaranteed</span>
