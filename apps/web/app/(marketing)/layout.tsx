@@ -5,6 +5,7 @@ import {
   type StaggeredMenuSocialItem,
 } from '@/components/menu/staggered-menu'
 import { Footer } from '@/components/footer'
+import { ScrollProgress } from '@/components/magicui/scroll-progress'
 
 const MENU_ITEMS: StaggeredMenuItem[] = [
   { label: 'Home', ariaLabel: 'Home', link: '/' },
@@ -23,6 +24,7 @@ const SOCIALS: StaggeredMenuSocialItem[] = [
 export default function MarketingLayout({ children }: { children: ReactNode }) {
   return (
     <div className="relative flex min-h-dvh flex-col bg-canvas">
+      <ScrollProgress />
       <StaggeredMenu
         isFixed
         position="right"
@@ -34,7 +36,7 @@ export default function MarketingLayout({ children }: { children: ReactNode }) {
         accentColor="#14B8A6"
         menuButtonColor="#F3F5F7"
         openMenuButtonColor="#F3F5F7"
-        logoUrl="/inflexion-mark.svg"
+        logoUrl="/logo_inflexion.svg"
       />
       <main className="flex-1">{children}</main>
       <Footer />

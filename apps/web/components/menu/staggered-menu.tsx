@@ -399,20 +399,30 @@ export const StaggeredMenu = ({
         })()}
       </div>
       <header className="staggered-menu-header" aria-label="Main navigation header">
-        <div className="sm-logo" aria-label="Inflexion">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={logoUrl}
-            alt=""
-            aria-hidden="true"
-            className="sm-logo-img"
-            draggable={false}
-            width={110}
-            height={24}
-          />
-          <span className="select-none font-display text-h3 font-bold tracking-tight text-fg">
-            Inflexion<span className="text-accent">.</span>
-          </span>
+        <div className="flex items-center gap-4">
+          <div className="sm-logo" aria-label="Inflexion">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={logoUrl}
+              alt=""
+              aria-hidden="true"
+              className="sm-logo-img"
+              draggable={false}
+              width={110}
+              height={24}
+            />
+            <span className="select-none font-display text-h3 font-bold tracking-tight text-fg">
+              Inflexion<span className="text-accent">.</span>
+            </span>
+          </div>
+          <a
+            href="https://docs.inflexion.xyz"
+            target="_blank"
+            rel="noreferrer"
+            className="text-body-sm text-fg-tertiary transition-colors duration-fast hover:text-fg"
+          >
+            Docs
+          </a>
         </div>
         <button
           ref={toggleBtnRef}
