@@ -333,7 +333,8 @@ export default function FloatingLines({
     camera.position.z = 1
 
     const renderer = new WebGLRenderer({ antialias: true, alpha: false })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    // Cap DPR — a full-viewport animated shader at 2x is needlessly heavy for a bg.
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
     renderer.domElement.style.width = '100%'
     renderer.domElement.style.height = '100%'
     container.appendChild(renderer.domElement)

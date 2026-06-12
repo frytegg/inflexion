@@ -6,12 +6,12 @@ export function Hero() {
   return (
     <section className="relative overflow-hidden">
       <FloatingLinesBg />
-      <div className="relative z-10 mx-auto flex min-h-[88vh] max-w-3xl flex-col items-center justify-center px-6 py-24 text-center">
+      <div className="relative z-10 mx-auto flex min-h-dvh max-w-3xl flex-col items-center justify-center px-6 py-16 text-center">
         <h1 className="font-title text-display-xl leading-[1.05] text-fg md:text-display-2xl">
-          <TextAnimate as="span" by="word" animation="blurInUp" className="block">
+          <TextAnimate as="span" by="word" animation="slideUp" className="block">
             Hedge in-range
           </TextAnimate>
-          <TextAnimate as="span" by="word" animation="blurInUp" delay={0.15} className="block">
+          <TextAnimate as="span" by="word" animation="slideUp" delay={0.15} className="block">
             impermanent loss.
           </TextAnimate>
         </h1>
