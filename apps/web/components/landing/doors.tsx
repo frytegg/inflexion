@@ -45,10 +45,7 @@ export function Doors() {
       <div className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-3">
         {DOORS.map((d) => (
           <Link key={d.href} href={d.href} className="group block">
-            <Card
-              variant="dots"
-              className="transition-colors duration-base group-hover:border-accent-700"
-            >
+            <Card variant="dots">
               <div className="text-label uppercase text-fg-tertiary">{d.role}</div>
               <h3 className="mt-2 font-display text-h2 font-bold text-fg">{d.title}</h3>
               <p className="mt-2 text-body text-fg-secondary">{d.body}</p>

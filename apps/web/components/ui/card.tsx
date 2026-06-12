@@ -19,7 +19,7 @@ export type CardVariant =
 // a plain lookup merged through `cn` (twMerge resolves any overrides passed via className).
 const cardVariants: Record<CardVariant, string> = {
   default: 'rounded-lg border border-line bg-raised',
-  dots: 'relative mx-auto w-full rounded-lg border border-dashed border-line px-4 sm:px-6 md:px-8',
+  dots: 'relative mx-auto w-full px-4 sm:px-6 md:px-8',
   gradient: 'relative mx-auto w-full px-4 sm:px-6 md:px-8',
   plus: 'relative border border-dashed border-line-strong',
   neubrutalism:
@@ -61,23 +61,17 @@ const Card = React.forwardRef<HTMLDivElement, CardProps>(
     )
 
     if (variant === 'dots') {
-      const dot = cn(
-        'my-4 h-1 w-1 rounded-full bg-accent-400 outline outline-8 outline-canvas sm:my-6 md:my-8',
-        dotClassName,
-      )
+      // Just the four corner nodes — the framing rails/borders are intentionally gone.
+      const dot = cn('my-4 h-1 w-1 rounded-full bg-accent-400 sm:my-6 md:my-8', dotClassName)
       return (
         <div ref={ref} className={cn(cardVariants.dots, className)} {...props}>
-          <div className="absolute left-0 top-4 -z-0 h-px w-full bg-line-strong sm:top-6 md:top-8" />
-          <div className="absolute bottom-4 left-0 z-0 h-px w-full bg-line-strong sm:bottom-6 md:bottom-8" />
-          <div className="relative w-full border-x border-line-strong">
-            <div className="absolute z-0 grid h-full w-full items-center">
-              <section className="absolute z-0 grid h-full w-full grid-cols-2 place-content-between">
-                <div className={cn(dot, '-translate-x-[2.5px]')} />
-                <div className={cn(dot, 'translate-x-[2.5px] place-self-end')} />
-                <div className={cn(dot, '-translate-x-[2.5px]')} />
-                <div className={cn(dot, 'translate-x-[2.5px] place-self-end')} />
-              </section>
-            </div>
+          <div className="relative w-full">
+            <section className="absolute inset-0 z-0 grid grid-cols-2 place-content-between">
+              <div className={dot} />
+              <div className={cn(dot, 'place-self-end')} />
+              <div className={dot} />
+              <div className={cn(dot, 'place-self-end')} />
+            </section>
             <div className="relative z-20 mx-auto py-8">{content}</div>
           </div>
         </div>
