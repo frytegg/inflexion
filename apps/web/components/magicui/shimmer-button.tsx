@@ -22,11 +22,13 @@ export interface ShimmerButtonProps extends ComponentPropsWithoutRef<'button'> {
 export const ShimmerButton = React.forwardRef<HTMLButtonElement, ShimmerButtonProps>(
   (
     {
-      shimmerColor = '#ffffff',
+      // App-themed defaults: raised-navy surface + brand-teal shimmer (the MagicUI
+      // defaults are black/white). Override per-use via props.
+      shimmerColor = '#5EEAD4',
       shimmerSize = '0.05em',
       shimmerDuration = '3s',
       borderRadius = '100px',
-      background = 'rgba(0, 0, 0, 1)',
+      background = '#131C30',
       className,
       children,
       ...props

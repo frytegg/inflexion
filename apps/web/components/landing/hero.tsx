@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { motion } from 'framer-motion'
 import { FloatingLinesBg } from '@/components/landing/floating-lines-bg'
 import { TextAnimate } from '@/components/magicui/text-animate'
 import { ShimmerButton } from '@/components/magicui/shimmer-button'
@@ -45,18 +46,29 @@ export function Hero() {
             impermanent loss.
           </TextAnimate>
         </h1>
-        <p className="mt-5 max-w-xl text-body-lg text-fg-secondary">
-          Pay a fixed premium, transfer the in-range IL risk of your Uniswap v3 position. Paid your
-          realized IL at expiry —{' '}
-          <span className="text-fg">
-            capped at <span className="num text-warn-400">MaxIL</span>
-          </span>
-          .
-        </p>
-        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <ShimmerButton onClick={() => router.push('/protect')}>Protect a position</ShimmerButton>
-          <ShimmerButton onClick={() => router.push('/data')}>See the data</ShimmerButton>
-        </div>
+        {/* Subtitle + CTAs fade in together with the background — same trigger
+            (WebGL-ready) and the same 2.4s easeInOut as the FloatingLines fade. */}
+        <motion.div
+          className="flex flex-col items-center"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: started ? 1 : 0 }}
+          transition={{ duration: 2.4, ease: 'easeInOut' }}
+        >
+          <p className="mt-5 max-w-xl text-body-lg text-fg-secondary">
+            Pay a fixed premium, transfer the in-range IL risk of your Uniswap v3 position. Paid
+            your realized IL at expiry —{' '}
+            <span className="text-fg">
+              capped at <span className="num text-warn-400">MaxIL</span>
+            </span>
+            .
+          </p>
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+            <ShimmerButton onClick={() => router.push('/protect')}>
+              Protect a position
+            </ShimmerButton>
+            <ShimmerButton onClick={() => router.push('/data')}>See the data</ShimmerButton>
+          </div>
+        </motion.div>
       </div>
     </section>
   )
