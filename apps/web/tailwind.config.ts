@@ -84,6 +84,25 @@ const config: Config = {
         standard: 'cubic-bezier(.4,0,.2,1)',
       },
       transitionDuration: { instant: '100ms', fast: '160ms', base: '220ms', slow: '320ms' },
+      // MagicUI ShimmerButton animations (v4 ships these via @theme; v3 keeps them here).
+      // The keyframes use `var(--speed)` / container units set on the button itself.
+      keyframes: {
+        'shimmer-slide': {
+          to: { transform: 'translate(calc(100cqw - 100%), 0)' },
+        },
+        'spin-around': {
+          '0%': { transform: 'translateZ(0) rotate(0deg)' },
+          '15%': { transform: 'translateZ(0) rotate(90deg)' },
+          '35%': { transform: 'translateZ(0) rotate(90deg)' },
+          '65%': { transform: 'translateZ(0) rotate(270deg)' },
+          '85%': { transform: 'translateZ(0) rotate(270deg)' },
+          '100%': { transform: 'translateZ(0) rotate(360deg)' },
+        },
+      },
+      animation: {
+        'shimmer-slide': 'shimmer-slide var(--speed) ease-in-out infinite alternate',
+        'spin-around': 'spin-around calc(var(--speed) * 2) infinite linear',
+      },
     },
   },
   plugins: [],

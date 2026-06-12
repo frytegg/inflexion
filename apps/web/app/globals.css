@@ -53,3 +53,17 @@
     }
   }
 }
+
+@layer components {
+  /* MagicUI ShimmerButton spark. The conic-gradient lives here (not a Tailwind
+     arbitrary value) so the calc() keeps valid whitespace. The --spread / --shimmer-color
+     vars are set inline on the button and inherited down to this element. */
+  .shimmer-spark {
+    background: conic-gradient(
+      from calc(270deg - (var(--spread) * 0.5)),
+      transparent 0,
+      var(--shimmer-color) var(--spread),
+      transparent var(--spread)
+    );
+  }
+}

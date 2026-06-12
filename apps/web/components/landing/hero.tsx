@@ -1,11 +1,13 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { FloatingLinesBg } from '@/components/landing/floating-lines-bg'
 import { TextAnimate } from '@/components/magicui/text-animate'
+import { ShimmerButton } from '@/components/magicui/shimmer-button'
 
 export function Hero() {
+  const router = useRouter()
   // Fire the title + the background fade at the SAME moment — when WebGL is ready
   // (so neither janks the other). A fallback guarantees the headline never waits on
   // WebGL if it's slow or unsupported.
@@ -52,22 +54,25 @@ export function Hero() {
           .
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Link
-            href="/protect"
-            className="rounded-lg bg-accent px-5 py-3 font-medium text-accent-fg shadow-glow transition-colors duration-fast hover:bg-accent-600"
+          <ShimmerButton
+            onClick={() => router.push('/protect')}
+            background="#0E1525"
+            shimmerColor="#5EEAD4"
+            borderRadius="12px"
+            className="font-medium shadow-glow"
           >
             Protect a position
-          </Link>
-          <Link
-            href="/data"
-            className="rounded-lg border border-line-strong px-5 py-3 font-medium text-fg transition-colors duration-fast hover:border-fg-tertiary"
+          </ShimmerButton>
+          <ShimmerButton
+            onClick={() => router.push('/data')}
+            background="#0E1525"
+            shimmerColor="#A9C4FF"
+            borderRadius="12px"
+            className="font-medium"
           >
             See the data
-          </Link>
+          </ShimmerButton>
         </div>
-        <p className="mt-6 text-body-sm text-fg-tertiary">
-          No bad debt under FULL · firm on-chain pricing · no last-look.
-        </p>
       </div>
     </section>
   )
