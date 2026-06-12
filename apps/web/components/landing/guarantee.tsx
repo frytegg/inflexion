@@ -1,3 +1,5 @@
+import { Card } from '@/components/ui/card'
+
 // The two-never-merged claims — the bridge from "how it works" to "what you do".
 // Visually distinct (teal/positive vs amber/caution); never blended.
 export function Guarantee() {
@@ -9,7 +11,7 @@ export function Guarantee() {
           Two things, never confused.
         </h2>
         <div className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div className="rounded-lg border border-accent-700 bg-raised p-6">
+          <Card variant="dots" className="border-accent-700/60">
             <div className="flex items-center gap-2 text-accent-400">
               <span className="text-h3 leading-none">✓</span>
               <span className="text-label uppercase">LPs are always paid</span>
@@ -18,8 +20,8 @@ export function Guarantee() {
               No bad debt in FULL mode. Your payout never exceeds the collateral, which equals{' '}
               <span className="num text-fg">MaxIL</span> — enforced in code (invariant I1).
             </p>
-          </div>
-          <div className="rounded-lg border border-warn-500/40 bg-raised p-6">
+          </Card>
+          <Card variant="dots" className="border-warn-500/40" dotClassName="bg-warn-400">
             <div className="flex items-center gap-2 text-warn-400">
               <span className="text-h3 leading-none">⚠</span>
               <span className="text-label uppercase">Capital is not guaranteed</span>
@@ -29,7 +31,7 @@ export function Guarantee() {
               <span className="num text-fg">MaxIL</span> per position. Junior is first-loss. This is
               real underwriting risk.
             </p>
-          </div>
+          </Card>
         </div>
       </div>
     </section>

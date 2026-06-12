@@ -16,6 +16,8 @@ const PILLARS: Array<{ n: string; title: string; body: string }> = [
   },
 ]
 
+import { Card } from '@/components/ui/card'
+
 export function Pillars() {
   return (
     <section className="mx-auto max-w-6xl px-6 py-16 md:py-24">
@@ -23,11 +25,11 @@ export function Pillars() {
       <h2 className="mt-3 font-display text-display-lg font-bold text-fg">Three pillars.</h2>
       <div className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-3">
         {PILLARS.map((p) => (
-          <div key={p.n} className="rounded-lg border border-line bg-raised p-6">
+          <Card key={p.n} variant="dots">
             <div className="num text-mono-sm text-accent-400">{p.n}</div>
             <h3 className="mt-3 font-display text-h3 font-medium text-fg">{p.title}</h3>
             <p className="mt-2 text-body text-fg-secondary">{p.body}</p>
-          </div>
+          </Card>
         ))}
       </div>
     </section>
