@@ -18,18 +18,17 @@ export function Guarantee() {
             </div>
             <p className="mt-3 text-body text-fg-secondary">
               No bad debt in FULL mode. Your payout never exceeds the collateral, which equals{' '}
-              <span className="num text-fg">MaxIL</span> — enforced in code (invariant I1).
+              <span className="num text-fg">MaxIL</span>.
             </p>
           </Card>
           <Card variant="dots" className="border-warn-500/40" dotClassName="bg-warn-400">
             <div className="flex items-center gap-2 text-warn-400">
-              <span className="text-h3 leading-none">⚠</span>
+              <span className="text-h3 leading-none">△</span>
               <span className="text-label uppercase">Capital is not guaranteed</span>
             </div>
             <p className="mt-3 text-body text-fg-secondary">
               Depositors and market makers absorb crash losses up to{' '}
-              <span className="num text-fg">MaxIL</span> per position. Junior is first-loss. This is
-              real underwriting risk.
+              <span className="num text-fg">MaxIL</span> per position. Junior is first-loss.
             </p>
           </Card>
         </div>
