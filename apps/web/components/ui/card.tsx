@@ -19,7 +19,7 @@ export type CardVariant =
 // a plain lookup merged through `cn` (twMerge resolves any overrides passed via className).
 const cardVariants: Record<CardVariant, string> = {
   default: 'rounded-lg border border-line bg-raised',
-  dots: 'relative mx-auto w-full rounded-lg border border-dashed border-line px-4 sm:px-6 md:px-8',
+  dots: 'relative mx-auto w-full rounded-lg px-4 sm:px-6 md:px-8',
   gradient: 'relative mx-auto w-full px-4 sm:px-6 md:px-8',
   plus: 'relative border border-dashed border-line-strong',
   neubrutalism:
