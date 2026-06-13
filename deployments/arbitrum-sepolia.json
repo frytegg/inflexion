@@ -72,7 +72,20 @@
       "poolFee": 500,
       "lpPositionTokenId": 3218,
       "marketId_fee500_7d": "0x67c4bee1ee037851fbe2a8ecfdd0b8ae3d358283e940750c268621f776479d69",
-      "smokeTestSwapId": 1
+      "smokeTestSwapId": 1,
+      "extraTiers": {
+        "_note": "0.30% + 1.00% demo pools + in-range LP NFTs, seeded 2026-06-13 via script/SeedExtraTiers.s.sol so all three fee tiers are populated in the Protect UI (which filters positions by their pool fee). Same dWETH/dUSDC pair on the REAL Uniswap v3 NPM (0x6b29..4d65); dWETH oracle-priced via Chainlink ETH/USD. Each pool was created + initialised at the live oracle price with the position centred ±600 ticks on the oracle tick (verified in-range: pool tick -202100 within each range).",
+        "fee3000": {
+          "pool": "0x40c2ec6ba82c8221245D3BAFC3862F4f05D5CB59",
+          "poolFee": 3000,
+          "lpPositionTokenId": 3283
+        },
+        "fee10000": {
+          "pool": "0xabFF8644200Ed302708e4d6e737406e9e766b522",
+          "poolFee": 10000,
+          "lpPositionTokenId": 3284
+        }
+      }
     },
     "lifecycle": {
       "_note": "LIVE create->settle lifecycle on the FRESH stack (2026-06-05), short (300s) fee-500 market 0xb8bbd684…, settled live (no time-warp) at the Chainlink round bracketing each expiry. All amounts in USD (dUSDC 6dec). The MM is a fresh demo signer (the prior MM key was unavailable on the home PC); it deposited 5,000 dUSDC into UnderwriterVault, signed the Path-B quote, and its own collateral paid the Path-B settlement.",

@@ -2,9 +2,8 @@
 
 Per-network contract address registries. Populated by `packages/contracts/script/Deploy.s.sol` runs.
 
-- `sepolia.json` — Arbitrum Sepolia testnet (active development)
-- `arbitrum.json` — Arbitrum One mainnet (post-hackathon)
-- `local.json` — local Nitro fork (regenerated each dev session)
+- `arbitrum-sepolia.json` — Arbitrum Sepolia testnet (live deployment)
+- `arbitrum-one.json` — Arbitrum One mainnet (post-hackathon)
 
 **Format:** a JSON object keyed by contract name, each entry holding
 `{ address, deployer, txHash, blockNumber, deployedAt }`.
