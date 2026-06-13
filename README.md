@@ -13,7 +13,7 @@ Inflexion is the first trustless, fully-collateralized on-chain market for Unisw
 
 |                    |                                                                                    |
 | ------------------ | ---------------------------------------------------------------------------------- |
-| Documentation      | Mintlify (Vercel) — _coming_                                                       |
+| Documentation      | https://inflexion.mintlify.app                                                     |
 | App                | Vercel — _coming_                                                                  |
 | REST API + Swagger | https://inflexion-backend.onrender.com/docs                                        |
 | Subgraph           | https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest |

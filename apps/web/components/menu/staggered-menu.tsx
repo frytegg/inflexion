@@ -416,7 +416,7 @@ export const StaggeredMenu = ({
             </span>
           </div>
           <a
-            href="https://docs.inflexion.xyz"
+            href="https://inflexion.mintlify.app"
             target="_blank"
             rel="noreferrer"
             className="text-body-sm text-fg-tertiary transition-colors duration-fast hover:text-fg"
