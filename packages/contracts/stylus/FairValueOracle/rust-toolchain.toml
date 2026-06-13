@@ -4,7 +4,7 @@
 # pins 1.88 for cargo-stylus 0.10.x. Bump alongside the cargo-stylus version.
 #
 # Build environment: WSL2 / Linux only (Windows MSVC cannot link stylus-proc;
-# alloy-primitives references the VM hostio `native_keccak256`). See RUNBOOK.md.
+# alloy-primitives references the VM hostio `native_keccak256`). See packages/contracts/README.md.
 
 [toolchain]
 channel = "1.88.0"

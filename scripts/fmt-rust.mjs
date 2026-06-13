@@ -16,7 +16,7 @@ const probe = spawnSync('cargo', ['--version'], {
   shell: process.platform === 'win32',
 })
 if (probe.status !== 0) {
-  console.log('fmt:rust: cargo not installed — skipping (install rustup; see RUNBOOK.md)')
+  console.log('fmt:rust: cargo not installed — skipping (install rustup)')
   process.exit(0)
 }
 

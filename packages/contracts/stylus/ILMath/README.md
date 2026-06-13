@@ -7,8 +7,7 @@ Stylus crate was built, host-tested, deployed, cached, and benchmarked — and
 below it is **cached ~20.2k vs Solidity ~4.8k (~4.18×)**. IL math is a tiny kernel,
 so the Stylus per-call floor dominates and can't be amortized — the opposite of the
 `FairValueOracle`, whose heavy transcendental work amortizes the floor (there Stylus
-reaches gas parity and ships). See `ROADMAP.md` P2.12 and
-`docs/STYLUS_FAIRVALUE_BENCHMARK.md`.
+reaches gas parity and ships). See `docs/STYLUS_FAIRVALUE_BENCHMARK.md`.
 
 **Optimization pass (2026-06-04) — DONE.** Applied the FVO waterfall levers that
 apply to a pure-integer kernel: a **U256 fast-path in `mul_div`** (the common case —

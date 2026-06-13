@@ -24,5 +24,3 @@ packages/subgraph/subgraph.yaml
 packages/subgraph/src/generated-addresses.ts
 # Mintlify docs site — MDX (JSX + LaTeX) is not prettier-compatible; Mintlify owns formatting.
 apps/docs
-# Internal docs knowledge base (source dumps from the docs build).
-docs/_kb

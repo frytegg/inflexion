@@ -8,7 +8,7 @@
 #
 # Build environment: WSL2 / Linux only. Windows MSVC cannot link stylus-proc
 # (alloy-primitives references the VM hostio `native_keccak256`; ld accepts
-# the unresolved symbol, link.exe rejects it). See RUNBOOK.md → Stylus.
+# the unresolved symbol, link.exe rejects it). See packages/contracts/README.md.
 
 [toolchain]
 channel = "1.88.0"

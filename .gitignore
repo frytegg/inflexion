@@ -32,6 +32,8 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 .python-version
+# Generated quant reference fixtures (reproducible output of the _scratch_fairvalue_* scripts)
+quant/_fairvalue_hp_fixtures.txt
 
 # --- Env / secrets ---
 .env
@@ -52,3 +54,6 @@ Thumbs.db
 .claude/
 CLAUDE.local.md
 .claude-prompt
+
+# --- Pitch / deck (build artifacts) ---
+pitch/

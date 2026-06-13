@@ -5,9 +5,8 @@ Marketing landing (`inflexion.xyz`) + the dApp (`app.inflexion.xyz`) in one app 
 `(marketing)` / `(app)` route groups + domain middleware. All pages are wired to
 **real on-chain reads/writes** through `@inflexion/sdk`.
 
-> Architecture, page map, and design tokens: `FRONTEND_PLAN.md`, `DESIGN_TOKENS.md`.
-> The exact SDK/engine/API wiring: `INTEGRATION_MAP.md`. (Design is functional-first;
-> a visual pass refines it.)
+> Wired to the protocol through `@inflexion/sdk`. Protocol documentation lives in
+> `apps/docs` (Mintlify).
 
 ## Pages
 
@@ -26,7 +25,8 @@ Marketing landing (`inflexion.xyz`) + the dApp (`app.inflexion.xyz`) in one app 
 ```bash
 # from the repo root
 pnpm install
-cp apps/web/.env.example apps/web/.env.local   # set NEXT_PUBLIC_RPC_URL + WalletConnect id
+# create apps/web/.env.local with the NEXT_PUBLIC_* block from the root .env.example
+# (set NEXT_PUBLIC_RPC_URL + NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID)
 
 # 1) the dApp (http://localhost:3000)
 pnpm --filter @inflexion/web dev
@@ -50,9 +50,34 @@ connected wallet.
 - **Path B:** needs the engine running + `NEXT_PUBLIC_ENGINE_URL` set (the MM signs
   a quote on `/underwrite`, the engine relays it, the LP's `createSwapRouted` picks
   the cheaper of pool vs MM).
-- **Pending the subgraph (task #33):** per-market history/volume, NAV history, the
-  time-series moat signals, precise MM fill attribution. These render an honest
-  "pending" state, never an error.
+- **History (via the REST API):** per-market history/volume, NAV history, the
+  time-series moat signals, and precise MM fill attribution are served from the
+  subgraph through the public API (`NEXT_PUBLIC_API_URL`). When it is unset these
+  render an honest "pending" state, never an error.
+
+## Deploy (Vercel)
+
+The app deploys to Vercel from this monorepo. `vercel.json` (in this folder) sets the
+framework and a build command that compiles the workspace deps (`@inflexion/engine` →
+`@inflexion/sdk`) before `next build`.
+
+**Vercel project settings:**
+
+- **Root Directory:** `apps/web`
+- Install + build commands come from `vercel.json` — no dashboard override needed.
+
+**Environment variables** (set for Production + Preview — all public, no secrets):
+
+| Variable                               | Value                                                                                                           |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_RPC_URL`                  | an Arbitrum Sepolia RPC (`https://sepolia-rollup.arbitrum.io/rpc`, or a dedicated Alchemy/Infura URL for demos) |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | a WalletConnect / Reown project id (free, from cloud.reown.com)                                                 |
+| `NEXT_PUBLIC_API_URL`                  | `https://inflexion-backend.onrender.com`                                                                        |
+| `NEXT_PUBLIC_ENGINE_URL`               | `https://inflexion-backend.onrender.com/engine`                                                                 |
+
+On a `*.vercel.app` host the domain middleware passes through, so the full app
+(marketing + every route) is reachable. The split to `inflexion.xyz` /
+`app.inflexion.xyz` activates only when those domains are attached.
 
 ## Notes
 

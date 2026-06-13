@@ -60,7 +60,7 @@ This is the single most important section for execution. Build strictly in this 
 
 ### Launch scope (explicit)
 
-**ONE pool, ETH/USDC, all 9 marketIds (3 fee tiers × 3 durations 7/30/90d), FULL mode only.** The `ConvexityVault` is **dual-tranche from day one (LAUNCH, not roadmap)** — **SENIOR** (protected, base yield + a small premium slice) and **JUNIOR** (first-loss, high APY) coexist with structural senior protection `totalLocked ≤ juniorAssets` (P3.1/P3.1b). If everything works and time remains: add BTC/USDC, then PARTIAL. The settlement core, MaxIL math, and invariants I1–I9 are already built and tested (see §17 and ROADMAP.md baseline).
+**ONE pool, ETH/USDC, all 9 marketIds (3 fee tiers × 3 durations 7/30/90d), FULL mode only.** The `ConvexityVault` is **dual-tranche from day one (LAUNCH, not roadmap)** — **SENIOR** (protected, base yield + a small premium slice) and **JUNIOR** (first-loss, high APY) coexist with structural senior protection `totalLocked ≤ juniorAssets` (P3.1/P3.1b). If everything works and time remains: add BTC/USDC, then PARTIAL. The settlement core, MaxIL math, and invariants I1–I9 are already built and tested (see §17).
 
 ### Phase spine (P1 → P5)
 
@@ -421,7 +421,7 @@ Settlement is **non-custodial**, so the engine's power (Path B only) is strictly
 
 Do **not** build an exchange-grade matcher. Build a **thin relayer** (`@inflexion/engine`, BUILT — P4.c): MM bots push signed quotes over WebSocket/REST → in-memory (Redis) store keyed by market → best-per-quote maintained → `/quote?tokenId&duration` returns the ranked best (compared against the on-chain pool price) + signed payload. Because the demo MM is a bot we control, this is ~a weekend, and it demos beautifully (watch the pool quote always-on, then one MM undercut as we move price/vol; the LP always sees the live cheapest price). **Do not seed a fake multi-MM book** — a single real MM demonstrates Path-B competition; the cvAMM removes cold-start by always quoting.
 
-**Day-one telemetry (do NOT skip — retroactively unreconstructable).** The engine logs every `/quote` request and WS update to append-only telemetry sinks (`DEMAND_LOG` / `COMPETITION_LOG`, `packages/engine/src/telemetry.ts`) **from the first interaction** — critical for the moat's dynamic/latent halves (Signals 2 & 4, §12). **Set both env vars on the engine NOW, before the redeploy** — anything not captured before the on-chain `SwapPriced`/`QuoteFilled` events go live is lost forever (`docs/REDEPLOY_CHECKLIST.md`, `docs/ENGINE_TELEMETRY.md`).
+**Day-one telemetry (do NOT skip — retroactively unreconstructable).** The engine logs every `/quote` request and WS update to append-only telemetry sinks (`DEMAND_LOG` / `COMPETITION_LOG`, `packages/engine/src/telemetry.ts`) **from the first interaction** — critical for the moat's dynamic/latent halves (Signals 2 & 4, §12). **Set both env vars on the engine NOW, before the redeploy** — anything not captured before the on-chain `SwapPriced`/`QuoteFilled` events go live is lost forever (`docs/ENGINE_TELEMETRY.md`).
 
 ### 4.7 EIP-1271 vault-signer (vNEXT — new; stated change to verification)
 
@@ -893,7 +893,7 @@ getConvexityDepth(market)
 
 ## 12. The Data Surfaces — The Moat
 
-_(v4.0: the moat is reframed as **FIVE BEHAVIORAL SIGNALS**, not three surfaces. The circular "invert `fairRate` for an implied-vol surface" claim is **DROPPED** — `charged/MaxIL = fairRate(σ_ref)·(1+load)` only recovers our own `σ_ref` + dealer load, not a market IV. The signals are actor-driven and non-circular. Honest framing: we sell the **architecture** of the moat — structures from day one, dynamics mature with volume. Some signals depend on the redeploy-pending events `SwapPriced`/`QuoteFilled` — the on-chain moat dataset BEGINS at the single redeploy (`docs/REDEPLOY_CHECKLIST.md`).)_
+_(v4.0: the moat is reframed as **FIVE BEHAVIORAL SIGNALS**, not three surfaces. The circular "invert `fairRate` for an implied-vol surface" claim is **DROPPED** — `charged/MaxIL = fairRate(σ_ref)·(1+load)` only recovers our own `σ_ref` + dealer load, not a market IV. The signals are actor-driven and non-circular. Honest framing: we sell the **architecture** of the moat — structures from day one, dynamics mature with volume. Some signals depend on the redeploy-pending events `SwapPriced`/`QuoteFilled` — the on-chain moat dataset BEGINS at the single redeploy.)_
 
 The flow is a byproduct that is itself a product — **the first view into the microstructure of the DeFi LP volatility-risk premium**. Built passively from day one; exposed as free public APIs (The Graph + REST). Revenue is protocol fees; **data is the moat, not a paywall.**
 
@@ -984,7 +984,7 @@ Interfaces: IILMath, IPositionManager, ICollateralModel, ISettlementModule, IYie
 
 Key Arbitrum One addresses: NonfungiblePositionManager `0xC36442b4a4522E871399CD717aBDD847Ab11FE88`; v3 Factory `0x1F98431c8aD98523631AE4a59f267346ea31F984`; WETH `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1`; native USDC `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`. (EIP-1271 via OZ `SignatureChecker` and the ERC-4626 base are **already vendored** in `lib/` — no new external dependency.) The live Arbitrum Sepolia registry is `deployments/arbitrum-sepolia.json`.
 
-**REDEPLOY-PENDING (coded on `main`, NOT live in the deployed bytecode).** Three additions are coded but await a **single redeploy** (`docs/REDEPLOY_CHECKLIST.md`); the live demo runs the pre-event stack:
+**REDEPLOY-PENDING (coded on `main`, NOT live in the deployed bytecode).** Three additions are coded but await a **single redeploy**; the live demo runs the pre-event stack:
 
 - `QuoteFilled(uint256 indexed swapId, address indexed mm, bytes32 indexed quoteId, uint256 nonce, uint16 loadBps)` — emitted in `_executePathB` (MM fill attribution; today `isQuoteFilled` is `precision:'coarse'`).
 - `SwapPriced(uint256 indexed swapId, uint8 path, uint256 fairPremium, uint256 baseLoadWad, uint256 utilSkewWad, uint256 dispSkewWad, uint256 totalLoadWad, uint256 sigmaRefWad, bool cappedAtMaxIL)` — emitted on all create paths (the clearing-load data moat, signals 1/2/3/5).
@@ -1116,7 +1116,7 @@ The protocol is sophisticated; docs are how non-finance people _get it_ and how 
 
 _(v4.0: the cvAMM always-on quote (Path A) is the headline that removes cold-start; **do NOT seed a fake MM book** — a SINGLE real MM plugs in to demo Path-B competition. The demo-oracle adapter and seconds-scale durations stay; the `FairValueOracle`/`VolOracle`/`ConvexityVault` are in the demo deploy.)_
 
-**LIVE on Arbitrum Sepolia (full-fresh redeploy 2026-06-05; registry `deployments/arbitrum-sepolia.json`).** Stylus `FairValueOracle` `0x98a6…d52c` (PRODUCTION), `InflexionCore` `0xC198…4848`, dual-tranche `ConvexityVault` `0xDE2f…C30d`, `VolOracle` `0xfdEa…5Ed9`, Solidity `ILMath` `0x7e90…7bd2`, plus `OracleManager` / `UnderwriterVault` / `ILVault` and libs `TickMath` / `CvammPricing` / `SwapMath` / `QuoteVerification`. **This fresh stack lands the redeploy** (the `SwapPriced`/`QuoteFilled` moat events + `CvammPricing.loadComponents` + the `InflexionCore` EIP-170 size-pass — §13, `docs/REDEPLOY_CHECKLIST.md`) before the frontend ships (P4.c/P5). The full **create → settle lifecycle** (Path A and Path B routing) is **pending re-creation** on the fresh stack; the prior 2026-06-03 run is kept for reference only — swap #2 Path-A cvAMM (premium $28.67 ≈ 2.5% of MaxIL $1,147.75, settled payout $1.83); swap #3 `createSwapRouted` picked the MM (Path B, `loadBps` 500) because it strictly beat the pool, locking the MM's own collateral.
+**LIVE on Arbitrum Sepolia (full-fresh redeploy 2026-06-05; registry `deployments/arbitrum-sepolia.json`).** Stylus `FairValueOracle` `0x98a6…d52c` (PRODUCTION), `InflexionCore` `0xC198…4848`, dual-tranche `ConvexityVault` `0xDE2f…C30d`, `VolOracle` `0xfdEa…5Ed9`, Solidity `ILMath` `0x7e90…7bd2`, plus `OracleManager` / `UnderwriterVault` / `ILVault` and libs `TickMath` / `CvammPricing` / `SwapMath` / `QuoteVerification`. **This fresh stack lands the redeploy** (the `SwapPriced`/`QuoteFilled` moat events + `CvammPricing.loadComponents` + the `InflexionCore` EIP-170 size-pass — §13) before the frontend ships (P4.c/P5). The full **create → settle lifecycle** (Path A and Path B routing) is **pending re-creation** on the fresh stack; the prior 2026-06-03 run is kept for reference only — swap #2 Path-A cvAMM (premium $28.67 ≈ 2.5% of MaxIL $1,147.75, settled payout $1.83); swap #3 `createSwapRouted` picked the MM (Path B, `loadBps` 500) because it strictly beat the pool, locking the MM's own collateral.
 
 **The hard problem:** real expiries are 7–90 days; a demo is 3 minutes. Solve it with a **demo deployment** that compresses time and controls price, _without_ faking the trust story.
 
@@ -1195,9 +1195,9 @@ _"The hard part is depositor viability — a single-pair vol seller is intrinsic
 
 ## 17. Build Roadmap (pointer)
 
-_(vNEXT: this in-spec mirror is replaced by a pointer to ROADMAP.md, the task source of truth, now organized P1→P5. The settlement-core / I1–I9 work below is DONE and untouched.)_
+_(vNEXT: this in-spec mirror is the build sequence, organized P1→P5. The settlement-core / I1–I9 work below is DONE and untouched.)_
 
-**ROADMAP.md is the single task source of truth.** The build is sequenced **P1 → P5**:
+The build is sequenced **P1 → P5**:
 
 - **P1** — single-asset cvAMM quant (gates every pricing primitive; outputs to `quant/params.cvamm.schema.json`).
 - **P2** — `VolOracle` (σ-EWMA) + `FairValueOracle` (on-chain FairPremium), on the shipped `OracleManager`.

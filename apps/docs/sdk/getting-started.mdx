@@ -84,6 +84,10 @@ The whole config is optional. With **no args at all** the SDK still constructs �
   Base URL of the off-chain [matching engine](/integrate/engine). Used for Path-B MM quotes and the `previewPremium` latent-demand telemetry ping. Only the `lp` surface receives it.
 </ParamField>
 
+<ParamField path="apiBaseUrl" type="string">
+  Base URL of the public [REST API](/integrate/api-overview) (the hosted backend). Passed to the `data` surface so the history/aggregate methods (`getNavHistory`, `getLoadSurfaceHistory`, `getQuoteCompetition`, `getDemandRequests`, `getNetGamma`) fetch live from the subgraph; **absent ⇒ those surfaces degrade to a typed `ApiPending`** (the live RPC surfaces are unaffected). The app reads it from `NEXT_PUBLIC_API_URL`.
+</ParamField>
+
 <ParamField path="telemetryUrl" type="string">
   Override for the telemetry endpoint. Defaults to `${engineBaseUrl}/telemetry/preview`.
 </ParamField>
@@ -204,6 +208,7 @@ Only the surfaces that need an extra config field receive one: `lp` gets `engine
             ...(walletClient ? { walletClient } : {}),   // omit → writes throw a clear error on call
             chainId: 421614,                             // EIP-712 chainId for quote signing
             engineBaseUrl: process.env.NEXT_PUBLIC_ENGINE_URL,
+            apiBaseUrl: process.env.NEXT_PUBLIC_API_URL, // history surfaces (data.*)
             fetchImpl: fetch,
           }),
         [publicClient, walletClient, address],
@@ -272,6 +277,7 @@ The factory resolves these when the corresponding config field is absent. Set th
 | Signer key | `privateKey` | `DEPLOYER_PRIVATE_KEY` → `PRIVATE_KEY` | write client `undefined` → writes degrade |
 | Path-B engine | `engineBaseUrl` | _(no implicit env in the SDK — app uses `NEXT_PUBLIC_ENGINE_URL`)_ | Path B silently absent; `previewPremium` routes Path A only |
 | Telemetry | `telemetryUrl` | _(defaults to `${engineBaseUrl}/telemetry/preview`)_ | fire-and-forget ping is skipped |
+| History / aggregates | `apiBaseUrl` | _(no implicit env in the SDK — app uses `NEXT_PUBLIC_API_URL`)_ | `data.*` history methods return `ApiPending`; live RPC surfaces unaffected |
 
 <Note>
   **In the browser, only `NEXT_PUBLIC_`-prefixed env vars are visible.** The app reads the engine URL from `NEXT_PUBLIC_ENGINE_URL` and passes it as `engineBaseUrl` (see [mode (a)](#mode-a-browser-wagmi-inject-pre-built-clients)). The bare `ARBITRUM_SEPOLIA_RPC` / `*_PRIVATE_KEY` fallbacks are **server-side** conveniences — they never apply when you inject a `publicClient`/`walletClient` from wagmi.

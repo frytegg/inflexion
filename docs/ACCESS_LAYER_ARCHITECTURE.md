@@ -7,7 +7,7 @@ this document (LP / Depositor / MM / Data + Greeks/Hedge surfaces + the
 each section's "Build reconciliation" note for the deltas from the original design) and
 are CI-green offline (`graph codegen` typegen + `tsc` + `vitest`). They are **not yet
 deployed** — the subgraph manifest is regenerated and deployed, and the API
-`SUBGRAPH_URL` is pointed at it, at the single redeploy (`docs/REDEPLOY_CHECKLIST.md`).
+`SUBGRAPH_URL` is pointed at it.
 The frontend is a separate workstream.
 
 > **Build reconciliation (corrections applied while building the SDK — 2026-06).**
