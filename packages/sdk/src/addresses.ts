@@ -12,6 +12,9 @@ import deployment from '../../../deployments/arbitrum-sepolia.json' with { type:
 /** Arbitrum Sepolia chain id (the only network the live deployment targets). */
 export const CHAIN_ID = deployment.chainId as 421614
 
+/** The block the live stack was deployed at — the lower bound for event scans. */
+export const deployBlock = BigInt(deployment.deployment._deployBlock)
+
 /** Checksum a raw deployment string into a viem `Address`. */
 function addr(a: string): Address {
   return getAddress(a)

@@ -54,7 +54,7 @@ import {
   oracleManagerAbi,
   volOracleAbi,
 } from './abis.js'
-import { chainlink, core, libs, npm as npmAddr, stylus, tokens } from './addresses.js'
+import { chainlink, core, deployBlock, libs, npm as npmAddr, stylus, tokens } from './addresses.js'
 import { decodeMarketConfig, decodeSwapRecord, type SwapRecord } from './decode.js'
 import { computeMarketId, resolveMarket, type ResolvedMarket } from './resolveMarket.js'
 import * as cvamm from './math.js'
@@ -67,6 +67,7 @@ import type {
   PreviewResult,
   Priceable,
   ProtectionStatus,
+  Settlement,
 } from './types.js'
 import type { SignedQuote } from './quote.js'
 
@@ -804,6 +805,12 @@ export class LpClient {
       lp: swap.lp,
       mm: swap.mm,
       isPathA,
+      marketId: resolved.marketId,
+      tokenId: swap.tokenId,
+      token0: resolved.token0,
+      token1: resolved.token1,
+      fee: resolved.fee,
+      durationSeconds: resolved.durationSeconds,
       premiumPaid: swap.premium,
       maxIL: swap.maxIL,
       V0: swap.V0,
@@ -813,6 +820,39 @@ export class LpClient {
       status: swap.status,
       ilToDate,
       noBadDebtFull: true,
+    }
+  }
+
+  /**
+   * Final settlement outcome of a SETTLED swap, read from the `SwapSettled` event
+   * (the swap record does not persist the realized IL / payout). Best-effort:
+   * returns `undefined` if the log can't be fetched (getLogs range limits) or the
+   * swap was never settled.
+   */
+  async getSettlement(swapId: bigint): Promise<Settlement | undefined> {
+    try {
+      const logs = await this.publicClient.getContractEvents({
+        address: core.inflexionCore,
+        abi: inflexionCoreAbi,
+        eventName: 'SwapSettled',
+        args: { swapId },
+        fromBlock: deployBlock,
+        toBlock: 'latest',
+      })
+      const ev = logs[logs.length - 1]
+      if (ev === undefined) return undefined
+      const a = ev.args as { realisedIL?: bigint; payout?: bigint; settlementPrice?: bigint }
+      if (a.realisedIL === undefined || a.payout === undefined || a.settlementPrice === undefined)
+        return undefined
+      return {
+        swapId,
+        realisedIL: a.realisedIL,
+        payout: a.payout,
+        settlementPrice: a.settlementPrice,
+        capHit: a.payout < a.realisedIL,
+      }
+    } catch {
+      return undefined
     }
   }
 

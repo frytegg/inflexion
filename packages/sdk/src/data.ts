@@ -7,11 +7,13 @@
  *
  *   (1) HISTORY / AGGREGATE  → served by the SUBGRAPH, consumed via the public
  *       cached API. These are NOT live RPC reads — the contracts store *current*
- *       state only and emit events for the rest. The subgraph + API do NOT exist
- *       yet (empty stubs — the single real blocker, §8.1). So every method here
- *       that needs history returns a typed `Degraded<T>` whose `reason` is
- *       `'no-history-source'` and whose `endpoint` names the FUTURE API route it
- *       will call once wired. It NEVER throws and NEVER fabricates data.
+ *       state only and emit events for the rest. The subgraph + API are DEPLOYED
+ *       (hosted backend; subgraph indexed from the redeploy block). So each method
+ *       here GETs `${apiBaseUrl}${endpoint}?${query}` and parses the typed body
+ *       when an `apiBaseUrl` is configured; with no `apiBaseUrl`, a non-OK
+ *       response, or an unreachable API it degrades to a typed `ApiPending`
+ *       (`reason:'no-history-source'`, `endpoint`, `query`). It NEVER throws and
+ *       NEVER fabricates data.
  *
  *   (2) THE ONE LIVE EXCEPTION — the CURRENT pool LOAD SURFACE. This is a live,
  *       uncached read: exactly the same multicall the MM `getMarketPricing` does
@@ -28,9 +30,9 @@
  * degradation until the API ships, at which point the same degraded path becomes
  * the tested fallback when the API/subgraph is unreachable or stale.
  *
- * GRACEFUL DEGRADATION is a first-class property here: an absent API, a not-yet-
- * indexed rich event (`QuoteFilled`/`SwapPriced` are LIVE on-chain since the
- * 2026-06-05 deploy but the subgraph that indexes them is not yet deployed), a
+ * GRACEFUL DEGRADATION is a first-class property here: an unwired/unreachable API
+ * (the rich events `QuoteFilled`/`SwapPriced` are LIVE on-chain since the
+ * 2026-06-05 deploy and the subgraph indexes them; the hosted API serves them), a
  * reverting oracle on one market in the live surface — all return typed degraded
  * results, never throw.
  *
@@ -88,6 +90,154 @@ export interface ApiPending {
 
 /** A history/aggregate result: the rich `T` once the API is wired, else `ApiPending`. */
 export type ApiBacked<T> = ({ available: true } & T) | ApiPending
+
+// ─── NAV history (the one history surface wired to the public API today) ──────
+
+/** One per-tranche NAV time bucket — a subgraph `PoolDay/HourSnapshot`, normalised
+ *  to bigint on-chain units. Claim (B): these are depositor-risk figures (junior is
+ *  first-loss; senior is systemic-tail exposed), NEVER the LP payout claim (A). */
+export interface NavSnapshot {
+  /** Unix seconds at the start of the bucket (day or hour). */
+  bucketStart: number
+  /** Senior tranche NAV at the close of the bucket (USDC raw, 6-dec). */
+  seniorAssets: bigint
+  /** Junior tranche NAV at the close of the bucket (USDC raw, 6-dec). */
+  juniorAssets: bigint
+  /** Collateral locked backing open swaps (USDC raw). */
+  totalLocked: bigint
+  /** Utilization = totalLocked / (senior+junior) (WAD). */
+  utilWad: bigint
+  /** Concentration / HHI of per-market locked coverage (WAD). */
+  concWad: bigint
+  /** Premium credited to the pool DURING the bucket (USDC raw). */
+  premiumAccrued: bigint
+  /** Settlement payouts paid to LPs DURING the bucket (USDC raw). */
+  payouts: bigint
+  /** Loss absorbed by the junior (first-loss) tranche DURING the bucket (USDC raw). */
+  juniorLoss: bigint
+  /** Loss absorbed by senior — only in a systemic tail — DURING the bucket (USDC raw). */
+  seniorLoss: bigint
+}
+
+/** Per-tranche NAV history (claim B): a `NavSnapshot[]` ordered oldest → newest. */
+export interface NavHistory {
+  /** Buckets ordered oldest → newest (ready to plot left-to-right). */
+  snapshots: NavSnapshot[]
+  /** The bucket size the series is in. */
+  bucket: '1d' | '1h'
+  /** Claim-(B) disclosure carried verbatim from the API (NEVER merged with claim A). */
+  disclosure?: string
+}
+
+// ─── The other four API-backed signal shapes (Signals 1/3, 2, 4, 5) ───────────
+
+/** One day-bucketed market load snapshot (subgraph `MarketStateSnapshot`). */
+export interface LoadSurfacePoint {
+  /** Unix seconds at the start of the day bucket. */
+  bucketStart: number
+  lockedByMarket: bigint
+  utilWad: bigint
+  concWad: bigint
+  sigmaRefWad: bigint
+  baseLoadWad: bigint
+  utilSkewWad: bigint
+  dispSkewWad: bigint
+  totalLoadWad: bigint
+  fillCount: number
+  v0Volume: bigint
+  pathBFills: number
+}
+
+/** Historical clearing-load surface for one market (PUB-1, Signals 1 & 3). */
+export interface LoadSurfaceHistory {
+  /** Buckets ordered oldest → newest. */
+  snapshots: LoadSurfacePoint[]
+  disclosure?: string
+}
+
+/** One aggregated quote-competition row per MM (Signal 2, dynamic half). */
+export interface QuoteCompetitionRow {
+  marketId: string
+  mm: string
+  quotes: number
+  accepted: number
+  rejected: number
+  minLoadBps: number
+  maxLoadBps: number
+  avgLoadBps: number
+  lastSeen: number
+}
+
+/** Pool-vs-MM quote competition (Signal 2). `enabled` = the engine COMPETITION_LOG sink is wired. */
+export interface QuoteCompetition {
+  competition: QuoteCompetitionRow[]
+  enabled: boolean
+  disclosure?: string
+}
+
+/** A realized (on-chain) geometry-demand bucket (Signal 4, realized half). */
+export interface RealizedDemandBucket {
+  id: string
+  widthBucket: string
+  distanceBucket: string
+  durationBucket: string
+  realizedFillCount: number
+  realizedV0: bigint
+  firstSeen: number
+  lastSeen: number
+}
+
+/** A latent (off-chain telemetry) demand bucket — priced-but-not-bought interest. */
+export interface LatentDemandBucket {
+  marketId: string
+  widthBucket: string
+  distanceBucket: string
+  durationBucket: string
+  count: number
+  previews: number
+  quoteRequests: number
+  firstSeen: number
+  lastSeen: number
+}
+
+/** Demand skew (Signal 4): on-chain realized fills + off-chain latent interest. */
+export interface DemandRequests {
+  /** On-chain realized fills per geometry bucket (empty if the subgraph half is unavailable). */
+  realized: RealizedDemandBucket[]
+  /** Whether the realized (subgraph) half resolved. */
+  realizedAvailable: boolean
+  /** Off-chain latent interest per bucket (engine telemetry). */
+  latent: LatentDemandBucket[]
+  /** Whether the latent telemetry sink (DEMAND_LOG) is wired. */
+  latentEnabled: boolean
+  disclosure?: string
+}
+
+/** One net-gamma time bucket (subgraph `NetGammaSnapshot`). */
+export interface NetGammaPoint {
+  bucketStart: number
+  activeSwapCount: number
+  totalV0: bigint
+  totalMaxIL: bigint
+  aggGammaWad: bigint
+  aggVegaWad: bigint
+  volumeWeightedLoadWad: bigint
+}
+
+/** The current protocol-wide active-swap aggregate (NetGamma `protocolState`). */
+export interface NetGammaState {
+  activeSwapCount: number
+  totalActiveV0: bigint
+  totalActiveMaxIL: bigint
+}
+
+/** Net convexity / gamma supply (Signal 5). */
+export interface NetGamma {
+  /** Buckets ordered oldest → newest. */
+  snapshots: NetGammaPoint[]
+  protocolState: NetGammaState
+  disclosure?: string
+}
 
 // ─── Live "current pool load surface" types (the ONE non-degraded method) ─────
 
@@ -166,6 +316,11 @@ export class DataClient {
       convexityVaultAddress?: Address
       fairValueOracleAddress?: Address
       volOracleAddress?: Address
+      /** Public REST API base URL (e.g. the hosted backend). Absent ⇒ history/
+       *  aggregate surfaces return the same typed `ApiPending` as before (graceful). */
+      apiBaseUrl?: string
+      /** Injected fetch (tests / non-browser). Defaults to global fetch when present. */
+      fetchImpl?: typeof fetch
     } = {},
   ) {}
 
@@ -180,6 +335,18 @@ export class DataClient {
   }
   private get vol(): Address {
     return this.opts.volOracleAddress ?? coreAddrs.volOracle
+  }
+  /** The configured API base (trailing slashes trimmed), or undefined if unwired. */
+  private get apiBaseUrl(): string | undefined {
+    const base = this.opts.apiBaseUrl
+    return base === undefined || base === '' ? undefined : base.replace(/\/+$/, '')
+  }
+  /** The fetch to use for API calls: injected first, else the global if present. */
+  private get fetchImpl(): typeof fetch | undefined {
+    if (this.opts.fetchImpl !== undefined) return this.opts.fetchImpl
+    return typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function'
+      ? globalThis.fetch
+      : undefined
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -414,97 +581,109 @@ export class DataClient {
 
   // ───────────────────────────────────────────────────────────────────────────
   // (1) HISTORY / AGGREGATE SURFACES — subgraph-backed via the public API.
-  //     The subgraph + API do NOT exist yet (§8.1 — the single real blocker), so
-  //     each returns a typed `ApiPending` naming the FUTURE route + the query it
-  //     will send. Wiring the API later means: replace the body with a fetch to
-  //     `endpoint?<query>` — the shape and the route are already the contract.
+  //     The subgraph + API are DEPLOYED (hosted backend). Each method fetches
+  //     `endpoint?<query>` via `fetchHistory` when `apiBaseUrl` is configured and
+  //     parses the typed body; with no `apiBaseUrl` / a non-OK / an unreachable
+  //     response it degrades to a typed `ApiPending` naming the route + query.
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
    * PUB-1 — clearing-load surface time series (the alpha signal): util/conc time-
    * buckets + `totalLoadWad` per bucket, per-fill realized load reconstructed.
    *
-   * History/aggregate → API (`GET /data/load-surface`). Degraded today: the
+   * History/aggregate → API (`GET /data/load-surface`). Served live: the
    * subgraph indexes `MarketStateSnapshot` and joins `SwapPriced`/`QuoteFilled`
-   * (these rich per-fill load events are LIVE on-chain since the 2026-06-05 deploy;
-   * what is pending is the subgraph that indexes them). For the CURRENT (non-
-   * historical) load surface, use `getCurrentLoadSurface` (live).
+   * (the rich per-fill load events, LIVE on-chain since the 2026-06-05 deploy);
+   * sparse until volume. For the CURRENT (non-historical) load surface, use
+   * `getCurrentLoadSurface` (live RPC).
    */
   async getLoadSurfaceHistory(args: {
     marketId: Hex
     from?: number
     to?: number
     bucket?: '1h' | '1d'
-  }): Promise<ApiPending> {
-    return this.pending(DATA_API_ROUTES.loadSurface, {
+  }): Promise<ApiBacked<LoadSurfaceHistory>> {
+    const query: Record<string, string> = {
       marketId: args.marketId,
       ...(args.from !== undefined ? { from: String(args.from) } : {}),
       ...(args.to !== undefined ? { to: String(args.to) } : {}),
       bucket: args.bucket ?? '1d',
-    })
+    }
+    return this.fetchHistory(DATA_API_ROUTES.loadSurface, query, parseLoadSurfaceHistory)
   }
 
   /**
    * PUB-5 (Signal 2) — pool-vs-MM load SPREAD + MM win-rate / win-depth.
    *
-   * History/aggregate → API (`GET /data/quote-competition`). Degraded today: needs
+   * History/aggregate → API (`GET /data/quote-competition`). Served live: joins
    * the now-live `SwapPriced` (mechanical pool baseline = the price-to-beat) +
    * `QuoteFilled.loadBps` (behavioral MM load) — both emitted on-chain since the
-   * 2026-06-05 deploy — joined per swap once the subgraph indexes them, plus the
-   * off-chain engine quote-competition telemetry for the dynamic half. The maturity caveat
+   * 2026-06-05 deploy — per swap from the subgraph, plus the off-chain engine
+   * quote-competition telemetry for the dynamic half. The maturity caveat
    * (structural at launch; dynamic only with ≥3 competing MMs) is carried verbatim.
    */
   async getQuoteCompetition(args: {
     marketId?: Hex
     from?: number
     to?: number
-  }): Promise<ApiPending> {
-    return this.pending(DATA_API_ROUTES.quoteCompetition, {
+  }): Promise<ApiBacked<QuoteCompetition>> {
+    const query: Record<string, string> = {
       ...(args.marketId !== undefined ? { marketId: args.marketId } : {}),
       ...(args.from !== undefined ? { from: String(args.from) } : {}),
       ...(args.to !== undefined ? { to: String(args.to) } : {}),
-    })
+    }
+    return this.fetchHistory(DATA_API_ROUTES.quoteCompetition, query, parseQuoteCompetition)
   }
 
   /**
    * PUB-5 (Signal 4 latent half) — demand requests including UNFILLED interest
    * (geometries LPs priced but did not buy).
    *
-   * History/aggregate → API (`GET /data/demand-requests`). Degraded today AND by
-   * design: this data NEVER reaches the chain (I7 — an unchosen quote touches no
-   * nonce/capacity). It is OFF-CHAIN engine/relayer telemetry, surfaced by the API.
-   * There is no live RPC fallback — the realized half is on-chain (subgraph), the
-   * latent half is only ever telemetry.
+   * History/aggregate → API (`GET /data/demand-requests`). Served live; the latent
+   * half is OFF-CHAIN by design: it NEVER reaches the chain (I7 — an unchosen quote
+   * touches no nonce/capacity), so it is engine/relayer telemetry surfaced by the
+   * API. The realized half is on-chain (subgraph); the latent half is only ever
+   * telemetry.
    */
   async getDemandRequests(args: {
     marketId?: Hex
     from?: number
     to?: number
-  }): Promise<ApiPending> {
-    return this.pending(DATA_API_ROUTES.demandRequests, {
+  }): Promise<ApiBacked<DemandRequests>> {
+    const query: Record<string, string> = {
       ...(args.marketId !== undefined ? { marketId: args.marketId } : {}),
       ...(args.from !== undefined ? { from: String(args.from) } : {}),
       ...(args.to !== undefined ? { to: String(args.to) } : {}),
-    })
+    }
+    return this.fetchHistory(DATA_API_ROUTES.demandRequests, query, parseDemandRequests)
   }
 
   /**
    * PUB-2 / DEP-8 — per-tranche NAV day-by-day stress history.
    *
-   * History/aggregate → API (`GET /pool/nav-history`). Degraded today: the
+   * History/aggregate → API (`GET /pool/nav-history`). Served live: the
    * subgraph computes `PoolDaySnapshot` from `Deposited`/`Withdrawn`/
    * `PremiumAccrued`/`SettlementReleased`/`JuniorLoss`. Carries claim (B): depositor
    * capital is NOT guaranteed — NAV history is a depositor-risk surface, distinct
    * from the qualified claim (A) "LPs are always paid (no bad debt, FULL, I1)".
    */
-  async getNavHistory(args: { from?: number; to?: number; bucket?: '1d' }): Promise<ApiPending> {
-    return this.pending(
+  async getNavHistory(args: {
+    from?: number
+    to?: number
+    bucket?: '1d' | '1h'
+  }): Promise<ApiBacked<NavHistory>> {
+    const bucket = args.bucket ?? '1d'
+    // The API param is `day|hour` (app.ts); translate from the SDK's `1d|1h`.
+    const apiBucket = bucket === '1h' ? 'hour' : 'day'
+    const query: Record<string, string> = {
+      ...(args.from !== undefined ? { from: String(args.from) } : {}),
+      ...(args.to !== undefined ? { to: String(args.to) } : {}),
+      bucket: apiBucket,
+    }
+    return this.fetchHistory(
       DATA_API_ROUTES.navHistory,
-      {
-        ...(args.from !== undefined ? { from: String(args.from) } : {}),
-        ...(args.to !== undefined ? { to: String(args.to) } : {}),
-        bucket: args.bucket ?? '1d',
-      },
+      query,
+      (body) => parseNavHistory(body, bucket),
       // Claim (B) disclosure folded into the detail — NEVER merged with claim (A).
       'depositor NAV history (claim B: depositor capital is NOT guaranteed — ' +
         'junior is first-loss, senior is systemic-tail exposed).',
@@ -515,16 +694,69 @@ export class DataClient {
    * PUB-4 (Signal 5) — protocol-wide NET CONVEXITY / GAMMA supply: total gamma the
    * protocol is short (pool + all MMs) at what aggregate load, plus Σfree/Σlocked.
    *
-   * History/aggregate → API (`GET /data/net-gamma`). Degraded today: OFF-CHAIN
+   * History/aggregate → API (`GET /data/net-gamma`). Served live: OFF-CHAIN
    * compute over the subgraph-tracked open swap set (`SwapCreated` opens,
    * `SwapSettled` closes), summing per-swap Greeks finite-differenced from the
    * deployed `ILMath.computeIL` / `FairValueOracle.fairRate` (§5.5 — no parallel
-   * model). NOT a contract event. Live SDK has no aggregator (needs the open set).
+   * model). NOT a contract event; the API runs the aggregator over the open set.
    */
-  async getNetGamma(args: { marketId?: Hex } = {}): Promise<ApiPending> {
-    return this.pending(DATA_API_ROUTES.netGamma, {
+  async getNetGamma(args: { marketId?: Hex } = {}): Promise<ApiBacked<NetGamma>> {
+    const query: Record<string, string> = {
       ...(args.marketId !== undefined ? { marketId: args.marketId } : {}),
-    })
+    }
+    return this.fetchHistory(DATA_API_ROUTES.netGamma, query, parseNetGamma)
+  }
+
+  // ─── Internal: fetch an API-backed surface, degrading to ApiPending ───────────
+
+  /**
+   * GET `${apiBaseUrl}${endpoint}?${query}` and parse the `{ available:true }`
+   * body via `parse`. GRACEFUL by construction — returns the SAME typed
+   * `ApiPending` envelope (never throws) when:
+   *   - no API base URL / no fetch is wired (the historical default behaviour),
+   *   - the request fails / the response is non-OK,
+   *   - the API itself returns its own `{ available:false }` pending body
+   *     (e.g. the subgraph is unreachable) — its `detail` is surfaced.
+   * This is the SDK ↔ API boundary the module's header describes: once an
+   * `apiBaseUrl` is configured, the previously-stubbed pending path becomes a
+   * real fetch with the exact same degraded fallback.
+   */
+  private async fetchHistory<T>(
+    endpoint: DataApiRoute,
+    query: Record<string, string>,
+    parse: (body: Record<string, unknown>) => T,
+    pendingExtra?: string,
+  ): Promise<ApiBacked<T>> {
+    const base = this.apiBaseUrl
+    const doFetch = this.fetchImpl
+    if (base === undefined || doFetch === undefined) {
+      // Unwired → identical typed pending as before (zero behavioural change).
+      return this.pending(endpoint, query, pendingExtra)
+    }
+    const url = `${base}${endpoint}${toQueryString(query)}`
+    try {
+      const res = await doFetch(url, { headers: { accept: 'application/json' } })
+      if (!res.ok) {
+        return this.pending(
+          endpoint,
+          query,
+          joinDetail(pendingExtra, `API responded HTTP ${res.status}.`),
+        )
+      }
+      const body = (await res.json()) as Record<string, unknown>
+      if (body['available'] === true) {
+        return { available: true, ...parse(body) }
+      }
+      // The API returned its OWN typed pending (subgraph down, etc.) — surface it.
+      const apiDetail = typeof body['detail'] === 'string' ? (body['detail'] as string) : undefined
+      return this.pending(endpoint, query, apiDetail ?? pendingExtra)
+    } catch (e) {
+      return this.pending(
+        endpoint,
+        query,
+        joinDetail(pendingExtra, `API unreachable: ${errMsg(e)}`),
+      )
+    }
   }
 
   // ─── Internal: build the typed `ApiPending` envelope ──────────────────────────
@@ -546,6 +778,185 @@ export class DataClient {
       detail: extra === undefined ? base : `${extra} ${base}`,
     }
   }
+}
+
+// ─── Module helpers (pure) ────────────────────────────────────────────────────
+
+/** Encode a flat string map as a `?k=v&…` query string (empty → ''). */
+function toQueryString(query: Record<string, string>): string {
+  const entries = Object.entries(query)
+  if (entries.length === 0) return ''
+  return (
+    '?' + entries.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+  )
+}
+
+/** Join an optional prefix detail with a suffix (em-dash separated). */
+function joinDetail(prefix: string | undefined, suffix: string): string {
+  return prefix === undefined || prefix === '' ? suffix : `${prefix} — ${suffix}`
+}
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+/** Coerce a wire value (decimal string / number / bigint) to bigint; 0n on garbage. */
+function toBigint(v: unknown): bigint {
+  if (typeof v === 'bigint') return v
+  if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v)
+  if (typeof v === 'string' && /^-?\d+$/.test(v.trim())) return BigInt(v.trim())
+  return 0n
+}
+
+/** Map one wire snapshot (`PoolDay/HourSnapshot`) to a normalised `NavSnapshot`,
+ *  or undefined if it has no usable bucket timestamp. */
+function toNavSnapshot(s: Record<string, unknown>): NavSnapshot | undefined {
+  const start = s['dayStart'] ?? s['hourStart'] ?? s['bucketStart']
+  const bucketStart = Number(start)
+  if (!Number.isFinite(bucketStart)) return undefined
+  return {
+    bucketStart,
+    seniorAssets: toBigint(s['seniorAssets']),
+    juniorAssets: toBigint(s['juniorAssets']),
+    totalLocked: toBigint(s['totalLocked']),
+    utilWad: toBigint(s['utilWad']),
+    concWad: toBigint(s['concWad']),
+    premiumAccrued: toBigint(s['premiumAccrued']),
+    payouts: toBigint(s['payouts']),
+    juniorLoss: toBigint(s['juniorLoss']),
+    seniorLoss: toBigint(s['seniorLoss']),
+  }
+}
+
+/** Parse the `/pool/nav-history` body into a typed `NavHistory` (oldest→newest). */
+function parseNavHistory(body: Record<string, unknown>, bucket: '1d' | '1h'): NavHistory {
+  const raw = Array.isArray(body['snapshots'])
+    ? (body['snapshots'] as Record<string, unknown>[])
+    : []
+  const snapshots = raw
+    .map(toNavSnapshot)
+    .filter((s): s is NavSnapshot => s !== undefined)
+    .sort((a, b) => a.bucketStart - b.bucketStart)
+  const disclosure =
+    typeof body['disclosure'] === 'string' ? (body['disclosure'] as string) : undefined
+  return disclosure !== undefined ? { snapshots, bucket, disclosure } : { snapshots, bucket }
+}
+
+/** Attach the API's `disclosure` string to a parsed result, if present (exactOptional-safe). */
+function withDisclosure<T extends object>(
+  value: T,
+  body: Record<string, unknown>,
+): T & { disclosure?: string } {
+  const disclosure =
+    typeof body['disclosure'] === 'string' ? (body['disclosure'] as string) : undefined
+  return disclosure !== undefined ? { ...value, disclosure } : value
+}
+
+/** Parse `/data/load-surface` → typed `LoadSurfaceHistory` (oldest→newest). */
+function parseLoadSurfaceHistory(body: Record<string, unknown>): LoadSurfaceHistory {
+  const raw = Array.isArray(body['snapshots'])
+    ? (body['snapshots'] as Record<string, unknown>[])
+    : []
+  const snapshots: LoadSurfacePoint[] = raw
+    .map((s) => ({
+      bucketStart: Number(s['dayStart']),
+      lockedByMarket: toBigint(s['lockedByMarket']),
+      utilWad: toBigint(s['utilWad']),
+      concWad: toBigint(s['concWad']),
+      sigmaRefWad: toBigint(s['sigmaRefWad']),
+      baseLoadWad: toBigint(s['baseLoadWad']),
+      utilSkewWad: toBigint(s['utilSkewWad']),
+      dispSkewWad: toBigint(s['dispSkewWad']),
+      totalLoadWad: toBigint(s['totalLoadWad']),
+      fillCount: Number(s['fillCount'] ?? 0),
+      v0Volume: toBigint(s['v0Volume']),
+      pathBFills: Number(s['pathBFills'] ?? 0),
+    }))
+    .filter((s) => Number.isFinite(s.bucketStart))
+    .sort((a, b) => a.bucketStart - b.bucketStart)
+  return withDisclosure({ snapshots }, body)
+}
+
+/** Parse `/data/quote-competition` → typed `QuoteCompetition`. */
+function parseQuoteCompetition(body: Record<string, unknown>): QuoteCompetition {
+  const raw = Array.isArray(body['competition'])
+    ? (body['competition'] as Record<string, unknown>[])
+    : []
+  const competition: QuoteCompetitionRow[] = raw.map((c) => ({
+    marketId: String(c['marketId'] ?? ''),
+    mm: String(c['mm'] ?? ''),
+    quotes: Number(c['quotes'] ?? 0),
+    accepted: Number(c['accepted'] ?? 0),
+    rejected: Number(c['rejected'] ?? 0),
+    minLoadBps: Number(c['minLoadBps'] ?? 0),
+    maxLoadBps: Number(c['maxLoadBps'] ?? 0),
+    avgLoadBps: Number(c['avgLoadBps'] ?? 0),
+    lastSeen: Number(c['lastSeen'] ?? 0),
+  }))
+  return withDisclosure({ competition, enabled: body['enabled'] === true }, body)
+}
+
+/** Parse `/data/demand-requests` → typed `DemandRequests` (realized flattened). */
+function parseDemandRequests(body: Record<string, unknown>): DemandRequests {
+  const realizedEnv = (body['realized'] ?? {}) as Record<string, unknown>
+  const realizedAvailable = realizedEnv['available'] === true
+  const realizedRaw = Array.isArray(realizedEnv['buckets'])
+    ? (realizedEnv['buckets'] as Record<string, unknown>[])
+    : []
+  const realized: RealizedDemandBucket[] = realizedRaw.map((b) => ({
+    id: String(b['id'] ?? ''),
+    widthBucket: String(b['widthBucket'] ?? ''),
+    distanceBucket: String(b['distanceBucket'] ?? ''),
+    durationBucket: String(b['durationBucket'] ?? ''),
+    realizedFillCount: Number(b['realizedFillCount'] ?? 0),
+    realizedV0: toBigint(b['realizedV0']),
+    firstSeen: Number(b['firstSeen'] ?? 0),
+    lastSeen: Number(b['lastSeen'] ?? 0),
+  }))
+  const latentRaw = Array.isArray(body['latent'])
+    ? (body['latent'] as Record<string, unknown>[])
+    : []
+  const latent: LatentDemandBucket[] = latentRaw.map((b) => ({
+    marketId: String(b['marketId'] ?? ''),
+    widthBucket: String(b['widthBucket'] ?? ''),
+    distanceBucket: String(b['distanceBucket'] ?? ''),
+    durationBucket: String(b['durationBucket'] ?? ''),
+    count: Number(b['count'] ?? 0),
+    previews: Number(b['previews'] ?? 0),
+    quoteRequests: Number(b['quoteRequests'] ?? 0),
+    firstSeen: Number(b['firstSeen'] ?? 0),
+    lastSeen: Number(b['lastSeen'] ?? 0),
+  }))
+  return withDisclosure(
+    { realized, realizedAvailable, latent, latentEnabled: body['latentEnabled'] === true },
+    body,
+  )
+}
+
+/** Parse `/data/net-gamma` → typed `NetGamma` (snapshots oldest→newest + protocolState). */
+function parseNetGamma(body: Record<string, unknown>): NetGamma {
+  const raw = Array.isArray(body['snapshots'])
+    ? (body['snapshots'] as Record<string, unknown>[])
+    : []
+  const snapshots: NetGammaPoint[] = raw
+    .map((s) => ({
+      bucketStart: Number(s['bucketStart']),
+      activeSwapCount: Number(s['activeSwapCount'] ?? 0),
+      totalV0: toBigint(s['totalV0']),
+      totalMaxIL: toBigint(s['totalMaxIL']),
+      aggGammaWad: toBigint(s['aggGammaWad']),
+      aggVegaWad: toBigint(s['aggVegaWad']),
+      volumeWeightedLoadWad: toBigint(s['volumeWeightedLoadWad']),
+    }))
+    .filter((s) => Number.isFinite(s.bucketStart))
+    .sort((a, b) => a.bucketStart - b.bucketStart)
+  const ps = (body['protocolState'] ?? {}) as Record<string, unknown>
+  const protocolState: NetGammaState = {
+    activeSwapCount: Number(ps['activeSwapCount'] ?? 0),
+    totalActiveV0: toBigint(ps['totalActiveV0']),
+    totalActiveMaxIL: toBigint(ps['totalActiveMaxIL']),
+  }
+  return withDisclosure({ snapshots, protocolState }, body)
 }
 
 /** Convenience constructor matching the other surface modules' factory style. */

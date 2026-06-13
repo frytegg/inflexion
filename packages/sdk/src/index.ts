@@ -72,6 +72,9 @@ export interface InflexionSdkConfig {
   account?: Account
   /** Engine base URL for Path-B quotes + the previewPremium telemetry ping. */
   engineBaseUrl?: string
+  /** Public REST API base URL for history/aggregate surfaces (NAV history, etc.).
+   *  Absent ⇒ those `DataClient` surfaces return typed `ApiPending` (graceful). */
+  apiBaseUrl?: string
   /** Override the telemetry endpoint (defaults to `${engineBaseUrl}/telemetry/preview`). */
   telemetryUrl?: string
   /** Injected fetch (tests). Defaults to global fetch when present. */
@@ -156,7 +159,10 @@ export function createInflexionSdk(config: InflexionSdkConfig = {}): InflexionSd
     chainId,
   })
 
-  const data = new DataClient(publicClient)
+  const data = new DataClient(publicClient, {
+    ...(config.apiBaseUrl !== undefined ? { apiBaseUrl: config.apiBaseUrl } : {}),
+    ...(config.fetchImpl !== undefined ? { fetchImpl: config.fetchImpl } : {}),
+  })
   const greeks = new GreeksEngine(publicClient)
   const hedge = new HedgeSuggester(publicClient)
 

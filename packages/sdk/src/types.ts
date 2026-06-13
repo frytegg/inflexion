@@ -232,6 +232,13 @@ export interface ProtectionStatus {
   mm: Address
   /** True iff `mm == convexityVault` (Path A pool) — else Path B (an MM). */
   isPathA: boolean
+  /** Market context recovered from the swap's position (no extra on-chain cost). */
+  marketId: Hex
+  tokenId: bigint
+  token0: Address
+  token1: Address
+  fee: number
+  durationSeconds: number
   premiumPaid: bigint
   maxIL: bigint
   V0: bigint
@@ -244,6 +251,20 @@ export interface ProtectionStatus {
   ilToDate: Priceable<{ il: bigint; payout: bigint; capHit: boolean }>
   /** CLAIM (A): LPs are always paid (no bad debt in FULL, I1) — qualified. */
   noBadDebtFull: true
+}
+
+/** Final settlement outcome of a swap (decoded from the `SwapSettled` event; the
+ *  on-chain swap record does not persist the realized IL / payout). */
+export interface Settlement {
+  swapId: bigint
+  /** Realized in-range IL at expiry (USDC raw). */
+  realisedIL: bigint
+  /** Amount actually paid to the LP = min(realisedIL, MaxIL) (USDC raw). */
+  payout: bigint
+  /** Chainlink settlement price used (feed-decimal raw). */
+  settlementPrice: bigint
+  /** True iff the cap bound the payout (payout < realisedIL). */
+  capHit: boolean
 }
 
 // ─── Payoff curve / greeks (LP + MM) ────────────────────────────────────────

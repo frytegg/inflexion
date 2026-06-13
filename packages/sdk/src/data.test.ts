@@ -98,7 +98,7 @@ function mockClient(behaviour: {
 describe('DataClient — API-backed history surfaces (offline, graceful degradation)', () => {
   const dc = makeDataClient(makePublicClient())
 
-  it('getLoadSurfaceHistory returns a typed ApiPending naming /data/load-surface', async () => {
+  it('getLoadSurfaceHistory (unwired) returns a typed pending naming /data/load-surface', async () => {
     const r = await dc.getLoadSurfaceHistory({
       marketId: KNOWN_MARKET,
       from: 1,
@@ -106,6 +106,7 @@ describe('DataClient — API-backed history surfaces (offline, graceful degradat
       bucket: '1h',
     })
     expect(r.available).toBe(false)
+    if (r.available) return
     expect(r.reason).toBe('no-history-source')
     expect(r.endpoint).toBe(DATA_API_ROUTES.loadSurface)
     expect(r.query).toMatchObject({ marketId: KNOWN_MARKET, from: '1', to: '2', bucket: '1h' })
@@ -114,29 +115,35 @@ describe('DataClient — API-backed history surfaces (offline, graceful degradat
 
   it('getLoadSurfaceHistory defaults the bucket to 1d', async () => {
     const r = await dc.getLoadSurfaceHistory({ marketId: KNOWN_MARKET })
+    expect(r.available).toBe(false)
+    if (r.available) return
     expect(r.query['bucket']).toBe('1d')
   })
 
   it('getQuoteCompetition forwards to /data/quote-competition', async () => {
     const r = await dc.getQuoteCompetition({ marketId: KNOWN_MARKET })
-    expect(r.endpoint).toBe(DATA_API_ROUTES.quoteCompetition)
     expect(r.available).toBe(false)
+    if (r.available) return
+    expect(r.endpoint).toBe(DATA_API_ROUTES.quoteCompetition)
     expect(r.query['marketId']).toBe(KNOWN_MARKET)
   })
 
   it('getDemandRequests forwards to /data/demand-requests (off-chain telemetry)', async () => {
     const r = await dc.getDemandRequests({})
-    expect(r.endpoint).toBe(DATA_API_ROUTES.demandRequests)
     expect(r.available).toBe(false)
+    if (r.available) return
+    expect(r.endpoint).toBe(DATA_API_ROUTES.demandRequests)
     expect(r.query).toEqual({})
   })
 
-  it('getNavHistory carries the claim-(B) disclosure and forwards to /pool/nav-history', async () => {
+  it('getNavHistory (unwired) returns the claim-(B) pending envelope to /pool/nav-history', async () => {
     const r = await dc.getNavHistory({ from: 100 })
-    expect(r.endpoint).toBe(DATA_API_ROUTES.navHistory)
     expect(r.available).toBe(false)
+    if (r.available) return // narrow the ApiBacked union for TS
+    expect(r.endpoint).toBe(DATA_API_ROUTES.navHistory)
     expect(r.query['from']).toBe('100')
-    expect(r.query['bucket']).toBe('1d')
+    // The SDK's 1d/1h bucket maps to the API's day/hour param.
+    expect(r.query['bucket']).toBe('day')
     // Claim (B) must be present and NOT merged with claim (A).
     expect(r.detail).toContain('NOT guaranteed')
     expect(r.detail).not.toContain('no bad debt')
@@ -144,8 +151,9 @@ describe('DataClient — API-backed history surfaces (offline, graceful degradat
 
   it('getNetGamma forwards to /data/net-gamma', async () => {
     const r = await dc.getNetGamma()
-    expect(r.endpoint).toBe(DATA_API_ROUTES.netGamma)
     expect(r.available).toBe(false)
+    if (r.available) return
+    expect(r.endpoint).toBe(DATA_API_ROUTES.netGamma)
   })
 
   it('every API route string is a stable, documented endpoint', () => {
@@ -154,6 +162,249 @@ describe('DataClient — API-backed history surfaces (offline, graceful degradat
     expect(DATA_API_ROUTES.demandRequests).toBe('/data/demand-requests')
     expect(DATA_API_ROUTES.navHistory).toBe('/pool/nav-history')
     expect(DATA_API_ROUTES.netGamma).toBe('/data/net-gamma')
+  })
+})
+
+// ─── NAV history wired to the public API (mock fetch) ─────────────────────────
+// Once an `apiBaseUrl` + fetch are configured, getNavHistory becomes a real GET
+// against `/pool/nav-history`, parsing the live body, and STILL degrades to the
+// same typed pending envelope on any failure (never throws).
+
+/** A loose mock `fetch` for the wired path. */
+function mockFetch(opts: { status?: number; body?: unknown; throws?: boolean }): typeof fetch {
+  return (async () => {
+    if (opts.throws) throw new Error('network down')
+    return {
+      ok: (opts.status ?? 200) < 400,
+      status: opts.status ?? 200,
+      json: async () => opts.body,
+    } as Response
+  }) as unknown as typeof fetch
+}
+
+/** The exact wire shape the hosted API returns for /pool/nav-history (2 buckets). */
+const NAV_WIRE = {
+  available: true,
+  snapshots: [
+    {
+      id: '20609',
+      dayStart: '1780617600',
+      seniorAssets: '60001920648',
+      juniorAssets: '59859044273',
+      totalLocked: '0',
+      utilWad: '0',
+      concWad: '0',
+      premiumAccrued: '9603244',
+      payouts: '148638323',
+      juniorLoss: '148638323',
+      seniorLoss: '0',
+    },
+    {
+      id: '20608',
+      dayStart: '1780531200',
+      seniorAssets: '60000000000',
+      juniorAssets: '60000000000',
+      totalLocked: '0',
+      utilWad: '0',
+      concWad: '0',
+      premiumAccrued: '0',
+      payouts: '0',
+      juniorLoss: '0',
+      seniorLoss: '0',
+    },
+  ],
+  disclosure: 'Depositor capital is NOT guaranteed: junior first-loss; senior systemic-tail.',
+}
+
+describe('DataClient.getNavHistory — wired to the public API (mock fetch)', () => {
+  it('parses the available body into a typed NavHistory (oldest→newest, bigint)', async () => {
+    const dc = new DataClient(makePublicClient(), {
+      apiBaseUrl: 'https://api.test/',
+      fetchImpl: mockFetch({ body: NAV_WIRE }),
+    })
+    const r = await dc.getNavHistory({ bucket: '1d' })
+    expect(r.available).toBe(true)
+    if (!r.available) return
+    expect(r.bucket).toBe('1d')
+    expect(r.snapshots).toHaveLength(2)
+    // Sorted ascending by bucketStart (oldest → newest).
+    expect(r.snapshots[0]!.bucketStart).toBe(1780531200)
+    expect(r.snapshots[1]!.bucketStart).toBe(1780617600)
+    // Wire decimal strings → bigint on-chain units.
+    const latest = r.snapshots[1]!
+    expect(latest.seniorAssets).toBe(60001920648n)
+    expect(latest.juniorAssets).toBe(59859044273n)
+    expect(latest.juniorLoss).toBe(148638323n)
+    expect(latest.seniorLoss).toBe(0n)
+    expect(r.disclosure).toContain('NOT guaranteed')
+  })
+
+  it('sends bucket=hour to the API for the 1h bucket', async () => {
+    let seen = ''
+    const fetchImpl = (async (url: string) => {
+      seen = url
+      return { ok: true, status: 200, json: async () => NAV_WIRE } as Response
+    }) as unknown as typeof fetch
+    const dc = new DataClient(makePublicClient(), { apiBaseUrl: 'https://api.test', fetchImpl })
+    const r = await dc.getNavHistory({ bucket: '1h' })
+    expect(seen).toContain('/pool/nav-history')
+    expect(seen).toContain('bucket=hour')
+    expect(r.available).toBe(true)
+    if (r.available) expect(r.bucket).toBe('1h')
+  })
+
+  it('degrades to the typed pending envelope when the fetch throws', async () => {
+    const dc = new DataClient(makePublicClient(), {
+      apiBaseUrl: 'https://api.test',
+      fetchImpl: mockFetch({ throws: true }),
+    })
+    const r = await dc.getNavHistory({})
+    expect(r.available).toBe(false)
+    if (r.available) return
+    expect(r.endpoint).toBe(DATA_API_ROUTES.navHistory)
+    expect(r.detail).toContain('NOT guaranteed') // claim B still carried
+  })
+
+  it('surfaces the API’s own pending body (subgraph down) as pending', async () => {
+    const dc = new DataClient(makePublicClient(), {
+      apiBaseUrl: 'https://api.test',
+      fetchImpl: mockFetch({
+        body: { available: false, reason: 'subgraph-unreachable', detail: 'subgraph is down' },
+      }),
+    })
+    const r = await dc.getNavHistory({})
+    expect(r.available).toBe(false)
+    if (r.available) return
+    expect(r.detail).toContain('subgraph is down')
+  })
+
+  it('degrades to pending on a non-OK HTTP status', async () => {
+    const dc = new DataClient(makePublicClient(), {
+      apiBaseUrl: 'https://api.test',
+      fetchImpl: mockFetch({ status: 500, body: {} }),
+    })
+    const r = await dc.getNavHistory({})
+    expect(r.available).toBe(false)
+    if (r.available) return
+    expect(r.detail).toContain('HTTP 500')
+  })
+})
+
+describe('DataClient — the other four signals wired to the API (mock fetch)', () => {
+  function wired(body: unknown): DataClient {
+    return new DataClient(makePublicClient(), {
+      apiBaseUrl: 'https://api.test',
+      fetchImpl: mockFetch({ body }),
+    })
+  }
+
+  it('getLoadSurfaceHistory parses snapshots oldest→newest with bigint loads', async () => {
+    const mk = (dayStart: string, totalLoadWad: string, v0: string, fills: number) => ({
+      dayStart,
+      totalLoadWad,
+      v0Volume: v0,
+      fillCount: fills,
+      pathBFills: 0,
+      lockedByMarket: '0',
+      utilWad: '0',
+      concWad: '0',
+      sigmaRefWad: '0',
+      baseLoadWad: '0',
+      utilSkewWad: '0',
+      dispSkewWad: '0',
+    })
+    const dc = wired({
+      available: true,
+      snapshots: [mk('200', '5', '9', 3), mk('100', '4', '8', 2)],
+      disclosure: 'x',
+    })
+    const r = await dc.getLoadSurfaceHistory({ marketId: KNOWN_MARKET })
+    expect(r.available).toBe(true)
+    if (!r.available) return
+    expect(r.snapshots.map((s) => s.bucketStart)).toEqual([100, 200]) // sorted ascending
+    expect(r.snapshots[1]!.totalLoadWad).toBe(5n)
+    expect(r.snapshots[1]!.v0Volume).toBe(9n)
+    expect(r.snapshots[1]!.fillCount).toBe(3)
+  })
+
+  it('getQuoteCompetition parses competition rows + enabled flag', async () => {
+    const dc = wired({
+      available: true,
+      enabled: true,
+      competition: [
+        {
+          marketId: '0xabc',
+          mm: '0xmm',
+          quotes: 4,
+          accepted: 2,
+          rejected: 1,
+          minLoadBps: 10,
+          maxLoadBps: 30,
+          avgLoadBps: 20,
+          lastSeen: 5,
+        },
+      ],
+    })
+    const r = await dc.getQuoteCompetition({})
+    expect(r.available).toBe(true)
+    if (!r.available) return
+    expect(r.enabled).toBe(true)
+    expect(r.competition).toHaveLength(1)
+    expect(r.competition[0]!.avgLoadBps).toBe(20)
+  })
+
+  it('getDemandRequests flattens realized buckets + carries latentEnabled', async () => {
+    const dc = wired({
+      available: true,
+      realized: {
+        available: true,
+        buckets: [
+          {
+            id: 'tight-mid-hour',
+            widthBucket: 'tight',
+            distanceBucket: 'mid',
+            durationBucket: 'hour',
+            realizedFillCount: 2,
+            realizedV0: '541848341180',
+            firstSeen: '1',
+            lastSeen: '2',
+          },
+        ],
+      },
+      latent: [],
+      latentEnabled: true,
+    })
+    const r = await dc.getDemandRequests({})
+    expect(r.available).toBe(true)
+    if (!r.available) return
+    expect(r.realizedAvailable).toBe(true)
+    expect(r.realized).toHaveLength(1)
+    expect(r.realized[0]!.realizedV0).toBe(541848341180n)
+    expect(r.realized[0]!.realizedFillCount).toBe(2)
+    expect(r.latentEnabled).toBe(true)
+    expect(r.latent).toEqual([])
+  })
+
+  it('getNetGamma parses protocolState + (empty) snapshots', async () => {
+    const dc = wired({
+      available: true,
+      snapshots: [],
+      protocolState: { activeSwapCount: 0, totalActiveV0: '0', totalActiveMaxIL: '0' },
+    })
+    const r = await dc.getNetGamma()
+    expect(r.available).toBe(true)
+    if (!r.available) return
+    expect(r.protocolState.activeSwapCount).toBe(0)
+    expect(r.protocolState.totalActiveV0).toBe(0n)
+    expect(r.snapshots).toEqual([])
+  })
+
+  it('an unwired client still returns typed pending for all four', async () => {
+    const dc = makeDataClient(makePublicClient())
+    expect((await dc.getLoadSurfaceHistory({ marketId: KNOWN_MARKET })).available).toBe(false)
+    expect((await dc.getQuoteCompetition({})).available).toBe(false)
+    expect((await dc.getDemandRequests({})).available).toBe(false)
+    expect((await dc.getNetGamma()).available).toBe(false)
   })
 })
 
