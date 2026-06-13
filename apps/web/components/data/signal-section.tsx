@@ -4,7 +4,8 @@
 // HONESTLY badged: 'live' (RPC today) or 'pending' (needs the subgraph + API).
 // Function-first; the design pass refines later.
 import { type ReactNode } from 'react'
-import { Panel, Badge } from '@/components/ui'
+import { Badge } from '@/components/ui'
+import { FramedPanel, Reveal } from '@/components/app/chrome'
 
 export function SignalSection({
   n,
@@ -20,14 +21,14 @@ export function SignalSection({
   children: ReactNode
 }) {
   return (
-    <Panel
-      title={`Signal ${n} — ${title}`}
-      right={
-        status === 'live' ? <Badge tone="teal">Live</Badge> : <Badge tone="warn">Pending</Badge>
-      }
-    >
-      {subtitle && <p className="mb-4 max-w-2xl text-body-sm text-fg-tertiary">{subtitle}</p>}
-      {children}
-    </Panel>
+    <Reveal>
+      <FramedPanel
+        title={`Signal ${n} — ${title}`}
+        right={status === 'live' ? null : <Badge tone="warn">Pending</Badge>}
+      >
+        {subtitle && <p className="mb-4 max-w-2xl text-body-sm text-fg-tertiary">{subtitle}</p>}
+        {children}
+      </FramedPanel>
+    </Reveal>
   )
 }

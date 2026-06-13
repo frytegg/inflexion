@@ -2,9 +2,9 @@
 
 /**
  * /dashboard — the connected user's portfolio across all three roles:
- *   1. PROTECTIONS (LP)  — swaps where lp == you; settle expired ones.       (claim A)
- *   2. DEPOSITS (depositor) — senior/junior NAV + withdraw flow.            (claim B)
- *   3. MM BOOK — active swaps you underwrite + your collateral usage.       (claim B)
+ *   1. PROTECTIONS (LP)  — swaps where lp == you; settle expired ones.
+ *   2. DEPOSITS (depositor) — senior/junior NAV + withdraw flow.
+ *   3. MM BOOK — active swaps you underwrite + your collateral usage.
  *
  * Reads are graceful: discovery is a bounded on-chain swap scan (no subgraph yet —
  * see INTEGRATION_MAP §2/§6.4); each degraded envelope renders a PendingNote, never
@@ -18,7 +18,6 @@ import type { Address } from 'viem'
 import {
   inflexionCoreAbi,
   core,
-  type ProtectionStatus,
   type DepositorPosition,
   type Degraded,
   type BookResult,
@@ -30,9 +29,6 @@ import {
 import { useInflexionSdk } from '@/lib/use-sdk'
 import { useTx } from '@/lib/use-tx'
 import {
-  Section,
-  Panel,
-  Card,
   Stat,
   Badge,
   Skeleton,
@@ -43,13 +39,10 @@ import {
   TxButton,
   Button,
 } from '@/components/ui'
+import { PageShell, PageHeader, FramedPanel, Reveal } from '@/components/app/chrome'
 import { fmtUsd, fmtUsdc, fmtDuration } from '@/lib/format'
-import {
-  ProtectionCard,
-  BookRow,
-  KV,
-  type ClaimableFeesView,
-} from '@/components/dashboard/sections'
+import { BookRow, KV } from '@/components/dashboard/sections'
+import { ActiveProtection } from '@/components/protect/active-protection'
 
 // How far back the on-chain `swaps` enumeration walks for LP discovery. Bounded —
 // full history needs the subgraph (INTEGRATION_MAP §6.4). getBook (MM) walks the
@@ -60,19 +53,19 @@ const SCAN_LIMIT = 400
 // `undefined` query value, so normalize the absent case to `null`.
 type MmCollateral = { deposited: bigint; locked: bigint; available: bigint } | null
 
-// ─── A discovered LP protection (status + its checkpointed fees) ─────────────
-interface LpProtection {
-  ps: ProtectionStatus
-  fees?: ClaimableFeesView
-}
-
 export default function DashboardPage() {
   return (
-    <Section kicker="Portfolio" title="Dashboard">
-      <ConnectGate message="Connect a wallet on Arbitrum Sepolia to see your protections, deposits, and MM book.">
-        <DashboardBody />
-      </ConnectGate>
-    </Section>
+    <PageShell>
+      <PageHeader title="Dashboard">
+        Your positions across all three roles — the in-range IL protections you hold, the tranches
+        you underwrite, and the quotes you make.
+      </PageHeader>
+      <div className="mt-8">
+        <ConnectGate message="Connect a wallet on Arbitrum Sepolia to see your protections, deposits, and MM book.">
+          <DashboardBody />
+        </ConnectGate>
+      </div>
+    </PageShell>
   )
 }
 
@@ -82,11 +75,16 @@ function DashboardBody() {
   const qc = useQueryClient()
   const owner = address as Address | undefined
 
-  // ── (1) PROTECTIONS (LP): bounded on-chain swap scan → getProtectionStatus ──
-  const protectionsQ = useQuery<LpProtection[]>({
+  // ── (1) PROTECTIONS (LP): bounded on-chain swap scan → the owner's swapIds ──
+  // Discover the connected owner's swaps with a cheap raw `swaps(id)` decode (lp
+  // match + non-zero status). Each id is then rendered by <ActiveProtection>, which
+  // owns its own enriched read (status + final settlement) and Settle button — the
+  // same component and treatment as the Protect-page history (settled swaps show
+  // their realized IL + payout explicitly, not a degraded note).
+  const protectionsQ = useQuery<bigint[]>({
     queryKey: ['dashboard', 'lp-protections', sdk.chainId, owner],
     enabled: !!owner,
-    queryFn: async (): Promise<LpProtection[]> => {
+    queryFn: async (): Promise<bigint[]> => {
       if (!owner) return []
       // nextSwapId bounds the scan; swap ids are 1-indexed.
       const next = (await sdk.publicClient.readContract({
@@ -98,13 +96,9 @@ function DashboardBody() {
       const last = next > 0n ? next - 1n : 0n
       const lo = last > BigInt(SCAN_LIMIT) ? last - BigInt(SCAN_LIMIT) + 1n : 1n
 
-      const out: LpProtection[] = []
+      const out: bigint[] = []
       const ownerLc = owner.toLowerCase()
       for (let id = last; id >= lo && id >= 1n; id--) {
-        // Cheap pre-filter: raw swaps(id) → decode → match lp + non-zero status,
-        // BEFORE the expensive enriched getProtectionStatus (oracle + settlePreview).
-        let lpAddr: string
-        let status: number
         try {
           const t = (await sdk.publicClient.readContract({
             address: core.inflexionCore,
@@ -113,19 +107,10 @@ function DashboardBody() {
             args: [id],
           })) as Parameters<typeof decodeSwapRecord>[0]
           const rec = decodeSwapRecord(t)
-          lpAddr = rec.lp.toLowerCase()
-          status = rec.status
+          if (rec.status !== 0 && rec.lp.toLowerCase() === ownerLc) out.push(id)
         } catch {
           continue // unreadable id → skip rather than fail the whole scan
         }
-        if (status === 0 || lpAddr !== ownerLc) continue
-
-        const ps = await sdk.lp.getProtectionStatus(id)
-        if ('available' in ps) continue // { available: false } envelope → skip
-        let fees: ClaimableFeesView | undefined
-        const cf = await sdk.lp.getClaimableFees(id)
-        if (!('available' in cf)) fees = { fee0: cf.fee0, fee1: cf.fee1 }
-        out.push({ ps, fees })
       }
       return out
     },
@@ -156,9 +141,15 @@ function DashboardBody() {
 
   return (
     <div className="space-y-12">
-      <ProtectionsSection q={protectionsQ} onSettled={invalidateAll} sdk={sdk} />
-      <DepositsSection q={positionQ} onWrote={invalidateAll} sdk={sdk} />
-      <MmBookSection bookQ={bookQ} collateralQ={collateralQ} />
+      <Reveal>
+        <ProtectionsSection q={protectionsQ} />
+      </Reveal>
+      <Reveal>
+        <DepositsSection q={positionQ} onWrote={invalidateAll} sdk={sdk} />
+      </Reveal>
+      <Reveal>
+        <MmBookSection bookQ={bookQ} collateralQ={collateralQ} />
+      </Reveal>
     </div>
   )
 }
@@ -166,25 +157,17 @@ function DashboardBody() {
 // ════════════════════════════════════════════════════════════════════════════
 // (1) PROTECTIONS (LP)
 // ════════════════════════════════════════════════════════════════════════════
-function ProtectionsSection({
-  q,
-  onSettled,
-  sdk,
-}: {
-  q: UseQueryResult<LpProtection[]>
-  onSettled: () => void
-  sdk: InflexionSdk
-}) {
+function ProtectionsSection({ q }: { q: UseQueryResult<bigint[]> }) {
   return (
     <div>
       <SectionHead
         title="Protections"
-        kicker="LP · claim A"
+        kicker="LP"
         note="LPs are always paid — no bad debt in FULL (capped payout + solvent USDC + oracle/settlement liveness). Payout = min(realized IL, MaxIL); the cap is load-bearing."
       />
       <PendingNote>
         Discovered by a bounded on-chain scan of the last {SCAN_LIMIT} swaps. Full position history
-        (and exact uncollected fees) goes live with the subgraph; the on-chain scan works now.
+        goes live with the subgraph; the on-chain scan works now.
       </PendingNote>
       <div className="mt-4 space-y-4">
         {q.isLoading ? (
@@ -200,42 +183,10 @@ function ProtectionsSection({
             desc="You have no in-range IL protection in the scanned range. Buy protection on the Protect page."
           />
         ) : (
-          q.data.map((p) => (
-            <SettleableProtection
-              key={p.ps.swapId.toString()}
-              p={p}
-              onSettled={onSettled}
-              sdk={sdk}
-            />
-          ))
+          q.data.map((id) => <ActiveProtection key={id.toString()} swapId={id} />)
         )}
       </div>
     </div>
-  )
-}
-
-/** One protection card with its own settle tx state (each row settles independently). */
-function SettleableProtection({
-  p,
-  onSettled,
-  sdk,
-}: {
-  p: LpProtection
-  onSettled: () => void
-  sdk: InflexionSdk
-}) {
-  const tx = useTx()
-  return (
-    <ProtectionCard
-      ps={p.ps}
-      {...(p.fees ? { fees: p.fees } : {})}
-      settleStatus={tx.status}
-      {...(tx.error ? { settleError: tx.error } : {})}
-      onSettle={async () => {
-        const h = await tx.run(() => sdk.lp.settle(p.ps.swapId))
-        if (h) onSettled()
-      }}
-    />
   )
 }
 
@@ -259,7 +210,7 @@ function DepositsSection({
     <div>
       <SectionHead
         title="Deposits"
-        kicker="Depositor · claim B"
+        kicker="Depositor"
         note="You underwrite pooled in-range IL via the dual-tranche cvAMM vault. Capital is NOT guaranteed — junior is first-loss; senior is protected from underwriting loss only, not the systemic tail."
       />
       <div className="mt-4">
@@ -279,7 +230,7 @@ function DepositsSection({
             desc="Deposit into the senior or junior tranche on the Earn page to start underwriting."
           />
         ) : (
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 md:grid-cols-2 md:items-stretch">
             <TrancheCard
               tranche="senior"
               label="Senior"
@@ -331,7 +282,7 @@ function TrancheCard({
   const matured = withdraw !== undefined && withdraw.shares > 0n && withdraw.secondsRemaining === 0n
 
   return (
-    <Card>
+    <FramedPanel className="h-full">
       <div className="flex items-center justify-between">
         <span className="font-display text-h4 text-fg">{label}</span>
         {firstLoss && <Badge tone="warn">FIRST-LOSS</Badge>}
@@ -395,7 +346,7 @@ function TrancheCard({
           <ErrorNote>{wdTx.error}</ErrorNote>
         </div>
       )}
-    </Card>
+    </FramedPanel>
   )
 }
 
@@ -416,7 +367,7 @@ function MmBookSection({
     <div>
       <SectionHead
         title="MM Book"
-        kicker="Market maker · claim B"
+        kicker="Market maker"
         note="Active swaps you underwrite (Path B) + your collateral usage. MM capital is NOT guaranteed — you are short the capped IL claim and post collateral == MaxIL per fill."
       />
 
@@ -430,18 +381,18 @@ function MmBookSection({
             degraded). Deposit MM collateral to quote Path B.
           </PendingNote>
         ) : (
-          <Card>
+          <FramedPanel title="Collateral (UnderwriterVault)">
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <Stat label="Deposited" value={fmtUsd(collateral.deposited)} />
               <Stat
                 label="Locked"
                 value={fmtUsd(collateral.locked)}
                 accent="warn"
-                sub="I5: locked ≤ deposited"
+                sub="locked ≤ deposited"
               />
               <Stat label="Available" value={fmtUsd(collateral.available)} accent="teal" />
             </div>
-          </Card>
+          </FramedPanel>
         )}
       </div>
 
@@ -463,7 +414,7 @@ function MmBookSection({
             desc="You are not underwriting any active swaps in the scanned range. Sign quotes on the Underwrite page to get filled."
           />
         ) : (
-          <Panel
+          <FramedPanel
             title={`Active fills · ${book.count}`}
             right={
               <span className="text-body-sm text-fg-tertiary">
@@ -472,7 +423,7 @@ function MmBookSection({
               </span>
             }
           >
-            <div className="-mx-5 -my-5">
+            <div className="-mx-6">
               {book.positions.map((pos) => (
                 <BookRow key={pos.swapId.toString()} pos={pos} />
               ))}
@@ -483,7 +434,7 @@ function MmBookSection({
               precise per-quote attribution arrives with the QuoteFilled-indexing subgraph. Cancel
               outstanding quote nonces from the Underwrite page.
             </p>
-          </Panel>
+          </FramedPanel>
         )}
       </div>
     </div>

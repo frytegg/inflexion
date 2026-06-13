@@ -8,13 +8,13 @@
  *     SEPARATE ERC-20 approve + UnderwriterVault.deposit/withdraw (the SDK exports
  *     the ABI + addresses but has no MmClient helper, so we call the documented
  *     on-chain fns directly via the wallet client — we do NOT invent a method).
- *  2. The quote is PER-MARKET — set the load (below the pool's, ≤ maxLoadBps I10),
+ *  2. The quote is PER-MARKET — set the load (below the pool's, ≤ maxLoadBps),
  *     the MaxIL-ratio band (which positions you cover), and capacity. NO tokenId:
  *     MaxIL is the unit of risk, so one firm quote covers ANY in-range position in
  *     the market whose MaxIL/V0 ∈ [min, max] bps (InflexionCore checks this at fill).
- *     mm.getPoolLoadToBeat + getMarketConfig (oracle anchor) drive it; an
+ *     mm.getPoolLoadToBeat + getMarketConfig (the oracle anchor) drive it; an
  *     illustrative premium uses a representative position.
- *  3. Build + SIGN a SignedQuote in the BROWSER — enforce I10 + below-pool BEFORE
+ *  3. Build + SIGN a SignedQuote in the BROWSER — enforce the max-load cap + below-pool BEFORE
  *     signing, then walletClient.signTypedData.
  *  4. Publish the envelope to the engine (NEXT_PUBLIC_ENGINE_URL) or show it.
  *  5. Book (mm.getBook) + recent fills (mm.watchFills, coarse) + cancelNonces.
@@ -55,8 +55,6 @@ import {
   truncHex,
 } from '@/lib/format'
 import {
-  Section,
-  Panel,
   Card,
   Stat,
   Field,
@@ -70,17 +68,11 @@ import {
   ErrorNote,
   ConnectGate,
 } from '@/components/ui'
-import { PayoffChart } from '@/components/charts/payoff-chart'
+import { ShimmerButton } from '@/components/magicui/shimmer-button'
+import { PageShell, PageHeader, FramedPanel, Reveal } from '@/components/app/chrome'
 import { FillsFeed } from '@/components/underwrite/fills-feed'
 
 const ENGINE_URL = process.env.NEXT_PUBLIC_ENGINE_URL
-
-const Q96 = 2 ** 96
-/** sqrtPriceX96 → price (token1/token0), as a plain number for the payoff chart. */
-function priceFromSqrt(sqrtX96: bigint): number {
-  const r = Number(sqrtX96) / Q96
-  return r * r
-}
 
 /** Random bytes32 quoteId (browser crypto). */
 function randomQuoteId(): Hex {
@@ -93,23 +85,28 @@ export default function UnderwritePage() {
   const { address, isConnected } = useAccount()
 
   return (
-    <Section kicker="Path-B · market maker" title="Underwrite">
-      <p className="-mt-3 mb-6 max-w-3xl text-body-sm text-fg-secondary">
-        Post collateral, beat the pool&apos;s load, and sign firm EIP-712 quotes. Quotes are{' '}
-        <span className="text-fg">firm — there is no last-look</span>. You underwrite the{' '}
-        <span className="text-fg">capped</span> in-range IL claim:{' '}
-        <span className="num text-fg">payout = min(realized IL, MaxIL)</span>. In FULL mode your
-        locked collateral == MaxIL fully covers it.{' '}
-        <span className="text-warn-400">Your capital is NOT guaranteed</span> — you are short
+    <PageShell>
+      <PageHeader title="Underwrite">
+        Post collateral, beat the pool&apos;s load, and sign{' '}
+        <strong className="text-fg">firm EIP-712 quotes — no last-look</strong>. You underwrite the
+        capped in-range IL claim (<span className="num">payout = min(realized IL, MaxIL)</span>); in
+        FULL mode your locked collateral == MaxIL fully covers it.{' '}
+        <strong className="text-warn-400">Your capital is NOT guaranteed</strong> — you are short
         convexity and paid the premium for it.
-      </p>
+      </PageHeader>
 
-      <div className="space-y-6">
-        <CollateralPanel address={address} isConnected={isConnected} />
-        <QuoteBuilder isConnected={isConnected} />
-        <BookAndFills address={address} isConnected={isConnected} />
+      <div className="mt-8 space-y-8">
+        <Reveal>
+          <CollateralPanel address={address} isConnected={isConnected} />
+        </Reveal>
+        <Reveal>
+          <QuoteBuilder isConnected={isConnected} />
+        </Reveal>
+        <Reveal>
+          <BookAndFills address={address} isConnected={isConnected} />
+        </Reveal>
       </div>
-    </Section>
+    </PageShell>
   )
 }
 
@@ -206,7 +203,7 @@ function CollateralPanel({
   }
 
   return (
-    <Panel title="Underwriter collateral" right={<Badge tone="mm">Path-B vault</Badge>}>
+    <FramedPanel title="Underwriter collateral" right={<Badge tone="mm">Path-B vault</Badge>}>
       <ConnectGate message="Connect a wallet on Arbitrum Sepolia to post collateral.">
         {collateral.isLoading ? (
           <div className="grid grid-cols-3 gap-4">
@@ -304,7 +301,7 @@ function CollateralPanel({
           </p>
         </div>
       </ConnectGate>
-    </Panel>
+    </FramedPanel>
   )
 }
 
@@ -386,7 +383,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
     enabled: pricingGeo !== undefined,
   })
 
-  // Geometry-independent "pool load to beat" (the headline I10 reference).
+  // Geometry-independent "pool load to beat" (the headline max-load reference).
   const poolLoad = useQuery({
     queryKey: ['mm', 'poolLoad', marketId],
     queryFn: () => sdk.mm.getPoolLoadToBeat(marketId),
@@ -452,10 +449,10 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
     }
     setSigning(true)
     try {
-      // Re-enforce I10 + below-pool against a FRESH read right before signing.
+      // Re-enforce the max-load cap + below-pool against a FRESH read right before signing.
       const freshParams = await sdk.mm.getLoadParams()
       if (BigInt(loadNum) > freshParams.maxLoadBps) {
-        throw new Error(`loadBps ${loadNum} exceeds maxLoadBps ${freshParams.maxLoadBps} (I10)`)
+        throw new Error(`loadBps ${loadNum} exceeds maxLoadBps ${freshParams.maxLoadBps}`)
       }
       const freshPool = await sdk.mm.getPoolLoadToBeat(marketId)
       if (
@@ -538,18 +535,8 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
     }
   }
 
-  // Payoff geometry (numbers) from the priced position for the chart.
-  const payoffGeometry =
-    geo?.priceable === true
-      ? {
-          pa: priceFromSqrt(geo.geometry.sqrtPaX96),
-          p0: priceFromSqrt(geo.geometry.sqrtP0X96),
-          pb: priceFromSqrt(geo.geometry.sqrtPbX96),
-        }
-      : undefined
-
   return (
-    <Panel
+    <FramedPanel
       title="Build & sign a firm quote"
       right={<Badge tone="teal">EIP-712 · no last-look</Badge>}
     >
@@ -607,7 +594,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
               label="Your load (bps)"
               hint={
                 maxLoadBps !== undefined
-                  ? `≤ ${maxLoadBps} (I10) · below pool ${poolBps ?? '—'}`
+                  ? `≤ ${maxLoadBps} · below pool ${poolBps ?? '—'}`
                   : 'over the on-chain FairPremium'
               }
             >
@@ -618,7 +605,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
                 placeholder={poolBps !== undefined ? String(Math.max(poolBps - 1, 0)) : '0'}
               />
             </Field>
-            <Field label="Price band (bps)" hint="Fork-2 band around quotePrice">
+            <Field label="Price band (bps)" hint="Band around the oracle anchor (quotePrice)">
               <AmountInput
                 suffix="bps"
                 value={priceBandBps}
@@ -629,7 +616,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Max notional (V0)" hint="capacity cap for this quote (I7)">
+            <Field label="Max notional (V0)" hint="capacity cap for this quote">
               <AmountInput
                 value={maxNotional}
                 onChange={(e) => setMaxNotional(e.target.value)}
@@ -649,7 +636,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
           {/* Guard banners */}
           {Number.isFinite(loadNum) && !i10Ok && (
             <ErrorNote>
-              loadBps {loadNum} exceeds maxLoadBps {maxLoadBps} — I10 would reject the signature.
+              loadBps {loadNum} exceeds maxLoadBps {maxLoadBps} — the signature would be rejected.
             </ErrorNote>
           )}
           {Number.isFinite(loadNum) && i10Ok && !belowPool && (
@@ -660,9 +647,13 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
           )}
 
           <ConnectGate message="Connect a wallet to sign quotes.">
-            <Button onClick={buildAndSign} disabled={!canSign || signing}>
+            <ShimmerButton
+              onClick={buildAndSign}
+              disabled={!canSign || signing}
+              className="text-body-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            >
               {signing ? 'Signing…' : 'Sign firm quote'}
-            </Button>
+            </ShimmerButton>
           </ConnectGate>
           {signError && <ErrorNote>{signError}</ErrorNote>}
         </div>
@@ -704,7 +695,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
                 </div>
                 <p className="mt-1 text-body-sm text-fg-tertiary">
                   Your load must be <span className="text-fg">strictly below</span> this and{' '}
-                  <span className="text-fg">≤ {maxLoadBps ?? '—'} bps</span> (I10).
+                  <span className="text-fg">≤ {maxLoadBps ?? '—'} bps</span>.
                 </p>
                 {poolLoad.data.load && (
                   <div className="mt-3 grid grid-cols-3 gap-3 text-body-sm">
@@ -739,7 +730,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
             ) : oracle.data === undefined ? (
               <div className="mt-2">
                 <PendingNote>
-                  Oracle price not readable — it&apos;s the Fork-2 band anchor you sign against, so
+                  Oracle price not readable — it&apos;s the price-band anchor you sign against, so
                   signing is blocked until it recovers.
                 </PendingNote>
               </div>
@@ -750,7 +741,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
                 </div>
                 <p className="mt-1 text-body-sm text-fg-tertiary">
                   LPs fill only while the live price stays within ±
-                  {Number.isFinite(bandNum) ? bandNum : '?'} bps of this (Fork-2 / I9).
+                  {Number.isFinite(bandNum) ? bandNum : 'your band'} bps of this.
                 </p>
               </>
             )}
@@ -801,25 +792,11 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
                       ? fmtUsd(estPremium(pricing.data.fairPremium, loadNum, geo.geometry.maxIL))
                       : '—'
                   }
-                  sub={`fair × (1 + ${Number.isFinite(loadNum) ? loadNum : '?'} bps), capped at MaxIL · each LP priced from their own position`}
+                  sub={`fair × (1 + ${Number.isFinite(loadNum) ? loadNum : 'your load'} bps), capped at MaxIL · each LP priced from their own position`}
                 />
               </div>
             )}
           </Card>
-
-          {payoffGeometry && (
-            <Card>
-              <span className="text-label uppercase text-fg-tertiary">
-                Representative payoff — capped at MaxIL
-              </span>
-              <PayoffChart geometry={payoffGeometry} className="mt-2 w-full" />
-              <p className="mt-2 text-body-sm text-fg-tertiary">
-                You pay the LP <span className="num text-fg">min(realized IL, MaxIL)</span> at
-                expiry, in range. Beyond the cap (amber) the LP keeps the residual — the cap is what
-                keeps your downside bounded.
-              </p>
-            </Card>
-          )}
         </div>
       </div>
 
@@ -833,7 +810,7 @@ function QuoteBuilder({ isConnected }: { isConnected: boolean }) {
           />
         </div>
       )}
-    </Panel>
+    </FramedPanel>
   )
 }
 
@@ -972,9 +949,13 @@ function BookAndFills({
   const data = book.data
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-stretch">
       {/* Book */}
-      <Panel title="Your book — active fills" right={<Badge tone="mm">Path-B</Badge>}>
+      <FramedPanel
+        title="Your book — active fills"
+        right={<Badge tone="mm">Path-B</Badge>}
+        className="h-full"
+      >
         <ConnectGate message="Connect a wallet to see your book.">
           {book.isLoading ? (
             <Skeleton className="h-32" />
@@ -1063,14 +1044,14 @@ function BookAndFills({
             )}
           </div>
         </ConnectGate>
-      </Panel>
+      </FramedPanel>
 
       {/* Fills */}
-      <Panel title="Recent fills" right={<Badge tone="warn">coarse</Badge>}>
+      <FramedPanel title="Recent fills" right={<Badge tone="warn">coarse</Badge>} className="h-full">
         <ConnectGate message="Connect a wallet to watch your fills.">
           {address && <FillsFeed mm={address} />}
         </ConnectGate>
-      </Panel>
+      </FramedPanel>
     </div>
   )
 }

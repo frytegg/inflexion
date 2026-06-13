@@ -29,7 +29,8 @@ import type { Regime, MarketConfig, SurfaceRow } from '@inflexion/sdk'
 import { useInflexionSdk } from '@/lib/use-sdk'
 import { MARKETS, type MarketDef } from '@/lib/markets'
 import { fmtUsd, fmtWadPct, truncHex } from '@/lib/format'
-import { Section, Panel, Badge, Skeleton, PendingNote, ErrorNote, Stat } from '@/components/ui'
+import { Badge, Skeleton, ErrorNote, Stat } from '@/components/ui'
+import { PageShell, PageHeader, FramedPanel, Reveal } from '@/components/app/chrome'
 
 // ─── Regime → badge tone ────────────────────────────────────────────────────────
 function regimeTone(regime: Regime): 'teal' | 'warn' | 'loss' {
@@ -101,9 +102,7 @@ function MarketRow({
         {live ? (
           inactive ? (
             <Badge tone="neutral">paused</Badge>
-          ) : (
-            <Badge tone="teal">live</Badge>
-          )
+          ) : null
         ) : row?.available === false ? (
           <Badge tone="warn">
             {row.reason === 'market-unknown' ? 'unregistered' : 'oracle degraded'}
@@ -183,113 +182,119 @@ export default function MarketsPage() {
   const pricedCount = (surface?.rows ?? []).filter((r) => r.available).length
 
   return (
-    <Section kicker="Markets" title="Market browser">
-      {/* Framing — in-range convexity hedge, capped payoff (load-bearing). */}
-      <p className="-mt-2 mb-6 max-w-3xl text-body-sm text-fg-secondary">
-        In-range convexity hedge: an LP pays a fixed upfront premium to transfer the in-range
-        impermanent-loss risk of a Uniswap v3 position. At expiry the payout is{' '}
-        <span className="text-fg">min(realized IL, MaxIL)</span> — the cap is load-bearing for the
-        no-bad-debt guarantee. The clearing load below is the Path-A pool floor an MM must undercut
-        to win the fill.
-      </p>
+    <PageShell>
+      <PageHeader title="Markets">
+        An in-range convexity hedge: an LP pays a fixed premium to transfer the in-range IL of a
+        Uniswap v3 position, paid <span className="num">min(realized IL, MaxIL)</span> at expiry. The
+        clearing load below is the Path-A pool floor an MM must undercut to win the fill.
+      </PageHeader>
 
-      {/* Surface-level summary stats */}
-      <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Stat label="Markets" value={MARKETS.length} sub="3 fee tiers × 3 durations" />
-        <Stat
-          label="Priceable now"
-          value={surfaceQ.isLoading ? <Skeleton className="h-7 w-10" /> : pricedCount}
-          sub="live oracle + σ_ref"
-        />
-        <Stat
-          label="σ_ref (dWETH)"
-          value={
-            sigmaQ.isLoading ? (
-              <Skeleton className="h-7 w-16" />
-            ) : sigmaQ.data?.available ? (
-              fmtWadPct(sigmaQ.data.sigmaRefWad)
+      <div className="mt-8 space-y-8">
+        {/* Surface-level summary stats */}
+        <Reveal className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Stat label="Markets" value={MARKETS.length} sub="3 fee tiers × 3 durations" />
+          <Stat
+            label="Priceable now"
+            value={surfaceQ.isLoading ? <Skeleton className="h-7 w-10" /> : pricedCount}
+            sub="live oracle + σ_ref"
+          />
+          <Stat
+            label="σ_ref (dWETH)"
+            value={
+              sigmaQ.isLoading ? (
+                <Skeleton className="h-7 w-16" />
+              ) : sigmaQ.data?.available ? (
+                fmtWadPct(sigmaQ.data.sigmaRefWad)
+              ) : (
+                '—'
+              )
+            }
+            sub="EWMA reference vol"
+          />
+          <Stat
+            label="Regime"
+            value={
+              sigmaQ.isLoading ? (
+                <Skeleton className="h-7 w-16" />
+              ) : sigmaQ.data?.available ? (
+                <Badge tone={regimeTone(sigmaQ.data.regime)}>{sigmaQ.data.regime}</Badge>
+              ) : (
+                '—'
+              )
+            }
+            sub="σ_ref vs load bands"
+          />
+        </Reveal>
+
+        <Reveal>
+          <FramedPanel
+            title="Live markets"
+            right={
+              surface?.blockNumber !== undefined ? (
+                <span className="num text-label text-fg-tertiary">
+                  block {surface.blockNumber.toString()}
+                </span>
+              ) : undefined
+            }
+          >
+            {surfaceQ.isError ? (
+              <ErrorNote>
+                Could not read the live load surface from RPC.{' '}
+                {surfaceQ.error instanceof Error ? surfaceQ.error.message : 'Unknown error.'}
+              </ErrorNote>
             ) : (
-              '—'
-            )
-          }
-          sub="EWMA reference vol"
-        />
-        <Stat
-          label="Regime"
-          value={
-            sigmaQ.isLoading ? (
-              <Skeleton className="h-7 w-16" />
-            ) : sigmaQ.data?.available ? (
-              <Badge tone={regimeTone(sigmaQ.data.regime)}>{sigmaQ.data.regime}</Badge>
-            ) : (
-              '—'
-            )
-          }
-          sub="σ_ref vs load bands"
-        />
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="border-b border-line text-left">
+                      <th className="px-4 py-2 text-label uppercase text-fg-tertiary">Market</th>
+                      <th className="px-4 py-2 text-label uppercase text-fg-tertiary">
+                        σ_ref · regime
+                      </th>
+                      <th className="px-4 py-2 text-right text-label uppercase text-fg-tertiary">
+                        Clearing load
+                      </th>
+                      <th className="px-4 py-2 text-right text-label uppercase text-fg-tertiary">
+                        Pool premium
+                      </th>
+                      <th className="px-4 py-2 text-label uppercase text-fg-tertiary">Status</th>
+                      <th className="px-4 py-2 text-right text-label uppercase text-fg-tertiary">
+                        Action
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {MARKETS.map((m) => (
+                      <MarketRow
+                        key={m.marketId}
+                        market={m}
+                        row={rowByMarket.get(m.marketId.toLowerCase())}
+                        config={configsQ.data?.[m.marketId.toLowerCase()]}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {surface?.note && (
+              <p className="mt-4 text-body-sm text-fg-tertiary">{surface.note}</p>
+            )}
+          </FramedPanel>
+        </Reveal>
+
+        {/* The table is live RPC; the richer per-market analytics live on /data (subgraph-backed). */}
+        <Reveal>
+          <p className="text-body-sm text-fg-tertiary">
+            The table above is live RPC. Per-market volume, MM win-rate / share, and the historical
+            clearing-load surface are on the{' '}
+            <Link href="/data" className="text-accent-400 hover:text-accent-300">
+              Data
+            </Link>{' '}
+            page (subgraph-backed).
+          </p>
+        </Reveal>
       </div>
-
-      <Panel
-        title="Live markets"
-        right={
-          surface?.blockNumber !== undefined ? (
-            <span className="num text-label text-fg-tertiary">
-              block {surface.blockNumber.toString()}
-            </span>
-          ) : undefined
-        }
-      >
-        {surfaceQ.isError ? (
-          <ErrorNote>
-            Could not read the live load surface from RPC.{' '}
-            {surfaceQ.error instanceof Error ? surfaceQ.error.message : 'Unknown error.'}
-          </ErrorNote>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b border-line text-left">
-                  <th className="px-4 py-2 text-label uppercase text-fg-tertiary">Market</th>
-                  <th className="px-4 py-2 text-label uppercase text-fg-tertiary">
-                    σ_ref · regime
-                  </th>
-                  <th className="px-4 py-2 text-right text-label uppercase text-fg-tertiary">
-                    Clearing load
-                  </th>
-                  <th className="px-4 py-2 text-right text-label uppercase text-fg-tertiary">
-                    Pool premium
-                  </th>
-                  <th className="px-4 py-2 text-label uppercase text-fg-tertiary">Status</th>
-                  <th className="px-4 py-2 text-right text-label uppercase text-fg-tertiary">
-                    Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {MARKETS.map((m) => (
-                  <MarketRow
-                    key={m.marketId}
-                    market={m}
-                    row={rowByMarket.get(m.marketId.toLowerCase())}
-                    config={configsQ.data?.[m.marketId.toLowerCase()]}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {surface?.note && <p className="mt-4 text-body-sm text-fg-tertiary">{surface.note}</p>}
-      </Panel>
-
-      {/* Subgraph-pending surfaces — volume / share / history. Render honestly. */}
-      <div className="mt-6">
-        <PendingNote>
-          Per-market volume, MM win-rate / share, and the historical clearing-load surface need the
-          subgraph (events are live on-chain since deploy; indexing is pending). Everything above —
-          clearing load, fair premium, σ_ref, regime — is live RPC right now.
-        </PendingNote>
-      </div>
-    </Section>
+    </PageShell>
   )
 }

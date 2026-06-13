@@ -21,8 +21,6 @@ import { useTx } from '@/lib/use-tx'
 import { formatUnits } from 'viem'
 import { fmtUsd, fmtUsdc, fmtWadPct, fmtWad, fmtDuration, parseUsdc } from '@/lib/format'
 import {
-  Section,
-  Panel,
   Card,
   Stat,
   Field,
@@ -36,13 +34,14 @@ import {
   ErrorNote,
   ConnectGate,
 } from '@/components/ui'
+import { PageShell, PageHeader, FramedPanel, Reveal, ShimmerTxButton } from '@/components/app/chrome'
+import { NavHistoryView } from '@/components/data/nav-history'
 import type { Tranche } from '@inflexion/sdk'
 
 // Result types pulled straight off the real SDK method signatures (no hand-typing).
 type Sdk = ReturnType<typeof useInflexionSdk>
 type VaultStateResult = Awaited<ReturnType<Sdk['depositor']['getVaultState']>>
 type PositionResult = Awaited<ReturnType<Sdk['depositor']['getPosition']>>
-type NavHistoryResult = Awaited<ReturnType<Sdk['data']['getNavHistory']>>
 type PositionOk = Extract<PositionResult, { available: true }>
 
 // ─── Tranche descriptors (copy is load-bearing: senior vs junior risk split) ────
@@ -63,12 +62,6 @@ const TRANCHE_META: Record<
     risk: 'First-loss capital. Absorbs underwriting losses before senior is ever touched, in exchange for most of the premium yield. Withdrawals can revert (JuniorBelowLocked) while collateral is locked.',
     tone: 'warn',
   },
-}
-
-const REGIME_TONE: Record<string, 'teal' | 'warn' | 'loss'> = {
-  calm: 'teal',
-  normal: 'warn',
-  stressed: 'loss',
 }
 
 export default function EarnPage() {
@@ -111,32 +104,53 @@ export default function EarnPage() {
   const cooldown = cooldownQ.data
 
   return (
-    <Section kicker="Earn" title="Underwrite in-range IL">
-      {/* ─── CAPITAL NOT GUARANTEED — prominent, not a footnote ─────────────── */}
-      <CapitalNotGuaranteed
-        available={vault?.available === true ? vault.capitalNotGuaranteed : true}
-      />
+    <PageShell>
+      <PageHeader title="Earn">
+        Underwrite the in-range impermanent loss of Uniswap v3 LPs through the dual-tranche pool and
+        earn the premium they pay. <strong className="text-fg">Junior</strong> takes first loss for
+        most of the yield; <strong className="text-fg">senior</strong> is protected by the
+        junior-first waterfall.
+      </PageHeader>
 
-      <div className="mt-8 grid gap-6 lg:grid-cols-3">
-        {/* ── Left/center: vault state + tranches ── */}
-        <div className="space-y-6 lg:col-span-2">
-          <VaultOverview data={vault} isLoading={vaultQ.isLoading} />
-          <TrancheSplit data={vault} isLoading={vaultQ.isLoading} />
-          <NavHistory data={navHistoryQ.data} isLoading={navHistoryQ.isLoading} />
-        </div>
+      <div className="mt-8 space-y-8">
+        {/* CAPITAL NOT GUARANTEED — prominent, not a footnote */}
+        <Reveal>
+          <CapitalNotGuaranteed
+            available={vault?.available === true ? vault.capitalNotGuaranteed : true}
+          />
+        </Reveal>
 
-        {/* ── Right rail: my position + deposit/withdraw ── */}
-        <div className="space-y-6">
-          <MyPosition data={position} isLoading={positionQ.isLoading} hasAddress={!!address} />
+        {/* The two actions, side by side — first (primary intent) */}
+        <Reveal className="grid gap-6 lg:grid-cols-2 lg:items-stretch">
           <DepositPanel onSuccess={invalidateAll} />
           <WithdrawPanel
             position={position?.available === true ? position : undefined}
             cooldown={cooldown}
             onSuccess={invalidateAll}
           />
-        </div>
+        </Reveal>
+
+        {/* Your holdings */}
+        <Reveal>
+          <MyPosition data={position} isLoading={positionQ.isLoading} hasAddress={!!address} />
+        </Reveal>
+
+        {/* Pool-wide inventory + regime */}
+        <Reveal>
+          <VaultOverview data={vault} isLoading={vaultQ.isLoading} />
+        </Reveal>
+
+        {/* The senior vs junior split */}
+        <Reveal>
+          <TrancheSplit data={vault} isLoading={vaultQ.isLoading} />
+        </Reveal>
+
+        {/* Track record */}
+        <Reveal>
+          <NavHistoryView data={navHistoryQ.data} isLoading={navHistoryQ.isLoading} />
+        </Reveal>
       </div>
-    </Section>
+    </PageShell>
   )
 }
 
@@ -176,14 +190,7 @@ function CapitalNotGuaranteed({ available }: { available: boolean }) {
 
 function VaultOverview({ data, isLoading }: { data?: VaultStateResult; isLoading: boolean }) {
   return (
-    <Panel
-      title="Vault — ConvexityVault (Path-A pooled underwriter)"
-      right={
-        data?.available === true ? (
-          <Badge tone={REGIME_TONE[data.regime] ?? 'neutral'}>{data.regime} regime</Badge>
-        ) : null
-      }
-    >
+    <FramedPanel title="Vault — ConvexityVault (Path-A pooled underwriter)">
       {isLoading ? (
         <SkeletonStats n={4} />
       ) : data?.available === false ? (
@@ -221,14 +228,14 @@ function VaultOverview({ data, isLoading }: { data?: VaultStateResult; isLoading
               label="Total load"
               value={fmtWadPct(data.totalLoadWad)}
               accent="teal"
-              sub="price-to-beat (I10-clamped)"
+              sub="price-to-beat (clamped)"
             />
           </div>
         </div>
       ) : (
         <Skeleton className="h-24 w-full" />
       )}
-    </Panel>
+    </FramedPanel>
   )
 }
 
@@ -236,7 +243,7 @@ function VaultOverview({ data, isLoading }: { data?: VaultStateResult; isLoading
 
 function TrancheSplit({ data, isLoading }: { data?: VaultStateResult; isLoading: boolean }) {
   return (
-    <Panel title="Tranches — waterfall: junior absorbs loss first">
+    <FramedPanel title="Tranches — waterfall: junior absorbs loss first">
       {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <Skeleton className="h-44 w-full" />
@@ -245,14 +252,14 @@ function TrancheSplit({ data, isLoading }: { data?: VaultStateResult; isLoading:
       ) : data?.available === false ? (
         <PendingNote>Tranche sizes unavailable: {data.reason}.</PendingNote>
       ) : data?.available === true ? (
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2 sm:items-stretch">
           <TrancheCard tranche="senior" assets={data.seniorAssets} totalAssets={data.totalAssets} />
           <TrancheCard tranche="junior" assets={data.juniorAssets} totalAssets={data.totalAssets} />
         </div>
       ) : (
         <Skeleton className="h-44 w-full" />
       )}
-    </Panel>
+    </FramedPanel>
   )
 }
 
@@ -268,7 +275,9 @@ function TrancheCard({
   const meta = TRANCHE_META[tranche]
   const share = totalAssets > 0n ? Number((assets * 10000n) / totalAssets) / 100 : 0
   return (
-    <Card className={tranche === 'junior' ? 'border-warn-500/30' : 'border-accent-700/40'}>
+    <Card
+      className={`h-full ${tranche === 'junior' ? 'border-warn-500/30' : 'border-accent-700/40'}`}
+    >
       <div className="flex items-center justify-between">
         <span className="font-display text-h4 font-bold text-fg">{meta.name}</span>
         <Badge tone={meta.tone}>{tranche === 'junior' ? 'First-loss' : 'Protected'}</Badge>
@@ -299,7 +308,7 @@ function MyPosition({
   hasAddress: boolean
 }) {
   return (
-    <Panel title="My position">
+    <FramedPanel title="My position">
       {!hasAddress ? (
         <EmptyState
           title="Not connected"
@@ -316,7 +325,7 @@ function MyPosition({
             desc="Deposit into a tranche below to start underwriting."
           />
         ) : (
-          <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
             <PositionRow
               tranche="senior"
               shares={data.seniorShares}
@@ -334,7 +343,7 @@ function MyPosition({
       ) : (
         <Skeleton className="h-20 w-full" />
       )}
-    </Panel>
+    </FramedPanel>
   )
 }
 
@@ -392,7 +401,7 @@ function DepositPanel({ onSuccess }: { onSuccess: () => void }) {
   }
 
   return (
-    <Panel title="Deposit">
+    <FramedPanel title="Deposit" className="h-full">
       <ConnectGate message="Connect a wallet on Arbitrum Sepolia to deposit underwriting capital.">
         <div className="space-y-4">
           <Field label="Tranche">
@@ -422,9 +431,9 @@ function DepositPanel({ onSuccess }: { onSuccess: () => void }) {
             />
           </Field>
 
-          <TxButton status={tx.status} onClick={submit} disabled={!canSubmit} className="w-full">
+          <ShimmerTxButton status={tx.status} onClick={submit} disabled={!canSubmit}>
             Deposit {meta.name}
-          </TxButton>
+          </ShimmerTxButton>
 
           {tx.error && <ErrorNote>{tx.error}</ErrorNote>}
           {tx.status === 'success' && (
@@ -434,7 +443,7 @@ function DepositPanel({ onSuccess }: { onSuccess: () => void }) {
           )}
         </div>
       </ConnectGate>
-    </Panel>
+    </FramedPanel>
   )
 }
 
@@ -476,7 +485,7 @@ function WithdrawPanel({
   }
 
   return (
-    <Panel title="Withdraw">
+    <FramedPanel title="Withdraw" className="h-full">
       <ConnectGate message="Connect a wallet to manage withdrawals.">
         <div className="space-y-4">
           <Field label="Tranche">
@@ -563,25 +572,7 @@ function WithdrawPanel({
           </div>
         </div>
       </ConnectGate>
-    </Panel>
-  )
-}
-
-// ─── NAV history (subgraph/API pending → PendingNote) ─────────────────────────
-
-function NavHistory({ data, isLoading }: { data?: NavHistoryResult; isLoading: boolean }) {
-  return (
-    <Panel title="Per-tranche NAV history">
-      {isLoading ? (
-        <Skeleton className="h-16 w-full" />
-      ) : (
-        <PendingNote>
-          {data?.available === false
-            ? `Live once the subgraph + API are deployed (route: ${data.endpoint}). The on-chain deposits / premium accrual / settlements are emitted now; the time-series index is pending.`
-            : 'NAV history is subgraph-backed and not yet indexed.'}
-        </PendingNote>
-      )}
-    </Panel>
+    </FramedPanel>
   )
 }
 

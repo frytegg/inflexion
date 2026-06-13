@@ -3,32 +3,40 @@
 // /data — the data-moat showcase. "The first public view into the microstructure
 // of the DeFi LP vol-risk premium."
 //
-// ONE thing is live today, and we say so loudly:
+// All surfaces are LIVE:
 //   (1) the CURRENT clearing-load surface over a transparent σ_ref — a live,
 //       uncached RPC multicall (sdk.data.getCurrentLoadSurface + getSurfaceSigmaRef).
-//
-// The other four signals are STRUCTURAL today / DYNAMIC with volume: each is a
-// time-series that needs the subgraph + public API (live on-chain since the
-// 2026-06-05 deploy, indexing pending). Those calls return a typed ApiPending
-// envelope ({ available:false }), which we render as <PendingNote/> with the
-// honest framing + the API route it will be served from — never an error, never
-// fabricated data.
+//   (2) the time-series signals (load-surface history, pool-vs-MM spread, demand
+//       skew, net gamma) + NAV history — served by the deployed subgraph via the
+//       hosted REST API (sdk.data.* → NEXT_PUBLIC_API_URL). They return real data
+//       now; most are sparse until volume accrues, so we render the live rows when
+//       present and an honest "live · no rows yet" note when empty — never an
+//       error, never fabricated history. If the API is unreachable the SDK degrades
+//       each surface to a typed pending envelope, rendered as a <PendingNote/>.
 //
 // No wallet, no writes. Read-only. See apps/web/INTEGRATION_MAP.md §2 (/data row),
 // §3.4 (DataClient), §6.7 (framing), §6.4 (subgraph-pending degradation).
 
+import { type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { useInflexionSdk } from '@/lib/use-sdk'
 import { MARKETS } from '@/lib/markets'
-import { tokens } from '@inflexion/sdk'
-import { Section, Panel, Badge, Skeleton, PendingNote, ErrorNote } from '@/components/ui'
-import { fmtWadPct } from '@/lib/format'
+import {
+  tokens,
+  type LoadSurfaceHistory,
+  type QuoteCompetition,
+  type DemandRequests,
+  type NetGamma,
+} from '@inflexion/sdk'
+import { Skeleton, ErrorNote } from '@/components/ui'
+import { PageShell, PageHeader, FramedPanel, Reveal } from '@/components/app/chrome'
+import { fmtWadPct, fmtUsd, fmtBps, fmtWad, fmtDate, truncAddr } from '@/lib/format'
 
 import { LoadSurfaceGrid } from '@/components/data/load-surface-grid'
 import { SignalSection } from '@/components/data/signal-section'
-
-const REGIME_TONE = { calm: 'teal', normal: 'neutral', stressed: 'warn' } as const
+import { NavHistoryView } from '@/components/data/nav-history'
+import { SignalData, LiveEmpty, DataTable, Row, MiniStat } from '@/components/data/signal-data'
 
 export default function DataPage() {
   const sdk = useInflexionSdk()
@@ -51,6 +59,13 @@ export default function DataPage() {
     refetchInterval: 30_000,
   })
 
+  // ── NAV history (depositor-risk, claim B) — live via the subgraph + hosted API ──
+  const navQ = useQuery({
+    queryKey: ['data', 'nav-history'],
+    queryFn: () => sdk.data.getNavHistory({ bucket: '1d' }),
+    refetchInterval: 60_000,
+  })
+
   // Narrow the Degraded<T> envelope to its success branch (explicit, so TS keeps
   // the narrowing across the JSX use sites below).
   const sigma = sigmaQ.data
@@ -58,31 +73,25 @@ export default function DataPage() {
     sigma && sigma.available ? { sigmaRefWad: sigma.sigmaRefWad, regime: sigma.regime } : undefined
 
   return (
-    <Section kicker="Data moat" title="The microstructure of the LP vol-risk premium">
-      <p className="-mt-2 max-w-3xl text-body text-fg-secondary">
-        Inflexion is the first venue to put a public price on the in-range impermanent-loss risk of
-        Uniswap v3 LPs. That makes the clearing surface itself a dataset that has never existed
-        before: what it costs, right now, to transfer LP convexity to a market maker. The structures
-        are live from day one; the dynamics mature with volume.
-      </p>
+    <PageShell>
+      <PageHeader title="Data">
+        The first public price on the in-range impermanent-loss risk of Uniswap v3 LPs — what it
+        costs, right now, to transfer LP convexity to a market maker. The structures are live from
+        day one; the dynamics mature with volume.
+      </PageHeader>
 
       {/* ── HERO: live clearing-load surface over a transparent σ_ref ── */}
-      <div className="mt-8">
-        <Panel
+      <Reveal className="mt-8">
+        <FramedPanel
           title="Signal 1 — Clearing-load surface"
           right={
-            <div className="flex items-center gap-2">
-              <Badge tone="teal">Live</Badge>
-              {sigmaQ.isLoading ? (
-                <Skeleton className="h-5 w-28" />
-              ) : sigmaLive ? (
-                <Badge tone={REGIME_TONE[sigmaLive.regime]}>
-                  σ_ref {fmtWadPct(sigmaLive.sigmaRefWad)} · {sigmaLive.regime}
-                </Badge>
-              ) : (
-                <Badge tone="warn">σ_ref uninitialised</Badge>
-              )}
-            </div>
+            sigmaQ.isLoading ? (
+              <Skeleton className="h-5 w-28" />
+            ) : sigmaLive ? (
+              <span className="num text-label uppercase text-fg-tertiary">
+                σ_ref {fmtWadPct(sigmaLive.sigmaRefWad)}
+              </span>
+            ) : null
           }
         >
           <p className="mb-4 max-w-2xl text-body-sm text-fg-tertiary">
@@ -112,20 +121,20 @@ export default function DataPage() {
               Block {surfaceQ.data.blockNumber.toString()} · live uncached RPC multicall
             </p>
           )}
-        </Panel>
-      </div>
+        </FramedPanel>
+      </Reveal>
 
-      {/* ── The five signals: 1 LIVE, 4 subgraph/API-pending ── */}
+      {/* ── The five signals — all live via RPC + the hosted subgraph/API ── */}
       <div className="mt-10 space-y-6">
         <h2 className="font-display text-h3 font-bold text-fg">The five signals</h2>
         <p className="-mt-2 max-w-3xl text-body-sm text-fg-tertiary">
-          Five lenses on the same risk-transfer market. Signal 1 is live RPC today. The four
-          time-series below need the subgraph + public API — the events are emitted on-chain since
-          the deploy, indexing is pending. We render the honest pending state, never fabricated
-          history.
+          Five lenses on the same risk-transfer market. Signal 1 is live RPC; the four time-series
+          are served by the deployed subgraph via the hosted REST API. They carry real data now and
+          fill in with volume — we render live rows when present, an honest &ldquo;live · no rows
+          yet&rdquo; note when empty, never fabricated history.
         </p>
 
-        {/* Signal 1 recap (live) — points at the hero above */}
+        {/* Signal 1 recap (live) — points at the hero above + the historical series */}
         <SignalSection
           n={1}
           title="Clearing-load surface"
@@ -133,147 +142,265 @@ export default function DataPage() {
           subtitle="What it costs, right now, to transfer LP convexity — pool load in bps over fair value, per market."
         >
           <p className="text-body-sm text-fg-secondary">
-            Rendered live above. Historical evolution of this same surface (the alpha time-series)
-            comes from the subgraph via{' '}
-            <code className="text-accent-400">getLoadSurfaceHistory</code> once indexed.
+            Rendered live above. Historical day-by-day evolution of this same surface (the alpha
+            time-series) is served by the subgraph via{' '}
+            <code className="text-accent-400">getLoadSurfaceHistory</code>.
           </p>
-          <PendingHistory
-            query={() =>
-              sdk.data.getLoadSurfaceHistory({ marketId: MARKETS[0]!.marketId, bucket: '1d' })
-            }
-            qk={['data', 'load-surface-history']}
-          />
+          <div className="mt-3">
+            <SignalData<LoadSurfaceHistory>
+              query={() =>
+                sdk.data.getLoadSurfaceHistory({ marketId: MARKETS[0]!.marketId, bucket: '1d' })
+              }
+              qk={['data', 'load-surface-history']}
+            >
+              {renderLoadSurface}
+            </SignalData>
+          </div>
         </SignalSection>
 
         {/* Signal 2 — pool-vs-MM spread + win-rate (subgraph + engine) */}
         <SignalSection
           n={2}
           title="Pool-vs-MM spread"
-          status="pending"
+          status="live"
           subtitle="The mechanical pool baseline vs the behavioral MM load — the spread MMs win on, and how often they win it."
         >
-          <PendingHistory
+          <SignalData<QuoteCompetition>
             query={() => sdk.data.getQuoteCompetition({ marketId: MARKETS[0]!.marketId })}
             qk={['data', 'quote-competition']}
-          />
+          >
+            {renderQuoteCompetition}
+          </SignalData>
         </SignalSection>
 
         {/* Signal 3 — convexity term structure (subgraph) */}
         <SignalSection
           n={3}
           title="Convexity term structure"
-          status="pending"
+          status="live"
           subtitle="How the load curves with duration (7d / 30d / 90d) at fixed width — the term structure of the convexity premium."
         >
-          <PendingHistory
+          <SignalData<LoadSurfaceHistory>
             query={() =>
               sdk.data.getLoadSurfaceHistory({ marketId: MARKETS[1]!.marketId, bucket: '1d' })
             }
             qk={['data', 'term-structure']}
-          />
+          >
+            {renderLoadSurface}
+          </SignalData>
         </SignalSection>
 
         {/* Signal 4 — demand skew incl. latent (engine telemetry, off-chain by design) */}
         <SignalSection
           n={4}
           title="Demand skew"
-          status="pending"
-          subtitle="Realized fills vs latent interest — geometries LPs priced but did not buy. The latent half never touches the chain (I7); it is off-chain engine telemetry by design."
+          status="live"
+          subtitle="Realized fills vs latent interest — geometries LPs priced but did not buy. The latent half never touches the chain; it is off-chain engine telemetry by design."
         >
-          <PendingHistory
+          <SignalData<DemandRequests>
             query={() => sdk.data.getDemandRequests({ marketId: MARKETS[0]!.marketId })}
             qk={['data', 'demand-requests']}
-          />
+          >
+            {renderDemand}
+          </SignalData>
         </SignalSection>
 
         {/* Signal 5 — net gamma (off-chain compute over the open swap set) */}
         <SignalSection
           n={5}
           title="Net gamma"
-          status="pending"
-          subtitle="The total convexity the protocol is short (pool + every MM) at what aggregate load, plus Σfree / Σlocked — computed off-chain over the open swap set."
+          status="live"
+          subtitle="The total convexity the protocol is short (pool + every MM) at what aggregate load, plus Σactive V0 / MaxIL — computed off-chain over the open swap set."
         >
-          <PendingHistory query={() => sdk.data.getNetGamma({})} qk={['data', 'net-gamma']} />
+          <SignalData<NetGamma> query={() => sdk.data.getNetGamma({})} qk={['data', 'net-gamma']}>
+            {renderNetGamma}
+          </SignalData>
         </SignalSection>
       </div>
 
-      {/* ── NAV history (depositor-risk surface) — also pending; carries claim (B) ── */}
-      <div className="mt-10">
-        <Panel title="Pool NAV history" right={<Badge tone="warn">Pending</Badge>}>
-          <p className="mb-3 max-w-2xl text-body-sm text-fg-tertiary">
-            Per-tranche net asset value, day by day — the depositor-risk surface. Distinct from the
-            LP claim:{' '}
-            <strong className="text-fg-secondary">depositor capital is NOT guaranteed</strong>{' '}
-            (junior is first-loss, senior is systemic-tail exposed).
-          </p>
-          <PendingHistory
-            query={() => sdk.data.getNavHistory({ bucket: '1d' })}
-            qk={['data', 'nav-history']}
-          />
-        </Panel>
-      </div>
+      {/* ── NAV history (depositor-risk surface) — live; carries claim (B) ── */}
+      <Reveal className="mt-10">
+        <NavHistoryView
+          title="Pool NAV history"
+          data={navQ.data}
+          isLoading={navQ.isLoading}
+          intro={
+            <p className="mb-3 max-w-2xl text-body-sm text-fg-tertiary">
+              Per-tranche net asset value, day by day — the depositor-risk surface. Distinct from
+              the LP claim:{' '}
+              <strong className="text-fg-secondary">depositor capital is NOT guaranteed</strong>{' '}
+              (junior is first-loss, senior is systemic-tail exposed).
+            </p>
+          }
+        />
+      </Reveal>
 
       {/* ── Footer: the honest framing + the API ── */}
-      <div className="mt-10 space-y-3 rounded-lg border border-line bg-base p-5 text-body-sm text-fg-tertiary">
+      <Reveal className="mt-10 space-y-3 rounded-lg border border-line bg-base p-5 text-body-sm text-fg-tertiary">
         <p>
           <strong className="text-fg-secondary">
             Structures from day one, dynamics mature with volume.
           </strong>{' '}
-          The clearing surface is live now. The four time-series go live the moment the subgraph
-          deploys — the rich events (<code className="text-accent-400">SwapPriced</code>,{' '}
+          The clearing surface is live over RPC; the four time-series are served live by the
+          deployed subgraph over the public REST API (
+          <code className="text-accent-400">/data/*</code>). The rich events (
+          <code className="text-accent-400">SwapPriced</code>,{' '}
           <code className="text-accent-400">QuoteFilled</code>) have been emitted on-chain since the
-          2026-06-05 deploy; only the indexer is pending. The same shapes will be served, cached,
-          over the public REST API (<code className="text-accent-400">/data/*</code>).
+          2026-06-05 deploy and are indexed now; the surfaces deepen as volume accrues.
         </p>
-        <p className="text-loss">
-          This page surfaces protocol microstructure, not investment advice. Depositor and MM
-          capital is NOT guaranteed. LP payout is capped: you receive{' '}
-          <code>min(realized in-range IL, MaxIL)</code> — the cap is load-bearing for the
-          no-bad-debt guarantee, which holds only under FULL mode, capped payoff, solvent USDC, and
-          oracle/settlement liveness.
-        </p>
-      </div>
-    </Section>
+      </Reveal>
+    </PageShell>
   )
 }
 
-/**
- * A tiny inline component that fires one of the API-pending DataClient methods and
- * renders its typed ApiPending envelope as a <PendingNote/> — including the future
- * API route + the query that WOULD be sent. Never throws; the SDK returns
- * { available:false } today and we render that honestly.
- */
-function PendingHistory({
-  query,
-  qk,
-}: {
-  query: () => Promise<import('@inflexion/sdk').ApiPending>
-  qk: unknown[]
-}) {
-  const q = useQuery({ queryKey: qk, queryFn: query, staleTime: Infinity })
+// ─── Per-signal renderers (live rows when present; honest empty note otherwise) ─
 
-  if (q.isLoading) return <Skeleton className="mt-3 h-16 w-full" />
-  // ApiPending is always { available:false } today — render it as the honest pending state.
-  const env = q.data
+/** Signals 1 & 3 — historical clearing-load surface for one market. */
+function renderLoadSurface(d: LoadSurfaceHistory): ReactNode {
+  if (d.snapshots.length === 0)
+    return (
+      <LiveEmpty>
+        no historical load buckets indexed yet — the daily series begins at the first fill in this
+        market.
+      </LiveEmpty>
+    )
   return (
-    <PendingNote>
-      <div className="space-y-1">
-        <p>
-          {env?.detail ??
-            'Live once the subgraph + API are deployed. The on-chain events are emitted now.'}
-        </p>
-        {env?.endpoint && (
-          <p className="text-label uppercase opacity-80">
-            served by{' '}
-            <code className="text-accent-400">
-              {env.endpoint}
-              {env.query && Object.keys(env.query).length > 0
-                ? `?${new URLSearchParams(env.query).toString()}`
-                : ''}
-            </code>
+    <DataTable head={['Day', 'Total load', 'Util', 'Fills', 'V0 volume']}>
+      {[...d.snapshots]
+        .reverse()
+        .slice(0, 10)
+        .map((s) => (
+          <Row
+            key={s.bucketStart}
+            cells={[
+              fmtDate(s.bucketStart),
+              fmtWadPct(s.totalLoadWad),
+              fmtWadPct(s.utilWad),
+              s.fillCount,
+              fmtUsd(s.v0Volume),
+            ]}
+          />
+        ))}
+    </DataTable>
+  )
+}
+
+/** Signal 2 — pool-vs-MM quote competition, aggregated per MM. */
+function renderQuoteCompetition(d: QuoteCompetition): ReactNode {
+  if (d.competition.length === 0)
+    return (
+      <LiveEmpty>
+        {d.enabled
+          ? 'the pool baseline is logged per fill; the MM-vs-pool spread populates once ≥2 MMs compete. No competition rows yet.'
+          : 'the engine COMPETITION_LOG sink is not reporting rows yet.'}
+      </LiveEmpty>
+    )
+  return (
+    <DataTable head={['MM', 'Quotes', 'Accepted', 'Load bps (min/avg/max)']}>
+      {d.competition.slice(0, 10).map((c) => (
+        <Row
+          key={c.mm}
+          cells={[
+            truncAddr(c.mm),
+            c.quotes,
+            c.accepted,
+            `${fmtBps(c.minLoadBps)} / ${fmtBps(c.avgLoadBps)} / ${fmtBps(c.maxLoadBps)}`,
+          ]}
+        />
+      ))}
+    </DataTable>
+  )
+}
+
+/** Signal 4 — demand skew: realized fills (on-chain) + latent interest (telemetry). */
+function renderDemand(d: DemandRequests): ReactNode {
+  if (d.realized.length === 0 && d.latent.length === 0)
+    return (
+      <LiveEmpty>
+        no demand buckets yet — realized fills (on-chain) + latent previews (telemetry) populate as
+        LPs price and buy.
+      </LiveEmpty>
+    )
+  return (
+    <div className="space-y-4">
+      {d.realized.length > 0 && (
+        <div>
+          <p className="mb-2 text-label uppercase text-fg-tertiary">Realized fills (on-chain)</p>
+          <DataTable head={['Width', 'Distance', 'Duration', 'Fills', 'V0']}>
+            {d.realized.map((b) => (
+              <Row
+                key={b.id}
+                cells={[
+                  b.widthBucket,
+                  b.distanceBucket,
+                  b.durationBucket,
+                  b.realizedFillCount,
+                  fmtUsd(b.realizedV0),
+                ]}
+              />
+            ))}
+          </DataTable>
+        </div>
+      )}
+      {d.latent.length > 0 && (
+        <div>
+          <p className="mb-2 text-label uppercase text-fg-tertiary">
+            Latent interest (priced, not bought)
           </p>
-        )}
+          <DataTable head={['Width', 'Distance', 'Duration', 'Previews', 'Quote reqs']}>
+            {d.latent.map((b, i) => (
+              <Row
+                key={`${b.widthBucket}-${b.distanceBucket}-${b.durationBucket}-${i}`}
+                cells={[
+                  b.widthBucket,
+                  b.distanceBucket,
+                  b.durationBucket,
+                  b.previews,
+                  b.quoteRequests,
+                ]}
+              />
+            ))}
+          </DataTable>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Signal 5 — net convexity / gamma supply: protocol-wide aggregate + history. */
+function renderNetGamma(d: NetGamma): ReactNode {
+  const ps = d.protocolState
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-4">
+        <MiniStat label="Active swaps" value={ps.activeSwapCount} />
+        <MiniStat label="Σ active V0" value={fmtUsd(ps.totalActiveV0)} />
+        <MiniStat label="Σ active MaxIL" value={fmtUsd(ps.totalActiveMaxIL)} />
       </div>
-    </PendingNote>
+      {d.snapshots.length === 0 ? (
+        <LiveEmpty>
+          protocol-wide net-gamma snapshots accrue as the open-swap set grows (currently{' '}
+          {ps.activeSwapCount} active).
+        </LiveEmpty>
+      ) : (
+        <DataTable head={['Bucket', 'Active', 'Σ V0', 'Γ (wad)', 'Vw load']}>
+          {[...d.snapshots]
+            .reverse()
+            .slice(0, 8)
+            .map((s) => (
+              <Row
+                key={s.bucketStart}
+                cells={[
+                  fmtDate(s.bucketStart),
+                  s.activeSwapCount,
+                  fmtUsd(s.totalV0),
+                  fmtWad(s.aggGammaWad),
+                  fmtWadPct(s.volumeWeightedLoadWad),
+                ]}
+              />
+            ))}
+        </DataTable>
+      )}
+    </div>
   )
 }
