@@ -56,6 +56,11 @@ export function fmtBps(bps: number | bigint, dp = 2): string {
   return `${(Number(bps) / 100).toFixed(dp)}%`
 }
 
+/** A very large integer (e.g. Uniswap v3 liquidity) → compact `1.53e17`. */
+export function fmtCompact(raw: bigint, dp = 2): string {
+  return Number(raw).toExponential(dp).replace('e+', 'e')
+}
+
 /** `0xC198…4848` */
 export function truncAddr(a?: string, head = 6, tail = 4): string {
   if (!a) return '—'
@@ -65,6 +70,11 @@ export function truncAddr(a?: string, head = 6, tail = 4): string {
 /** `0x67c4…9d69` for bytes32 ids. */
 export function truncHex(h?: string): string {
   return truncAddr(h, 8, 6)
+}
+
+/** unix seconds → `2026-06-05` (UTC date). */
+export function fmtDate(seconds: number | bigint): string {
+  return new Date(Number(seconds) * 1000).toISOString().slice(0, 10)
 }
 
 /** seconds → `7d` / `12h` / `300s`. */

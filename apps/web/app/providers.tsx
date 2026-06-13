@@ -1,6 +1,7 @@
 'use client'
 
 import { type ReactNode, useState } from 'react'
+import { MotionConfig } from 'framer-motion'
 import { WagmiProvider } from 'wagmi'
 import { RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -13,6 +14,9 @@ export function Providers({ children }: { children: ReactNode }) {
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider
+          // Force English — RainbowKit otherwise auto-detects the browser locale
+          // (e.g. renders "Se connecter" on a French browser).
+          locale="en-US"
           theme={darkTheme({
             accentColor: '#14B8A6',
             accentColorForeground: '#06231F',
@@ -20,7 +24,7 @@ export function Providers({ children }: { children: ReactNode }) {
             fontStack: 'system',
           })}
         >
-          {children}
+          <MotionConfig reducedMotion="user">{children}</MotionConfig>
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
