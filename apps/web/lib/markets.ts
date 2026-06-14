@@ -27,20 +27,33 @@ function deriveMarketId(fee: number, durationSeconds: number): Hex {
   )
 }
 
-export const MARKETS: MarketDef[] = FEES.flatMap((fee) =>
-  DURATIONS.map((durationSeconds) => {
-    const feeLabel = `${(fee / 10_000).toFixed(2)}%`
-    const durationLabel = `${durationSeconds / 86_400}d`
-    return {
-      marketId: deriveMarketId(fee, durationSeconds),
-      fee,
-      durationSeconds,
-      feeLabel,
-      durationLabel,
-      label: `${feeLabel} · ${durationLabel}`,
-    }
-  }),
-)
+export const MARKETS: MarketDef[] = [
+  ...FEES.flatMap((fee) =>
+    DURATIONS.map((durationSeconds) => {
+      const feeLabel = `${(fee / 10_000).toFixed(2)}%`
+      const durationLabel = `${durationSeconds / 86_400}d`
+      return {
+        marketId: deriveMarketId(fee, durationSeconds),
+        fee,
+        durationSeconds,
+        feeLabel,
+        durationLabel,
+        label: `${feeLabel} · ${durationLabel}`,
+      }
+    }),
+  ),
+  // 5-minute fee-500 market — settle-able on camera (the 7/30/90d markets can't
+  // expire during a demo). Registered on-chain via DemoLifecycle; its marketId
+  // matches the registry's lifecycle.shortMarketId_fee500_300s.
+  {
+    marketId: deriveMarketId(500, 300),
+    fee: 500,
+    durationSeconds: 300,
+    feeLabel: '0.05%',
+    durationLabel: '5min',
+    label: '0.05% · 5min (demo)',
+  },
+]
 
 /** Known-good anchor from the registry (fee 500, 7d) — sanity-matches MARKETS[0]. */
 export const DEMO_MARKET_ID = demo.marketId_fee500_7d as Hex
