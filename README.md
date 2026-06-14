@@ -13,11 +13,10 @@ Inflexion is the first trustless, fully-collateralized on-chain market for Unisw
 
 |                    |                                                                                    |
 | ------------------ | ---------------------------------------------------------------------------------- |
+| App                | https://inflexion-ten.vercel.app                                                   |
 | Documentation      | https://inflexion.mintlify.app                                                     |
-| App                | Vercel — _coming_                                                                  |
 | REST API + Swagger | https://inflexion-backend.onrender.com/docs                                        |
 | Subgraph           | https://api.studio.thegraph.com/query/1754692/inflexion-arb-sepolia/version/latest |
-| Protocol spec      | [`spec.md`](spec.md)                                                               |
 
 ## Monorepo layout
 
@@ -45,7 +44,7 @@ The full build also requires the **Foundry**, **Stylus** (Rust; WSL2/Linux on Wi
 
 ## Status
 
-Live on **Arbitrum Sepolia** (chainId `421614`), with the full create → settle lifecycle exercised on both rails (cvAMM pool and market maker). Frontend and documentation are deploying to Vercel.
+Live on **Arbitrum Sepolia** (chainId `421614`), with the full create → settle lifecycle exercised on both rails (cvAMM pool and market maker). The app runs on Vercel, the documentation on Mintlify, and the backend (REST API + matching engine) on Render.
 
 ## Disclaimer
 

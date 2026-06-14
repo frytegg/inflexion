@@ -57,3 +57,10 @@ CLAUDE.local.md
 
 # --- Pitch / deck (build artifacts) ---
 pitch/
+
+# --- Kept local + in history, excluded from the published repo ---
+/spec.md
+/CLAUDE.md
+/logo_inflexion.png
+/logo_inflexion.svg
+/railway.json

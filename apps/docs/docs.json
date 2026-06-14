@@ -194,7 +194,7 @@
     "primary": {
       "type": "button",
       "label": "Launch App",
-      "href": "https://app.inflexion.xyz"
+      "href": "https://inflexion-ten.vercel.app"
     }
   },
   "footer": {
