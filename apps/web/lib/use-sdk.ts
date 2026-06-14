@@ -8,10 +8,13 @@ import { usePublicClient, useWalletClient, useAccount } from 'wagmi'
 import type { Hex, PublicClient, WalletClient } from 'viem'
 import { createInflexionSdk, type InflexionSdk } from '@inflexion/sdk'
 
-const ENGINE_URL = process.env.NEXT_PUBLIC_ENGINE_URL
+// Path-B quote relayer. Defaults to the hosted backend so the MM-quote comparison
+// works without a Vercel env var; NEXT_PUBLIC_ENGINE_URL overrides for other backends.
+const ENGINE_URL =
+  process.env.NEXT_PUBLIC_ENGINE_URL ?? 'https://inflexion-backend.onrender.com/engine'
 // Public REST API base (the hosted backend). Wires the DataClient history surfaces
-// (NAV history, etc.); absent ⇒ those surfaces degrade to typed pending.
-const API_URL = process.env.NEXT_PUBLIC_API_URL
+// (NAV history, etc.). Defaults to the hosted backend; override via NEXT_PUBLIC_API_URL.
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'https://inflexion-backend.onrender.com'
 
 // Arbitrum Sepolia's base fee fluctuates, and injected wallets (MetaMask) frequently
 // suggest a maxFeePerGas BELOW it ("the fee cap cannot be lower than the block base
