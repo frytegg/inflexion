@@ -8,6 +8,8 @@
 //   MARKET_ID=0xb8bbd684f213d5833886ade7b531a6949d85522249881a2b5d46a5cc76e439c2 \
 //   MM_PRIVATE_KEY=0x… LOAD_BPS=1000 \
 //   node scripts/mm-quote.mjs
+// Import the built SDK by path (the repo root doesn't symlink @inflexion/sdk).
+// Requires the SDK to be built once: `pnpm --filter @inflexion/sdk build`.
 import {
   createInflexionSdk,
   encodeQuote,
@@ -15,7 +17,7 @@ import {
   core,
   tokens,
   oracleManagerAbi,
-} from '@inflexion/sdk'
+} from '../packages/sdk/dist/index.js'
 
 const MARKET_ID = process.env.MARKET_ID
 const PK = process.env.MM_PRIVATE_KEY
