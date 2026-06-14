@@ -34,7 +34,13 @@ import {
   ErrorNote,
   ConnectGate,
 } from '@/components/ui'
-import { PageShell, PageHeader, FramedPanel, Reveal, ShimmerTxButton } from '@/components/app/chrome'
+import {
+  PageShell,
+  PageHeader,
+  FramedPanel,
+  Reveal,
+  ShimmerTxButton,
+} from '@/components/app/chrome'
 import { NavHistoryView } from '@/components/data/nav-history'
 import type { Tranche } from '@inflexion/sdk'
 

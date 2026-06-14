@@ -185,8 +185,8 @@ export default function MarketsPage() {
     <PageShell>
       <PageHeader title="Markets">
         An in-range convexity hedge: an LP pays a fixed premium to transfer the in-range IL of a
-        Uniswap v3 position, paid <span className="num">min(realized IL, MaxIL)</span> at expiry. The
-        clearing load below is the Path-A pool floor an MM must undercut to win the fill.
+        Uniswap v3 position, paid <span className="num">min(realized IL, MaxIL)</span> at expiry.
+        The clearing load below is the Path-A pool floor an MM must undercut to win the fill.
       </PageHeader>
 
       <div className="mt-8 space-y-8">
@@ -277,9 +277,7 @@ export default function MarketsPage() {
               </div>
             )}
 
-            {surface?.note && (
-              <p className="mt-4 text-body-sm text-fg-tertiary">{surface.note}</p>
-            )}
+            {surface?.note && <p className="mt-4 text-body-sm text-fg-tertiary">{surface.note}</p>}
           </FramedPanel>
         </Reveal>
 

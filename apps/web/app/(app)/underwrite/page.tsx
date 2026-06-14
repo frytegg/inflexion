@@ -1047,7 +1047,11 @@ function BookAndFills({
       </FramedPanel>
 
       {/* Fills */}
-      <FramedPanel title="Recent fills" right={<Badge tone="warn">coarse</Badge>} className="h-full">
+      <FramedPanel
+        title="Recent fills"
+        right={<Badge tone="warn">coarse</Badge>}
+        className="h-full"
+      >
         <ConnectGate message="Connect a wallet to watch your fills.">
           {address && <FillsFeed mm={address} />}
         </ConnectGate>

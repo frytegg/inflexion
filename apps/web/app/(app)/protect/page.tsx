@@ -30,7 +30,13 @@ import {
   Skeleton,
   Stat,
 } from '@/components/ui'
-import { PageShell, PageHeader, FramedPanel, Reveal, ShimmerTxButton } from '@/components/app/chrome'
+import {
+  PageShell,
+  PageHeader,
+  FramedPanel,
+  Reveal,
+  ShimmerTxButton,
+} from '@/components/app/chrome'
 import { PayoffChart } from '@/components/charts/payoff-chart'
 import { ActiveProtection } from '@/components/protect/active-protection'
 import {
@@ -365,8 +371,8 @@ function ProtectFlow() {
                   <strong className="text-accent-400">Teal — covered:</strong> your realized IL is
                   paid in full (at or below MaxIL).{' '}
                   <strong className="text-loss">Red — capped:</strong> the IL has risen above the
-                  amber MaxIL line, so your payout is <strong className="text-fg">capped</strong> and
-                  the excess is uncovered — the cap that makes the no-bad-debt guarantee hold.
+                  amber MaxIL line, so your payout is <strong className="text-fg">capped</strong>{' '}
+                  and the excess is uncovered — the cap that makes the no-bad-debt guarantee hold.
                 </p>
               </>
             ) : (

@@ -61,10 +61,7 @@ export function ActiveProtection({ swapId }: { swapId: bigint }) {
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-fg">{pair}</span>
-            <span
-              className="num text-body-sm text-fg-tertiary"
-              title="Settlement (swap) record id"
-            >
+            <span className="num text-body-sm text-fg-tertiary" title="Settlement (swap) record id">
               swap #{swapId.toString()}
             </span>
             {isActive && <Badge tone="teal">Active</Badge>}
@@ -132,7 +129,11 @@ export function ActiveProtection({ swapId }: { swapId: bigint }) {
               </span>
             }
             value={
-              settlement ? fmtUsd(settlement.realisedIL) : <span className="text-fg-tertiary">—</span>
+              settlement ? (
+                fmtUsd(settlement.realisedIL)
+              ) : (
+                <span className="text-fg-tertiary">—</span>
+              )
             }
             sub={
               settlement

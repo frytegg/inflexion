@@ -220,11 +220,26 @@ export function PayoffChart({
           strokeWidth={1.5}
           strokeOpacity={0.85}
         />
-        <circle cx={cursorX} cy={cursorY} r={5} fill={cursorColor} stroke={C.canvas} strokeWidth={2} />
+        <circle
+          cx={cursorX}
+          cy={cursorY}
+          r={5}
+          fill={cursorColor}
+          stroke={C.canvas}
+          strokeWidth={2}
+        />
 
         {/* status pill at the cursor — "covered" (teal) / "capped" (red) + the loss % */}
         <g transform={`translate(${labelX} 0)`}>
-          <rect x={-54} y={4} width={108} height={18} rx={3} fill={cursorColor} fillOpacity={0.16} />
+          <rect
+            x={-54}
+            y={4}
+            width={108}
+            height={18}
+            rx={3}
+            fill={cursorColor}
+            fillOpacity={0.16}
+          />
           <text
             x={0}
             y={17}
