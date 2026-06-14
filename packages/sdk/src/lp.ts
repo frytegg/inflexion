@@ -831,12 +831,19 @@ export class LpClient {
    */
   async getSettlement(swapId: bigint): Promise<Settlement | undefined> {
     try {
+      // Public Sepolia RPCs cap eth_getLogs ranges (drpc ~10k, publicnode ~50k blocks),
+      // so a deployBlock→latest scan is rejected outright. A swap settled during a live
+      // session is recent, so scan a bounded window that fits every RPC's limit instead
+      // of the full deploy history (older settlements fall back to undefined → graceful).
+      const latest = await this.publicClient.getBlockNumber()
+      const WINDOW = 9_000n
+      const fromBlock = latest > deployBlock + WINDOW ? latest - WINDOW : deployBlock
       const logs = await this.publicClient.getContractEvents({
         address: core.inflexionCore,
         abi: inflexionCoreAbi,
         eventName: 'SwapSettled',
         args: { swapId },
-        fromBlock: deployBlock,
+        fromBlock,
         toBlock: 'latest',
       })
       const ev = logs[logs.length - 1]
